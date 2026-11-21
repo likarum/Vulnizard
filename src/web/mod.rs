@@ -925,6 +925,11 @@ mod tests {
         // A detection template is shown as such, with a link to it, and is not an exploit
         assert!(detail.body.contains("https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2024/CVE-2024-4242.yaml"));
         assert!(detail.body.contains("Detection") && !detail.body.contains("public exploit"));
+        // CVEs by source: the page names the sources of a CVE, and the list narrows to one
+        assert!(detail.body.contains("href=\"/cve?source=nuclei\"") && !detail.body.contains("/cve?source=metasploit"));
+        assert!(app.get("/cve?source=nuclei", Some(&alice)).await.body.contains("CVE-2024-4242"));
+        assert!(!app.get("/cve?source=metasploit", Some(&alice)).await.body.contains("CVE-2024-4242"));
+        assert_eq!(app.get("/cve?source=bogus", Some(&alice)).await.status, StatusCode::BAD_REQUEST);
 
         assert_eq!(app.get("/cve/CVE-1999-0000", Some(&alice)).await.status, StatusCode::NOT_FOUND);
         assert_eq!(app.get("/nope", Some(&alice)).await.status, StatusCode::NOT_FOUND);

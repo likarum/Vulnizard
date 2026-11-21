@@ -375,6 +375,7 @@ fn read_tool_definitions() -> Vec<Value> {
                 "cvss": { "type": "string", "enum": ["none", "low", "medium", "high", "critical"], "description": "CVSS v3 severity level" },
                 "cwe": { "type": "string", "description": "Weakness identifier, e.g. CWE-79" },
                 "kev": { "type": "boolean", "description": "Only CISA Known Exploited Vulnerabilities" },
+                "source": { "type": "string", "enum": ["nvd", "cisa_kev", "epss", "vulnrichment", "osv", "exploitdb", "metasploit", "nuclei"], "description": "Only CVEs this source has data on, e.g. nuclei for those with a detection template" },
                 "org": org,
                 "project": { "type": "string", "description": "Only CVEs matching the vendor/product subscriptions of this project; requires org" },
                 "page": page,
@@ -518,6 +519,7 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                 cvss: opt_str(args, "cvss").map(String::from),
                 cwe: opt_str(args, "cwe").map(str::to_uppercase),
                 kev: args.get("kev").and_then(Value::as_bool).unwrap_or(false),
+                source: opt_str(args, "source").map(str::to_lowercase),
                 tag: None,
                 project_id: match opt_str(args, "project") {
                     Some(_) => Some(self.target(args)?.id),

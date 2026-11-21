@@ -14,6 +14,10 @@ before 1.0, a minor version may change behaviour.
 - **Nuclei templates** as a source (`nuclei`): a CVE page, `vulnizard info`, the API and MCP say
   when a ready-made detection template exists, with a link to it. A template is a check, not an
   exploit. Not enabled by default on an existing instance: *Admin → Vulnerability sources*.
+- **CVEs by source**: the CVE list narrows to the CVEs a source has data on (web filter,
+  `?source=` in the API, `source` in MCP `search_cves`, `search --from-source` on the command
+  line), and a CVE page names its sources. Which source wrote what is not recorded: it is told
+  from the fields only that source fills.
 - **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
 - **Synchronizations cannot be requested over and over**: a source already waiting, running, or
   started less than `web.min_manual_sync_minutes` ago (5 by default) is not synchronized again,

@@ -131,6 +131,9 @@ enum Commands {
         /// Only show CVEs with public exploits
         #[arg(long)]
         has_exploit: bool,
+        /// Only CVEs a source has data on (nvd, cisa_kev, epss, vulnrichment, osv, exploitdb, metasploit, nuclei)
+        #[arg(long = "from-source")]
+        from_source: Option<String>,
 
         /// Filter by package ecosystem (npm, PyPI, Go, Maven, crates.io)
         #[arg(long)]
@@ -454,6 +457,7 @@ fn main() -> Result<()> {
             product,
             version,
             has_exploit,
+            from_source,
             ecosystem,
             package_name,
             ssvc_exploitation,
@@ -462,7 +466,7 @@ fn main() -> Result<()> {
             limit,
             format,
         } => {
-            cmd_search(&db, query, min_cvss, min_epss, kev, vendor, product, version, has_exploit, ecosystem, package_name, ssvc_exploitation, ssvc_automatable, sort, limit, format)?;
+            cmd_search(&db, query, min_cvss, min_epss, kev, vendor, product, version, has_exploit, from_source, ecosystem, package_name, ssvc_exploitation, ssvc_automatable, sort, limit, format)?;
         }
         Commands::Serve { bind } => {
             let mut config = config;
@@ -618,6 +622,7 @@ fn cmd_search(
     product: Option<String>,
     version: Option<String>,
     has_exploit: bool,
+    source: Option<String>,
     ecosystem: Option<String>,
     package_name: Option<String>,
     ssvc_exploitation: Option<String>,
@@ -657,6 +662,7 @@ fn cmd_search(
         product,
         version,
         has_exploit,
+        source,
         ecosystem,
         package_name,
         ssvc_exploitation,

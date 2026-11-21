@@ -271,6 +271,42 @@ impl Drop for KeywordSlot {
     }
 }
 
+/// Sources a CVE list can be narrowed to, with their label
+pub const CVE_SOURCES: [(&str, &str); 8] = [
+    ("nvd", "NVD"),
+    ("cisa_kev", "CISA KEV"),
+    ("epss", "EPSS"),
+    ("vulnrichment", "Vulnrichment (SSVC)"),
+    ("osv", "OSV packages"),
+    ("exploitdb", "Exploit-DB"),
+    ("metasploit", "Metasploit"),
+    ("nuclei", "Nuclei templates"),
+];
+
+/// SQL condition selecting the CVEs a source has data on. Which source wrote
+/// what is not recorded: it is told from the fields only that source fills.
+/// `table` prefixes the columns of `cves` ("c." or "cves.").
+pub fn source_condition(source: &str, table: &str) -> Option<String> {
+    Some(match source {
+        "nvd" => format!("{table}published_at IS NOT NULL"),
+        "cisa_kev" => format!("{table}kev_known_exploited = 1"),
+        "epss" => format!("{table}epss_score IS NOT NULL"),
+        "vulnrichment" => format!(
+            "({table}ssvc_exploitation IS NOT NULL OR {table}ssvc_automatable IS NOT NULL OR {table}ssvc_technical_impact IS NOT NULL)"
+        ),
+        "osv" => format!("EXISTS (SELECT 1 FROM affected_packages pkg WHERE pkg.cve_id = {table}cve_id)"),
+        "exploitdb" => format!("({table}exploit_urls IS NOT NULL AND {table}exploit_urls NOT IN ('', '[]'))"),
+        "metasploit" => format!("{table}metasploit_module IS NOT NULL"),
+        "nuclei" => format!("{table}nuclei_template IS NOT NULL"),
+        _ => return None,
+    })
+}
+
+pub fn unknown_source(source: &str) -> String {
+    let known: Vec<&str> = CVE_SOURCES.iter().map(|(key, _)| *key).collect();
+    format!("Unknown source '{source}': one of {}.", known.join(", "))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CveFilter {
     pub search: Option<String>,
@@ -280,6 +316,8 @@ pub struct CveFilter {
     pub cvss: Option<String>,
     pub cwe: Option<String>,
     pub kev: bool,
+    /// Only CVEs a given source has data on (see `source_condition`)
+    pub source: Option<String>,
     /// (user id, tag)
     pub tag: Option<(i64, String)>,
     pub project_id: Option<i64>,
@@ -1270,6 +1308,11 @@ impl Database {
         if filter.kev {
             sql.push_str(" AND c.kev_known_exploited = 1");
         }
+        if let Some(source) = &filter.source {
+            let condition = source_condition(source, "c.").ok_or_else(|| anyhow::Error::new(super::watchlist::UserFacing(unknown_source(source))))?;
+            sql.push_str(" AND ");
+            sql.push_str(&condition);
+        }
         if let Some((user_id, tag)) = &filter.tag {
             sql.push_str(" AND c.cve_id IN (SELECT cve_id FROM cve_tags WHERE user_id = ? AND tag = ?)");
             args.push(Box::new(*user_id));
@@ -1595,5 +1638,63 @@ mod tests {
         assert_eq!(db.list_vendors_sorted(None, "products", true, 10, 0).unwrap().len(), 2);
         assert!(db.list_weaknesses_sorted(Some("cwe-7"), "cwe", false, 10, 0).unwrap().len() == 1);
         assert!(db.list_weaknesses_sorted(Some("zzz"), "cwe", false, 10, 0).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::models::{AffectedPackage, Cve};
+
+    /// One CVE per source, plus one nobody but EPSS knows: the filter of the
+    /// lists, the CLI search and `Cve::sources` must agree on every one.
+    #[test]
+    fn a_list_narrowed_to_a_source_holds_what_that_source_filled() {
+        let db = Database::open_in_memory().unwrap();
+        let fill: [(&str, fn(&mut Cve)); 8] = [
+            ("nvd", |c| c.published_at = Some(chrono::Utc::now())),
+            ("cisa_kev", |c| c.kev_known_exploited = true),
+            ("epss", |c| c.epss_score = Some(0.5)),
+            ("vulnrichment", |c| c.ssvc_automatable = Some("yes".into())),
+            ("osv", |c| {
+                c.affected_packages.push(AffectedPackage {
+                    ecosystem: "npm".into(),
+                    name: "left-pad".into(),
+                    vulnerable_range: None,
+                    fixed_version: None,
+                })
+            }),
+            ("exploitdb", |c| {
+                c.exploit_public = true;
+                c.exploit_urls.push("https://www.exploit-db.com/exploits/1".into());
+            }),
+            ("metasploit", |c| {
+                c.exploit_public = true;
+                c.metasploit_module = Some("exploit/x".into());
+            }),
+            ("nuclei", |c| c.nuclei_template = Some("http/cves/2024/x.yaml".into())),
+        ];
+        assert_eq!(fill.map(|(key, _)| key), CVE_SOURCES.map(|(key, _)| key));
+        for (n, (_, set)) in fill.iter().enumerate() {
+            let mut cve = Cve::new(format!("CVE-2024-100{n}"));
+            // Lists leave out CVEs nobody described yet
+            cve.description = Some("described".into());
+            set(&mut cve);
+            db.upsert_cve(&cve).unwrap();
+        }
+        for (n, (source, _)) in fill.iter().enumerate() {
+            let expected = format!("CVE-2024-100{n}");
+            let filter = CveFilter { source: Some(source.to_string()), ..Default::default() };
+            let listed: Vec<String> = db.list_cves(&filter, 50, 0).unwrap().into_iter().map(|c| c.cve_id).collect();
+            assert_eq!(listed, [expected.clone()], "{source}");
+            assert_eq!(db.get_cve(&expected).unwrap().unwrap().sources(), [*source], "{source}");
+            let query = crate::db::SearchQuery { source: Some(source.to_string()), limit: 50, ..Default::default() };
+            let found: Vec<String> = db.search(&query).unwrap().into_iter().map(|c| c.cve_id).collect();
+            assert_eq!(found, [expected], "{source} (search)");
+        }
+        // An unknown source is refused, not ignored
+        let filter = CveFilter { source: Some("bogus".into()), ..Default::default() };
+        assert!(db.list_cves(&filter, 50, 0).unwrap_err().to_string().contains("Unknown source"));
+        assert!(source_condition("x' OR 1=1 --", "c.").is_none());
     }
 }

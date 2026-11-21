@@ -49,6 +49,9 @@ vulnizard search --kev
 # Filter by vendor
 vulnizard search --vendor microsoft
 
+# Only CVEs a source has data on (nvd, cisa_kev, epss, vulnrichment, osv, exploitdb, metasploit, nuclei)
+vulnizard search --from-source nuclei
+
 # Combine filters
 vulnizard search --kev --min-cvss 8.0 --limit 50
 
