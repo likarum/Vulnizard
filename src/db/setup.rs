@@ -1,7 +1,8 @@
 //! First-run setup: while no account exists, the instance can be set up from
 //! the web with a one-time code that only someone with access to the server
-//! can read (its log, or `vulnizard setup-code`). The code is stored sealed
-//! and disappears with the creation of the administrator.
+//! can read (its log, or `vulnizard setup-code`). The code changes at every
+//! start of the server, is stored sealed, and disappears with the creation
+//! of the administrator.
 
 use anyhow::Result;
 use rand::RngCore;
@@ -69,6 +70,17 @@ impl Database {
         Ok(Some(code))
     }
 
+    /// Replaces the setup code by a new one: done at every start of the server, so that
+    /// a code seen in an old log is worth nothing. None once an account exists.
+    pub fn renew_setup_code(&self) -> Result<Option<String>> {
+        if !self.setup_is_open()? {
+            return Ok(None);
+        }
+        let code = new_code();
+        self.set_secret(KEY_SETUP_CODE, &code)?;
+        Ok(Some(code))
+    }
+
     /// Whether `given` is the setup code (spaces, dashes and case do not matter)
     pub fn setup_code_matches(&self, given: &str) -> Result<bool> {
         let Some(expected) = self.setup_code()? else {
@@ -122,11 +134,20 @@ mod tests {
         assert!(!db.setup_code_matches("").unwrap());
         assert!(!db.setup_code_matches(&code[..22]).unwrap());
 
+        // A new start of the server gives a new code; the old one is dead
+        let renewed = db.renew_setup_code().unwrap().unwrap();
+        assert_ne!(renewed, code);
+        assert!(!db.setup_code_matches(&code).unwrap());
+        assert_eq!(db.setup_code().unwrap().unwrap(), renewed);
+        let code = renewed;
+        assert!(db.setup_code_matches(&code).unwrap());
+
         let admin = db.create_first_administrator("root", None, "hash").unwrap();
         assert!(db.get_account(admin).unwrap().unwrap().is_admin);
         // Closed for good: no code, nothing matches, no second administrator
         assert!(!db.setup_is_open().unwrap());
         assert_eq!(db.setup_code().unwrap(), None);
+        assert_eq!(db.renew_setup_code().unwrap(), None);
         assert!(!db.setup_code_matches(&code).unwrap());
         let again = db.create_first_administrator("mallory", None, "hash").unwrap_err();
         assert!(again.downcast_ref::<SetupClosed>().is_some());

@@ -1,8 +1,7 @@
 //! First-run setup: while no account exists, `/setup` creates the
 //! administrator for whoever holds the one-time setup code (printed in the
-//! server log and by `vulnizard setup-code`). `/welcome` then lists what an
-//! administrator may want to do next. Once an account exists the setup page
-//! is gone for good.
+//! server log and by `vulnizard setup-code`). The code is new at every start
+//! of the server. Once an account exists the setup page is gone for good.
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -11,10 +10,9 @@ use axum::Form;
 use maud::{html, Markup};
 use serde::Deserialize;
 
-use super::admin::require_admin;
-use super::pages::{hash_new_password, session_cookie, ActionResult, HtmlResult};
+use super::pages::{hash_new_password, session_cookie, ActionResult};
 use super::views::page;
-use super::{blocking, AppError, AppState, ClientAddr, St, User, SESSION_TTL_SECS};
+use super::{blocking, AppError, AppState, ClientAddr, St, SESSION_TTL_SECS};
 use crate::auth;
 use crate::db::{Actor, SetupClosed};
 
@@ -33,7 +31,7 @@ fn form_page(error: Option<&str>, username: &str) -> Markup {
                         spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX";
                 }
                 p.muted {
-                    "The code is in the log of the server, written when it started, and "
+                    "The code is in the log of the server, written when it last started (it changes at every start), and "
                     code { "vulnizard setup-code" } " prints it. It proves you have access to the server."
                 }
                 label { "Administrator username" input type="text" name="username" required autocomplete="username" value=(username); }
@@ -121,64 +119,16 @@ pub async fn submit(State(st): St, ClientAddr(client): ClientAddr, Form(form): F
         db.create_session(id, &token_hash, SESSION_TTL_SECS)?;
         Ok((
             [(header::SET_COOKIE, session_cookie(&st, &token, SESSION_TTL_SECS))],
-            Redirect::to("/welcome"),
+            Redirect::to("/"),
         )
             .into_response())
     })
 }
 
-/// What an administrator may want to do after the setup; nothing is required
-pub async fn welcome(State(st): St, User(user): User) -> HtmlResult {
-    require_admin(&user)?;
-    blocking(|| {
-        let db = st.db()?;
-        let synced = db.last_sync_runs()?.iter().any(|r| r.status == "completed");
-        let providers = db.list_sso_providers()?.len();
-        let scim_tokens = db.list_scim_tokens()?.len();
-        let mfa_required = db.instance_requires_mfa()?;
-        let own_factor = db.mfa_status(user.id)?.enrolled();
-        let step = |done: bool, title: &str, text: &str, href: &str, action: &str| -> Markup {
-            html! {
-                div.card {
-                    h3 { @if done { span.tag { "done" } " " } (title) }
-                    p { (text) }
-                    p { a.button href=(href) { (action) } }
-                }
-            }
-        };
-        Ok(page(
-            "Welcome",
-            Some(&user),
-            html! {
-                h1 { "Welcome, " (user.username) }
-                p { "The instance is set up and you are its administrator. Everything below is optional and can be done later from " a href="/admin" { "Admin" } "." }
-                (step(synced, "Vulnerability data",
-                    "The first synchronization downloads the CVE database. It runs in the background and takes a while the first time.",
-                    "/admin/sources", "Sources and synchronization"))
-                (step(own_factor, "Protect your own account",
-                    "Add an authenticator app or a passkey to the administrator account.",
-                    "/settings/mfa", "Two-step sign-in"))
-                (step(mfa_required, "Require two-step sign-in",
-                    "Ask every account that signs in with a password to set up a second step.",
-                    "/admin/users", "Accounts and requirement"))
-                (step(providers > 0, "Single sign-on",
-                    "Declare an OpenID Connect provider, and choose whether accounts are created at first sign-in.",
-                    "/admin/sso", "Single sign-on"))
-                (step(scim_tokens > 0, "Provisioning",
-                    "Create a SCIM token so that your directory creates, updates and disables accounts.",
-                    "/admin/sso", "Provisioning tokens"))
-                (step(false, "Track something",
-                    "Create a project, add the applications you run, and subscribe to vendors or products.",
-                    "/product", "My products"))
-                p.muted { "This page stays at " a href="/welcome" { "/welcome" } "." }
-            },
-        ))
-    })
-}
-
-/// Tells in the log how to set up an instance that has no account yet
+/// At the start of the server, an instance without accounts gets a new setup
+/// code, and the log tells how to use it
 pub fn announce(state: &AppState) {
-    let code = match state.db().map_err(|_| ()).and_then(|db| db.setup_code().map_err(|_| ())) {
+    let code = match state.db().map_err(|_| ()).and_then(|db| db.renew_setup_code().map_err(|_| ())) {
         Ok(Some(code)) => code,
         _ => return,
     };
