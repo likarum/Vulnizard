@@ -64,6 +64,29 @@ pub struct Reference {
 }
 
 impl Cve {
+    /// Sources that have data on this CVE, told from the fields each one fills
+    /// (same rules as the `source` filter of the lists)
+    pub fn sources(&self) -> Vec<&'static str> {
+        let mut sources = Vec::new();
+        let mut add = |present: bool, key: &'static str| {
+            if present {
+                sources.push(key);
+            }
+        };
+        add(self.published_at.is_some(), "nvd");
+        add(self.kev_known_exploited, "cisa_kev");
+        add(self.epss_score.is_some(), "epss");
+        add(
+            self.ssvc_exploitation.is_some() || self.ssvc_automatable.is_some() || self.ssvc_technical_impact.is_some(),
+            "vulnrichment",
+        );
+        add(!self.affected_packages.is_empty(), "osv");
+        add(!self.exploit_urls.is_empty(), "exploitdb");
+        add(self.metasploit_module.is_some(), "metasploit");
+        add(self.nuclei_template.is_some(), "nuclei");
+        sources
+    }
+
     pub fn new(cve_id: String) -> Self {
         Self {
             cve_id,

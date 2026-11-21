@@ -972,6 +972,12 @@ impl Database {
             sql.push_str(&format!(" AND {} = 1", col));
         }
 
+        if let Some(ref source) = query.source {
+            let condition = source_condition(source, if use_aliased { "c." } else { "cves." })
+                .ok_or_else(|| anyhow::anyhow!(unknown_source(source)))?;
+            sql.push_str(&format!(" AND {condition}"));
+        }
+
         if let Some(ref vendor) = query.vendor {
             let col = if use_aliased { "c.affected_products" } else { "affected_products" };
             sql.push_str(&format!(
@@ -1497,6 +1503,8 @@ pub struct SearchQuery {
     pub product: Option<String>,
     pub version: Option<String>,
     pub has_exploit: bool,
+    /// Only CVEs this source has data on
+    pub source: Option<String>,
     pub ecosystem: Option<String>,
     pub package_name: Option<String>,
     pub ssvc_exploitation: Option<String>,

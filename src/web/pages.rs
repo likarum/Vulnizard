@@ -62,6 +62,7 @@ pub struct CveQuery {
     pub cvss: Option<String>,
     pub cwe: Option<String>,
     pub kev: Option<String>,
+    pub source: Option<String>,
     pub tag: Option<String>,
     pub org: Option<String>,
     pub project: Option<String>,
@@ -77,8 +78,14 @@ pub fn build_filter(db: &Database, q: &CveQuery, user: Option<&Account>) -> Resu
         cvss: nonempty(&q.cvss),
         cwe: nonempty(&q.cwe).map(|c| c.to_uppercase()),
         kev: nonempty(&q.kev).is_some(),
+        source: nonempty(&q.source).map(|s| s.to_lowercase()),
         ..Default::default()
     };
+    if let Some(source) = &filter.source {
+        if crate::db::source_condition(source, "c.").is_none() {
+            return Err(AppError::Bad(crate::db::unknown_source(source)));
+        }
+    }
     if let Some(tag) = nonempty(&q.tag) {
         let user = user.ok_or(AppError::Login)?;
         filter.tag = Some((user.id, tag));
@@ -113,6 +120,7 @@ pub async fn cve_list(State(st): St, User(user): User, Query(q): Query<CveQuery>
 
         let cvss = nonempty(&q.cvss).unwrap_or_default();
         let tag = nonempty(&q.tag).unwrap_or_default();
+        let source = filter.source.clone().unwrap_or_default();
         Ok(views::explore_page(
             views::ExploreTab::Cves,
             "CVEs",
@@ -135,6 +143,12 @@ pub async fn cve_list(State(st): St, User(user): User, Query(q): Query<CveQuery>
                         option value="" { "Any CVSS" }
                         @for level in ["critical", "high", "medium", "low", "none"] {
                             option value=(level) selected[cvss == level] { (level) }
+                        }
+                    }
+                    select name="source" title="Only CVEs this source has data on" {
+                        option value="" { "Any source" }
+                        @for (key, label) in crate::db::CVE_SOURCES {
+                            option value=(key) selected[source == key] { (label) }
                         }
                     }
                     @if !tags.is_empty() {
@@ -202,6 +216,15 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
                             }
                         }
                         @if let Some(date) = &cve.kev_date_added { dt { "KEV added" } dd { (date) } }
+                        dt { "Sources" }
+                        dd {
+                            @for key in cve.sources() {
+                                a.tag href={ "/cve?source=" (key) } title="Every CVE this source has data on" {
+                                    (crate::db::CVE_SOURCES.iter().find(|(k, _)| *k == key).map(|(_, label)| *label).unwrap_or(key))
+                                }
+                                " "
+                            }
+                        }
                         @if cve.ssvc_exploitation.is_some() || cve.ssvc_automatable.is_some() || cve.ssvc_technical_impact.is_some() {
                             dt { "SSVC" }
                             dd {
