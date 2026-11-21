@@ -37,6 +37,10 @@ allow_registration = false
 sync_interval_minutes = 60
 # Set to true behind HTTPS (Secure flag on the session cookie)
 secure_cookies = false
+# Contact given to browser push services (a mailto: or https: URI). Defaults to base_url when it
+# is https.
+# push_contact = "mailto:security@example.org"
+
 # Reverse proxies (other than one on this machine) whose X-Forwarded-For tells the client
 # address, used to count failed sign-ins per client
 # trusted_proxies = ["10.0.0.2"]

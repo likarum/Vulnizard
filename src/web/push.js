@@ -59,7 +59,8 @@
         return;
       }
     } catch (e) {
-      status.textContent = "Could not enable notifications on this browser.";
+      status.textContent =
+        "Could not enable notifications on this browser: " + ((e && (e.message || e.name)) || "unknown error") + ".";
       return;
     }
     await refresh();

@@ -104,6 +104,10 @@ pub struct WebConfig {
     /// the client address (used to throttle sign-in attempts). A proxy on
     /// this machine (loopback) is always trusted.
     pub trusted_proxies: Vec<String>,
+    /// Contact given to browser push services with each notification
+    /// (`mailto:someone@example.org` or an https URL). Defaults to the public
+    /// URL when it is https.
+    pub push_contact: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -116,6 +120,7 @@ impl Default for WebConfig {
             secure_cookies: false,
             allow_private_webhooks: false,
             trusted_proxies: Vec::new(),
+            push_contact: None,
         }
     }
 }

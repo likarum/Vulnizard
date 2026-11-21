@@ -1619,6 +1619,19 @@ mod tests {
         assert_eq!(db.list_push_subscriptions(alice_id).unwrap().len(), 1);
         assert!(app.get("/settings", Some(&alice)).await.body.contains("laptop"));
 
+        // A test through a browser destination says so when nobody is there to receive it
+        let admin = app.register("zadmin").await; // not the first account: grant it below
+        db.set_admin(db.get_credentials("zadmin").unwrap().unwrap().0.id, true).unwrap();
+        let admin = app.post("/login", None, "username=zadmin&password=a-long-password").await.cookie.unwrap_or(admin);
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Browsers").await;
+        let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
+        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
+        let flash = tested.cookie.unwrap();
+        assert!(flash.contains("failed") && flash.contains("none%20of%20your%20browsers"), "{flash}");
+        // The list tells how many projects a shared destination serves
+        let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
+        assert!(listed.contains("available to all") && listed.contains("0 of 1 project"));
+
         // The inbox is read once, by its owner only; signed out, it is empty
         db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
         assert_eq!(app.get("/push/inbox", None).await.body, "[]");

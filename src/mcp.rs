@@ -371,7 +371,7 @@ fn read_tool_definitions() -> Vec<Value> {
             json!({
                 "search": { "type": "string", "description": "Keyword in the description, or a CVE-ID prefix such as CVE-2025-1" },
                 "vendor": { "type": "string", "description": "Exact vendor name, lowercase with underscores (see list_vendors)" },
-                "product": { "type": "string", "description": "Exact product name (see list_products); requires vendor" },
+                "product": { "type": "string", "description": "Exact product name (see list_products), with or without vendor" },
                 "cvss": { "type": "string", "enum": ["none", "low", "medium", "high", "critical"], "description": "CVSS v3 severity level" },
                 "cwe": { "type": "string", "description": "Weakness identifier, e.g. CWE-79" },
                 "kev": { "type": "boolean", "description": "Only CISA Known Exploited Vulnerabilities" },
