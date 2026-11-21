@@ -20,6 +20,8 @@ pub struct SyncOptions {
     pub last_sync: Option<DateTime<Utc>>,
     /// Forcer un sync complet même si un sync précédent existe
     pub force_full: bool,
+    /// Run even if the source was synchronized recently (asked for by name)
+    pub ignore_freshness: bool,
 }
 
 impl SyncOptions {
@@ -28,6 +30,7 @@ impl SyncOptions {
             months,
             last_sync: None,
             force_full: false,
+            ignore_freshness: false,
         }
     }
 
@@ -39,6 +42,17 @@ impl SyncOptions {
     pub fn force_full(mut self) -> Self {
         self.force_full = true;
         self
+    }
+
+    pub fn ignore_freshness(mut self, ignore: bool) -> Self {
+        self.ignore_freshness = ignore;
+        self
+    }
+
+    /// True if a source that ran recently may skip this run. Sources that
+    /// download everything each time use it to avoid doing so every cycle.
+    pub fn may_skip_if_fresh(&self) -> bool {
+        !self.force_full && !self.ignore_freshness
     }
 
     /// Retourne true si on doit faire un sync incrémental
@@ -63,6 +77,15 @@ pub struct SyncResult {
     pub added: i64,
     pub updated: i64,
     pub errors: i64,
+    /// Nothing was fetched: the source ran recently enough (or has nothing to
+    /// do). Such a run is not a synchronization and must not count as one.
+    pub skipped: bool,
+}
+
+impl SyncResult {
+    pub fn skipped() -> Self {
+        Self { skipped: true, ..Default::default() }
+    }
 }
 
 impl SyncResult {

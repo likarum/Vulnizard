@@ -228,6 +228,9 @@ impl CveSource for NvdSource {
         let total_chunks = (total_days / CHUNK_DAYS) + 1;
         let mut chunk_start = start_date;
         let mut chunk_num = 0;
+        // Windows that could not be read entirely. What was read is kept, but the
+        // run must not count as done: the next one starts again from the same date.
+        let mut fetch_failures: Vec<String> = Vec::new();
 
         while chunk_start < now {
             chunk_num += 1;
@@ -241,8 +244,9 @@ impl CveSource for NvdSource {
                 Ok(r) => r,
                 Err(e) => {
                     println!("  ✗ Chunk {}/{}: Error - {}", chunk_num, total_chunks, e);
+                    fetch_failures.push(format!("{} → {}: {e}", chunk_start.format("%Y-%m-%d"), chunk_end.format("%Y-%m-%d")));
                     result.errors += 1;
-                    chunk_start = chunk_end + Duration::days(1);
+                    chunk_start = chunk_end;
                     continue;
                 }
             };
@@ -251,7 +255,7 @@ impl CveSource for NvdSource {
 
             if chunk_total == 0 {
                 println!("  ○ Chunk {}/{}: No updates", chunk_num, total_chunks);
-                chunk_start = chunk_end + Duration::days(1);
+                chunk_start = chunk_end;
                 continue;
             }
 
@@ -308,6 +312,7 @@ impl CveSource for NvdSource {
                     }
                     Err(e) => {
                         pb.abandon_with_message(format!("Error: {}", e));
+                        fetch_failures.push(format!("{} → {} (from result {start_index}): {e}", chunk_start.format("%Y-%m-%d"), chunk_end.format("%Y-%m-%d")));
                         result.errors += 1;
                         break;
                     }
@@ -321,9 +326,18 @@ impl CveSource for NvdSource {
                 chunk_total
             ));
 
-            chunk_start = chunk_end + Duration::days(1);
+            chunk_start = chunk_end;
         }
 
+        if !fetch_failures.is_empty() {
+            anyhow::bail!(
+                "{} period(s) could not be read from the NVD ({} added, {} updated before that): {}",
+                fetch_failures.len(),
+                result.added,
+                result.updated,
+                fetch_failures.join("; ")
+            );
+        }
         Ok(result)
     }
 }

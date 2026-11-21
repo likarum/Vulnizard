@@ -1190,10 +1190,17 @@ impl Database {
         Ok(())
     }
 
-    /// Récupère la date du dernier sync réussi pour une source
+    /// Forgets a run that turned out to have nothing to do
+    pub fn discard_sync(&self, sync_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM sync_history WHERE id = ?1 AND status = 'running'", params![sync_id])?;
+        Ok(())
+    }
+
+    /// When the last successful sync of a source **started**: what changed
+    /// upstream while it was running is then covered by the next one.
     pub fn get_last_sync(&self, source: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         let result: Option<String> = self.conn.query_row(
-            "SELECT completed_at FROM sync_history WHERE source = ?1 AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+            "SELECT started_at FROM sync_history WHERE source = ?1 AND status = 'completed' ORDER BY started_at DESC LIMIT 1",
             params![source],
             |row| row.get(0),
         ).optional()?;

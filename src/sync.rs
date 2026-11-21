@@ -36,17 +36,30 @@ pub fn run_source(
 
 /// Syncs the given sources (incremental), recording each run in
 /// `sync_history`, then refreshes the vendor/product catalog.
+///
+/// `by_name` is set when the sources were asked for explicitly: they then run
+/// even if they were synchronized recently.
 pub fn run_sources(
     db: &Database,
     config: &Config,
     sources: &[String],
+    by_name: bool,
     started: &dyn Fn(&str),
 ) -> Result<()> {
     for source in sources {
         started(source);
-        let opts = SyncOptions::new(config.sync.history_months).with_last_sync(db.get_last_sync(source)?);
+        let opts = SyncOptions::new(config.sync.history_months)
+            .with_last_sync(db.get_last_sync(source)?)
+            .ignore_freshness(by_name);
         let sync_id = db.start_sync(source)?;
         match run_source(db, config, source, &opts) {
+            // A source that had nothing to do did not synchronize: recording it as a run
+            // would move its "last synchronized" date forward at every cycle, and a source
+            // that waits 12 hours between downloads would then never be due again.
+            Some(Ok(r)) if r.skipped => {
+                db.discard_sync(sync_id)?;
+                tracing::debug!("sync {source}: skipped, synchronized recently");
+            }
             Some(Ok(r)) => {
                 db.complete_sync(sync_id, r.added, r.updated)?;
                 tracing::info!("sync {}: {} added, {} updated, {} errors", source, r.added, r.updated, r.errors);

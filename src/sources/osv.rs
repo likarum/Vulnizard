@@ -155,12 +155,12 @@ impl CveSource for OsvSource {
         use indicatif::{ProgressBar, ProgressStyle};
 
         // OSV est mis à jour quotidiennement - skip si sync < 12h
-        if !opts.force_full {
+        if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
                 if hours_since < 12 {
                     println!("━━━ OSV: Skipped (last sync {}h ago) ━━━", hours_since);
-                    return Ok(result);
+                    return Ok(SyncResult::skipped());
                 }
             }
         }

@@ -493,9 +493,11 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
         // Récupérer la date du dernier sync réussi
         let last_sync = db.get_last_sync(source_name)?;
 
-        // Construire les options de sync
+        // Construire les options de sync. A source named on the command line
+        // runs even if it was synchronized recently.
         let mut opts = SyncOptions::new(history_months)
-            .with_last_sync(last_sync);
+            .with_last_sync(last_sync)
+            .ignore_freshness(source.is_some());
 
         if force_full {
             opts = opts.force_full();
@@ -522,6 +524,11 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
         };
 
         match result {
+            // Nothing was fetched: not a synchronization (see sync::run_sources)
+            Ok(sync_result) if sync_result.skipped => {
+                db.discard_sync(sync_id)?;
+                println!("  └─ Up to date: synchronized recently (name the source with --source to run it anyway)\n");
+            }
             Ok(sync_result) => {
                 db.complete_sync(sync_id, sync_result.added, sync_result.updated)?;
                 if sync_result.errors > 0 {

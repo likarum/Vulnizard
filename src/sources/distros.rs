@@ -121,14 +121,14 @@ impl CveSource for DistrosSource {
         // Only useful once an inventory reports system packages
         if !db.has_distro_components()? {
             println!("━━━ Distributions: Skipped (no inventory reports system packages) ━━━");
-            return Ok(result);
+            return Ok(SyncResult::skipped());
         }
-        if !opts.force_full {
+        if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours = (chrono::Utc::now() - last).num_hours();
                 if hours < 12 && db.has_distro_advisories()? {
                     println!("━━━ Distributions: Skipped (last sync {hours}h ago) ━━━");
-                    return Ok(result);
+                    return Ok(SyncResult::skipped());
                 }
             }
         }

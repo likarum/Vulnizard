@@ -99,6 +99,9 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
         }
     };
     if let Some(order) = order {
+        let began: String = db.conn().query_row("SELECT datetime('now')", [], |r| r.get(0)).unwrap_or_default();
+        // A source asked for by name runs even if it was synchronized recently
+        let by_name = matches!(order.request, SyncRequest::Source(_));
         let sources = match order.request {
             SyncRequest::All => config.sync.sources.clone(),
             SyncRequest::Source(source) => vec![source],
@@ -111,7 +114,7 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
                 queued.remove(position);
             }
         };
-        if let Err(e) = sync::run_sources(&db, &config, &sources, &started) {
+        if let Err(e) = sync::run_sources(&db, &config, &sources, by_name, &started) {
             tracing::error!("scheduler: sync failed: {e:#}");
         }
         // Whatever happened, nothing of this request stays "queued"
@@ -136,7 +139,7 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
         }
         // A sync started by someone tells them (and the instance destinations) when it is over
         if let Some(user_id) = order.by {
-            notify_sync_finished(&db, &config, user_id, &sources);
+            notify_sync_finished(&db, &config, user_id, &sources, &began);
         }
     }
     match db.process_changes() {
@@ -164,13 +167,17 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
 }
 
 /// Summary of the last run of each synchronized source
-fn sync_summary(db: &Database, sources: &[String]) -> (String, String) {
+/// What a cycle did, source by source. `since` is when the cycle began: a
+/// source whose last run is older did not run in it (it was up to date).
+fn sync_summary(db: &Database, sources: &[String], since: &str) -> (String, String) {
     let runs = db.last_sync_runs().unwrap_or_default();
     let mut failed = false;
     let lines: Vec<String> = sources
         .iter()
         .map(|source| match runs.iter().find(|r| &r.source == source) {
+            Some(r) if r.started_at.as_str() < since => format!("{source}: already up to date"),
             Some(r) if r.status == "completed" => format!("{source}: {} added, {} updated", r.added, r.updated),
+            None => format!("{source}: already up to date"),
             _ => {
                 failed = true;
                 format!("{source}: failed")
@@ -185,8 +192,8 @@ fn sync_summary(db: &Database, sources: &[String]) -> (String, String) {
     (title.to_string(), lines.join("\n"))
 }
 
-fn notify_sync_finished(db: &Database, config: &Config, user_id: i64, sources: &[String]) {
-    let (title, body) = sync_summary(db, sources);
+fn notify_sync_finished(db: &Database, config: &Config, user_id: i64, sources: &[String], since: &str) {
+    let (title, body) = sync_summary(db, sources, since);
     // The browsers of whoever asked for it
     if let Err(e) = crate::push::deliver(db, config, user_id, &title, &body, "/admin/sources") {
         tracing::warn!("scheduler: browser notification failed: {e:#}");
@@ -210,11 +217,45 @@ mod tests {
         db.complete_sync(ok, 3, 1).unwrap();
         let ko = db.start_sync("epss").unwrap();
         db.fail_sync(ko, "timeout").unwrap();
-        let (title, body) = sync_summary(&db, &["nvd".into()]);
+        let (title, body) = sync_summary(&db, &["nvd".into()], "2000-01-01 00:00:00");
         assert_eq!((title.as_str(), body.as_str()), ("Synchronization finished", "nvd: 3 added, 1 updated"));
-        let (title, body) = sync_summary(&db, &["nvd".into(), "epss".into(), "osv".into()]);
+        // A source that did not run in this cycle was up to date: that is not a failure
+        let (title, body) = sync_summary(&db, &["nvd".into(), "epss".into(), "osv".into()], "2000-01-01 00:00:00");
         assert_eq!(title, "Synchronization finished with errors");
-        assert_eq!(body, "nvd: 3 added, 1 updated\nepss: failed\nosv: failed");
+        assert_eq!(body, "nvd: 3 added, 1 updated\nepss: failed\nosv: already up to date");
+        let (title, body) = sync_summary(&db, &["nvd".into(), "epss".into()], "2999-01-01 00:00:00");
+        assert_eq!((title.as_str(), body.as_str()), ("Synchronization finished", "nvd: already up to date\nepss: already up to date"));
+    }
+
+    #[test]
+    fn a_skipped_run_is_not_a_synchronization() {
+        // A source that waits hours between two downloads skips most cycles. If each skip
+        // counted as a sync, "last synchronized" would move at every cycle and the source
+        // would never be due again.
+        let db = Database::open_in_memory().unwrap();
+        let real = db.start_sync("epss").unwrap();
+        db.complete_sync(real, 10, 0).unwrap();
+        db.conn().execute("UPDATE sync_history SET started_at = datetime('now', '-13 hours'), completed_at = datetime('now', '-13 hours')", []).unwrap();
+        let last = db.get_last_sync("epss").unwrap().unwrap();
+        let skipped = db.start_sync("epss").unwrap();
+        db.discard_sync(skipped).unwrap();
+        assert_eq!(db.get_last_sync("epss").unwrap().unwrap(), last);
+        assert!((chrono::Utc::now() - last).num_hours() >= 12);
+        // Only a run still in progress can be discarded
+        db.discard_sync(real).unwrap();
+        assert_eq!(db.get_last_sync("epss").unwrap().unwrap(), last);
+
+        // The date kept is when the run started: what changed upstream while it ran is not lost
+        let long = db.start_sync("nvd").unwrap();
+        db.conn().execute("UPDATE sync_history SET started_at = datetime('now', '-2 hours') WHERE id = ?1", [long]).unwrap();
+        db.complete_sync(long, 1, 0).unwrap();
+        let age = (chrono::Utc::now() - db.get_last_sync("nvd").unwrap().unwrap()).num_minutes();
+        assert!((115..=125).contains(&age), "{age}");
+
+        let opts = crate::sources::SyncOptions::new(6);
+        assert!(opts.may_skip_if_fresh());
+        assert!(!opts.clone().ignore_freshness(true).may_skip_if_fresh());
+        assert!(!opts.force_full().may_skip_if_fresh());
     }
 
     #[test]
@@ -223,7 +264,7 @@ mod tests {
         let admin = db.create_account("root", None, "h", true).unwrap();
         let run = db.start_sync("nvd").unwrap();
         db.complete_sync(run, 2, 0).unwrap();
-        notify_sync_finished(&db, &Config::default(), admin, &["nvd".into()]);
+        notify_sync_finished(&db, &Config::default(), admin, &["nvd".into()], "2000-01-01 00:00:00");
         let inbox = db.push_take(admin).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!((inbox[0].title.as_str(), inbox[0].url.as_str()), ("Synchronization finished", "/admin/sources"));

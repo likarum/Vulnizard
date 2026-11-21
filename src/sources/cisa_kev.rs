@@ -60,12 +60,12 @@ impl CveSource for CisaKevSource {
         let mut result = SyncResult::default();
 
         // KEV est mis à jour quelques fois par semaine - skip si sync < 6h
-        if !opts.force_full {
+        if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
                 if hours_since < 6 {
                     println!("━━━ CISA KEV: Skipped (last sync {}h ago) ━━━", hours_since);
-                    return Ok(result);
+                    return Ok(SyncResult::skipped());
                 }
             }
         }
