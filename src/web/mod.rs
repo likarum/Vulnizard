@@ -618,7 +618,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/login", get(pages::login_form).post(pages::login))
         .route("/register", get(pages::register_form).post(pages::register))
         .route("/setup", get(setup::form).post(setup::submit))
-        .route("/welcome", get(setup::welcome))
         .route("/logout", post(pages::logout))
         .route("/auth/oidc/{provider}/login", get(oidc::login))
         .route("/auth/oidc/{provider}/callback", get(oidc::callback))
@@ -1251,7 +1250,6 @@ mod tests {
         assert!(page.status == StatusCode::OK && page.body.contains("Setup code") && !page.body.contains(&code));
         assert_eq!(app.get("/register", None).await.location.as_deref(), Some("/setup"));
         assert_eq!(app.post("/register", None, "username=eve&password=a-long-password").await.status, StatusCode::BAD_REQUEST);
-        assert_eq!(app.get("/welcome", None).await.location.as_deref(), Some("/login"));
 
         // Without the code nothing is created, and nothing else is told
         let wrong = app.post("/setup", None, "code=AAAAA-AAAAA-AAAAA-AAAAA&username=x&password=short&confirm=other").await;
@@ -1263,6 +1261,14 @@ mod tests {
         assert_eq!(short.status, StatusCode::BAD_REQUEST);
         assert_eq!(db.count_accounts().unwrap(), 0);
 
+        // A restart of the server gives a new code: one read in an old log opens nothing
+        setup::announce(&app.state);
+        let old = code;
+        let code = app.setup_code().unwrap();
+        assert_ne!(old, code);
+        assert_eq!(app.post("/setup", None, &good(&old)).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(db.count_accounts().unwrap(), 0);
+
         // Guessing is cut short, for the address that guesses only
         for _ in 0..auth::MAX_FAILURES {
             app.post_from("203.0.113.9", "/setup", None, &good("AAAAA-AAAAA-AAAAA-AAAAB")).await;
@@ -1272,12 +1278,12 @@ mod tests {
 
         // The code, typed loosely, creates the administrator and signs them in
         let done = app.post("/setup", None, &good(&code.to_lowercase().replace('-', ""))).await;
-        assert_eq!((done.status, done.location.as_deref()), (StatusCode::SEE_OTHER, Some("/welcome")));
+        assert_eq!((done.status, done.location.as_deref()), (StatusCode::SEE_OTHER, Some("/")));
         let root = done.cookie.expect("session cookie");
         let account = db.get_credentials("root").unwrap().unwrap().0;
         assert!(account.is_admin);
-        let welcome = app.get("/welcome", Some(&root)).await;
-        assert!(welcome.status == StatusCode::OK && welcome.body.contains("Single sign-on") && welcome.body.contains("/admin/sso"));
+        // No page of the setup outlives it
+        assert_eq!(app.get("/welcome", Some(&root)).await.status, StatusCode::NOT_FOUND);
         assert_eq!(db.list_security_events(Some(account.id), 10).unwrap()[0].event, "instance_set_up");
 
         // Closed for good: the page is gone, the code is dead, a second try creates nothing
@@ -1288,9 +1294,8 @@ mod tests {
         assert_eq!(db.count_accounts().unwrap(), 1);
         assert_eq!(app.get("/login", None).await.status, StatusCode::OK);
         // Later accounts register as before, without administration rights
-        let bob = app.register("bob").await;
+        app.register("bob").await;
         assert!(!db.get_credentials("bob").unwrap().unwrap().0.is_admin);
-        assert_eq!(app.get("/welcome", Some(&bob)).await.status, StatusCode::FORBIDDEN);
 
         // The session given by the setup is an ordinary administrator session, and the
         // password chosen there is the one that signs in afterwards
@@ -1300,7 +1305,7 @@ mod tests {
         assert_eq!(app.post("/login", None, "username=root&password=another-password").await.status, StatusCode::UNAUTHORIZED);
         let signed_in = app.post("/login", None, "username=root&password=a-long-password").await;
         assert_eq!(signed_in.location.as_deref(), Some("/"));
-        assert_eq!(app.get("/welcome", Some(&signed_in.cookie.unwrap())).await.status, StatusCode::OK);
+        assert_eq!(app.get("/admin", Some(&signed_in.cookie.unwrap())).await.status, StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1311,7 +1316,7 @@ mod tests {
         let form = |username: &str, extra: &str| format!("code={code}&username={username}&password=a-long-password&confirm=a-long-password{extra}");
 
         // Nothing answers without an account: no page, no API
-        for path in ["/product", "/cve", "/admin", "/welcome", "/settings"] {
+        for path in ["/product", "/cve", "/admin", "/settings"] {
             assert_eq!(app.get(path, None).await.location.as_deref(), Some("/login"), "{path}");
         }
         assert_eq!(app.api("/api/cve", None).await.status, StatusCode::UNAUTHORIZED);
@@ -1344,7 +1349,7 @@ mod tests {
         assert_eq!(db.count_accounts().unwrap(), 0);
         // None of this used up the code or the attempts of the address
         assert_eq!(app.setup_code().as_deref(), Some(code.as_str()));
-        assert_eq!(app.post("/setup", None, &form("root", "&email=root%40example.org")).await.location.as_deref(), Some("/welcome"));
+        assert_eq!(app.post("/setup", None, &form("root", "&email=root%40example.org")).await.location.as_deref(), Some("/"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

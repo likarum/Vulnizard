@@ -12,6 +12,7 @@ docker compose exec vulnizard vulnizard setup-code                # code asked b
 ```
 
 The first visit shows a setup page that creates the administrator; it asks for that code, which
+changes at every start of the server while no account exists and
 is also in `docker compose logs vulnizard`. For an unattended deployment,
 `vulnizard user create admin --admin --password-stdin` creates the administrator instead and the
 setup page never opens.

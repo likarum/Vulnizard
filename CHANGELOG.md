@@ -20,10 +20,10 @@ before 1.0, a minor version may change behaviour.
 - **First-run setup page.** While no account exists, the instance leads to `/setup`, which
   creates the administrator for whoever holds a one-time setup code. The code is written in the
   server log at start and printed by `vulnizard setup-code`: it proves access to the server, so
-  the page cannot be used by whoever reaches the instance first. Wrong codes are limited per
-  address, and the page is gone for good once an account exists. `/welcome` then lists the
-  optional next steps (first synchronization, two-step sign-in, single sign-on, provisioning).
-  `vulnizard user create --admin` still works, for automated deployments.
+  the page cannot be used by whoever reaches the instance first. The code is random and changes
+  at every start of the server while no account exists. Wrong codes are limited per address, and
+  the page is gone for good once an account exists. `vulnizard user create --admin` still works,
+  for automated deployments.
 - **Logs that show tampering.** The security log and the audit of decisions are chained, entry
   after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
   (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
