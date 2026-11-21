@@ -1309,6 +1309,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn every_place_a_password_is_chosen_applies_the_same_rules() {
+        let app = app(open_registration());
+        let db = Database::connect(&app.db_path).unwrap();
+        let code = app.setup_code().unwrap();
+        // Fourteen characters; common words; the alphabet; the username with little around
+        let refused = ["short-pass-001", "passwordpassword1", "abcdefghijklmnopq", "qwertyuiopasdfgh"];
+
+        // Setup
+        for password in refused.iter().chain(["rootroot-2024-x"].iter()) {
+            let reply = app.post("/setup", None, &format!("code={code}&username=rootroot&password={password}&confirm={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "setup accepted {password}");
+            assert!(reply.body.contains("at least 15") || reply.body.contains("easy to guess"), "{password}");
+        }
+        assert_eq!(db.count_accounts().unwrap(), 0);
+        assert!(app.get("/setup", None).await.body.contains("At least 15 characters"));
+        let admin = app.register("root").await;
+
+        // Registration
+        for password in refused.iter().chain(["mallory-mallory1"].iter()) {
+            let reply = app.post("/register", None, &format!("username=mallory&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "registration accepted {password}");
+        }
+        assert!(db.get_credentials("mallory").unwrap().is_none());
+
+        // Change of one's own password: the current one stays in place when the new one is refused
+        for password in refused.iter().chain(["root-root-root-1"].iter()) {
+            let reply = app.post("/settings/password", Some(&admin), &format!("current=a-long-password&new={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "change accepted {password}");
+        }
+        assert_eq!(app.post("/login", None, "username=root&password=a-long-password").await.location.as_deref(), Some("/"));
+
+        // An administrator creating an account, or resetting a password
+        for password in refused.iter().chain(["carol-carol-2024"].iter()) {
+            let reply = app.post("/admin/users", Some(&admin), &format!("username=carol&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "creation accepted {password}");
+        }
+        assert!(db.get_credentials("carol").unwrap().is_none());
+        assert_eq!(app.post("/admin/users", Some(&admin), "username=carol&password=a-long-password").await.status, StatusCode::SEE_OTHER);
+        let carol = db.get_credentials("carol").unwrap().unwrap().0.id;
+        for password in refused.iter().chain(["carol-carol-2024"].iter()) {
+            let reply = app.post("/admin/users/password", Some(&admin), &format!("user_id={carol}&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "reset accepted {password}");
+        }
+        assert_eq!(app.post("/login", None, "username=carol&password=a-long-password").await.location.as_deref(), Some("/"));
+
+        // A password chosen under the old rule (ten characters) still signs in: the rule
+        // applies when a password is chosen, not when it is used
+        db.create_account("oldtimer", None, &auth::hash_password("ten-chars!").unwrap(), false).unwrap();
+        assert_eq!(app.post("/login", None, "username=oldtimer&password=ten-chars!").await.location.as_deref(), Some("/"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_setup_refuses_what_a_sign_in_would_refuse() {
         let app = app(Config::default());
         let db = Database::connect(&app.db_path).unwrap();

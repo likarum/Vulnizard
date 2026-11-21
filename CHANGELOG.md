@@ -9,6 +9,8 @@ before 1.0, a minor version may change behaviour.
 
 - The database moves to schema v22 at first start (the existing log entries are chained). Back
   it up first; an older version does not open it afterwards.
+- New passwords need 15 characters (10 before) and easy ones are refused. Existing passwords
+  keep working until they are changed.
 - With open registration, the first account is no longer the administrator for whoever registers
   first: it takes the setup code (see below) or the command line. Existing instances, which have
   accounts, are not affected.
@@ -17,6 +19,9 @@ before 1.0, a minor version may change behaviour.
 
 ### Added
 
+- **Password rules follow NIST SP 800-63B rev. 4**: at least 15 characters, no composition rule,
+  and a refusal of what is guessed first (repetitions, the alphabet or a keyboard row, very
+  common words, the username). Same rules wherever a password is chosen, command line included.
 - **First-run setup page.** While no account exists, the instance leads to `/setup`, which
   creates the administrator for whoever holds a one-time setup code. The code is written in the
   server log at start and printed by `vulnizard setup-code`: it proves access to the server, so

@@ -10,8 +10,126 @@ use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-pub const MIN_PASSWORD_LEN: usize = 10;
+/// NIST SP 800-63B rev. 4: fifteen characters when the password may be the only factor
+pub const MIN_PASSWORD_LEN: usize = 15;
 pub const MAX_PASSWORD_LEN: usize = 1024;
+
+/// What the forms say about the rules of a new password
+pub const PASSWORD_RULES: &str = "At least 15 characters. No other rule, but passwords that are easy to guess are refused.";
+
+/// Words that the most common passwords are made of. A password made only of
+/// these (with digits and symbols around) is refused, whatever its length.
+const COMMON_WORDS: [&str; 96] = [
+    "password", "passwort", "passwd", "motdepasse", "contrasena", "qwerty", "qwertz", "azerty", "asdf", "zxcv",
+    "letmein", "welcome", "bienvenue", "admin", "administrator", "root", "login", "user", "guest", "default",
+    "changeme", "change", "secret", "test", "temp", "demo", "hello", "bonjour", "iloveyou", "love",
+    "monkey", "dragon", "master", "sunshine", "princess", "football", "baseball", "soccer", "hockey", "superman",
+    "batman", "trustno", "shadow", "michael", "jennifer", "jordan", "killer", "ninja", "mustang", "access",
+    "abc", "xyz", "pass", "word", "correct", "horse", "battery", "staple", "vulnizard", "security",
+    "server", "system", "computer", "internet", "google", "facebook", "starwars", "pokemon", "minecraft", "summer",
+    "winter", "spring", "autumn", "january", "february", "march", "april", "june", "july", "august",
+    "september", "october", "november", "december", "monday", "friday", "sunday", "the", "my", "me",
+    "you", "is", "to", "and", "new", "old",
+];
+
+/// Rows of the usual keyboards, and the alphabet
+const SEQUENCES: [&str; 6] = [
+    "abcdefghijklmnopqrstuvwxyz",
+    "0123456789",
+    "1234567890",
+    "qwertyuiopasdfghjklzxcvbnm",
+    "azertyuiopqsdfghjklmwxcvbn",
+    "qwertzuiopasdfghjklyxcvbnm",
+];
+
+/// Reads "p@ssw0rd" as "password"
+fn unleet(c: char) -> char {
+    match c {
+        '@' | '4' => 'a',
+        '0' => 'o',
+        '1' | '!' => 'i',
+        '3' => 'e',
+        '$' | '5' => 's',
+        '7' => 't',
+        _ => c,
+    }
+}
+
+/// Whether `text` is a concatenation of common words
+fn made_of_common_words(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut reachable = vec![false; bytes.len() + 1];
+    reachable[0] = true;
+    for i in 0..bytes.len() {
+        if !reachable[i] {
+            continue;
+        }
+        for word in COMMON_WORDS {
+            if bytes[i..].starts_with(word.as_bytes()) {
+                reachable[i + word.len()] = true;
+            }
+        }
+    }
+    reachable[bytes.len()]
+}
+
+/// Whether the text repeats one short unit ("abcabcabcabcabc", "aaaaaaaaaaaaaaa")
+fn is_repetition(chars: &[char]) -> bool {
+    (1..=chars.len() / 2).any(|unit| chars.iter().enumerate().all(|(i, c)| *c == chars[i % unit]))
+}
+
+/// Whether the text walks along the alphabet or a keyboard row, either way
+fn is_sequence(lower: &str) -> bool {
+    let reversed: String = lower.chars().rev().collect();
+    SEQUENCES.iter().any(|row| {
+        let looped = row.repeat(lower.len() / row.len() + 2);
+        looped.contains(lower) || looped.contains(&reversed)
+    })
+}
+
+/// Rules of a new password, wherever it is chosen (setup, registration,
+/// change, creation by an administrator, command line). Length first, as NIST
+/// SP 800-63B asks, then a refusal of what is guessed first: the username,
+/// repetitions, keyboard walks and common words. No composition rule.
+pub fn check_new_password(password: &str, username: &str) -> std::result::Result<(), String> {
+    let chars: Vec<char> = password.chars().collect();
+    if chars.len() < MIN_PASSWORD_LEN {
+        return Err(format!("Password is too short: at least {MIN_PASSWORD_LEN} characters."));
+    }
+    if password.len() > MAX_PASSWORD_LEN {
+        return Err("Password is too long.".into());
+    }
+    let guessable = |why: &str| Err(format!("This password is too easy to guess ({why}). Choose another one."));
+    let lower = password.to_lowercase();
+    let lower_chars: Vec<char> = lower.chars().collect();
+    if is_repetition(&lower_chars) {
+        return guessable("it repeats the same few characters");
+    }
+    if is_sequence(&lower) {
+        return guessable("it follows the alphabet or the keyboard");
+    }
+    // Without the username, what is left must still be a password
+    let username = username.trim().to_lowercase();
+    if username.chars().count() >= 3 {
+        let rest = lower.replace(&username, "");
+        if rest.chars().count() < 8 {
+            return guessable("it is built on the username");
+        }
+    }
+    // Letters only, read without the usual substitutions, then without digits and symbols
+    let letters: String = lower.chars().map(unleet).filter(|c| c.is_alphabetic()).collect();
+    let plain: String = lower.chars().filter(|c| c.is_alphabetic()).collect();
+    for candidate in [&letters, &plain] {
+        if candidate.chars().count() >= 3 && candidate.is_ascii() && made_of_common_words(candidate) {
+            return guessable("it is made of very common words");
+        }
+    }
+    // Digits and symbols alone around a sequence ("qwertyuiop12345!")
+    if !plain.is_empty() && plain.chars().count() >= 6 && (is_sequence(&plain) || is_repetition(&plain.chars().collect::<Vec<_>>())) {
+        return guessable("it follows the alphabet or the keyboard");
+    }
+    Ok(())
+}
 
 pub fn hash_password(password: &str) -> Result<String> {
     let mut salt = [0u8; 16];
@@ -223,6 +341,65 @@ pub fn valid_slug(s: &str, min: usize, max: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_passwords_are_long_and_not_what_is_guessed_first() {
+        let ok = |p: &str| check_new_password(p, "alice");
+        // Length, counted in characters, is the first rule; there is no composition rule
+        assert!(ok("short-pass-0001").is_ok());
+        assert!(ok("short-pass-001").unwrap_err().contains("at least 15"));
+        assert!(ok("éééé-èèèè-àà-ùù").is_ok());
+        assert!(ok("tout en minuscules sans chiffre").is_ok());
+        assert!(ok("493 817 265 004 1").is_ok());
+        assert!(ok(&"x".repeat(MAX_PASSWORD_LEN + 1)).unwrap_err().contains("too long"));
+        // What everyone tries first, however long
+        for guessable in [
+            "aaaaaaaaaaaaaaaa",
+            "abcabcabcabcabcabc",
+            "1212121212121212",
+            "123456789012345",
+            "0987654321098765",
+            "abcdefghijklmnopqrst",
+            "qwertyuiopasdfgh",
+            "QwertyUiopAsdfgh",
+            "azertyuiopqsdfgh",
+            "lkjhgfdsapoiuytr",
+            "passwordpassword",
+            "PasswordPassword1",
+            "P@ssw0rdP@ssw0rd",
+            "password123456789",
+            "!!!password2024!!!",
+            "iloveyouiloveyou",
+            "welcometomysystem",
+            "correcthorsebatterystaple",
+            "Correct Horse Battery Staple",
+            "adminadminadmin1",
+            "letmein-letmein-1",
+            "vulnizardvulnizard",
+            "qwertyuiop12345!",
+            "changeme-changeme",
+            "Summer2024Winter2025",
+        ] {
+            assert!(ok(guessable).unwrap_err().contains("easy to guess"), "{guessable} is accepted");
+        }
+        // The username with a little around it
+        assert!(ok("alice-alice-2024").unwrap_err().contains("username"));
+        assert!(check_new_password("Jean.Dupont!2024", "jean.dupont").unwrap_err().contains("username"));
+        assert!(check_new_password("jd-and-a-real-long-secret", "jd").is_ok());
+        assert!(ok("alice likes 7 green teapots").is_ok());
+        // Ordinary passphrases and random strings pass
+        for fine in [
+            "a-long-password",
+            "audit-pass-0001",
+            "trois petits chats gris",
+            "Xk7#mP2$vL9@qR4",
+            "gravel-otter-plume-27",
+            "mon chien dort sous la table",
+        ] {
+            assert!(ok(fine).is_ok(), "{fine} is refused: {:?}", ok(fine));
+        }
+    }
+
 
     #[test]
     fn password_roundtrip() {

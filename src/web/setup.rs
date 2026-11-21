@@ -36,9 +36,13 @@ fn form_page(error: Option<&str>, username: &str) -> Markup {
                 }
                 label { "Administrator username" input type="text" name="username" required autocomplete="username" value=(username); }
                 label { "Email (optional)" input type="email" name="email" autocomplete="email"; }
+                p.muted {
+                    "Used for notifications only. There is no password reset by email: a lost password is reset by another administrator, or with "
+                    code { "vulnizard user passwd <name>" } " on the server."
+                }
                 label { "Password" input type="password" name="password" required autocomplete="new-password"; }
                 label { "Password, again" input type="password" name="confirm" required autocomplete="new-password"; }
-                p.muted { "At least " (auth::MIN_PASSWORD_LEN) " characters." }
+                p.muted { (auth::PASSWORD_RULES) }
                 button type="submit" { "Create the administrator" }
             }
             p.muted {
@@ -95,11 +99,8 @@ pub async fn submit(State(st): St, ClientAddr(client): ClientAddr, Form(form): F
         if form.password != form.confirm {
             return fail(StatusCode::BAD_REQUEST, "The two passwords differ.");
         }
-        if form.password.chars().count() < auth::MIN_PASSWORD_LEN {
-            return fail(StatusCode::BAD_REQUEST, "Password is too short.");
-        }
-        if form.password.len() > auth::MAX_PASSWORD_LEN {
-            return fail(StatusCode::BAD_REQUEST, "Password is too long.");
+        if let Err(why) = auth::check_new_password(&form.password, username) {
+            return fail(StatusCode::BAD_REQUEST, &why);
         }
         let email = Some(form.email.trim()).filter(|e| !e.is_empty());
         if email.is_some_and(|e| e.parse::<lettre::Address>().is_err()) {

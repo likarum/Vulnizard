@@ -367,14 +367,8 @@ pub struct NewUserForm {
     role: String,
 }
 
-fn check_password(password: &str) -> Result<(), AppError> {
-    if password.chars().count() < auth::MIN_PASSWORD_LEN || password.len() > auth::MAX_PASSWORD_LEN {
-        return Err(AppError::Bad(format!(
-            "Password must be at least {} characters.",
-            auth::MIN_PASSWORD_LEN
-        )));
-    }
-    Ok(())
+fn check_password(password: &str, username: &str) -> Result<(), AppError> {
+    auth::check_new_password(password, username).map_err(AppError::Bad)
 }
 
 pub async fn user_create(State(st): St, User(user): User, Form(form): Form<NewUserForm>) -> ActionResult {
@@ -384,7 +378,7 @@ pub async fn user_create(State(st): St, User(user): User, Form(form): Form<NewUs
         if !auth::valid_slug(username, 3, 32) {
             return Err(AppError::Bad("Username: 3 to 32 letters, digits, '-', '_' or '.'.".into()));
         }
-        check_password(&form.password)?;
+        check_password(&form.password, username)?;
         let email = Some(form.email.trim()).filter(|e| !e.is_empty());
         if email.is_some_and(|e| e.parse::<lettre::Address>().is_err()) {
             return Err(AppError::Bad("Invalid email address.".into()));
@@ -765,9 +759,9 @@ pub async fn user_password(State(st): St, User(user): User, Form(form): Form<Res
         return Err(AppError::Bad("Change your own password in Settings.".into()));
     }
     blocking(|| {
-        check_password(&form.password)?;
         let db = st.db()?;
-        db.get_account(form.user_id)?.ok_or(AppError::NotFound)?;
+        let target = db.get_account(form.user_id)?.ok_or(AppError::NotFound)?;
+        check_password(&form.password, &target.username)?;
         db.set_password(form.user_id, &hash_new_password(&st, &form.password)?)?;
         Ok(redirect(format!("/admin/users/{}", form.user_id)))
     })

@@ -767,7 +767,7 @@ fn cmd_search(
     Ok(())
 }
 
-fn read_password(from_stdin: bool) -> Result<String> {
+fn read_password(from_stdin: bool, username: &str) -> Result<String> {
     let password = if from_stdin {
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
@@ -779,10 +779,7 @@ fn read_password(from_stdin: bool) -> Result<String> {
         }
         password
     };
-    let length = password.chars().count();
-    if length < auth::MIN_PASSWORD_LEN || password.len() > auth::MAX_PASSWORD_LEN {
-        anyhow::bail!("Password must be at least {} characters", auth::MIN_PASSWORD_LEN);
-    }
+    auth::check_new_password(&password, username).map_err(|why| anyhow::anyhow!(why))?;
     Ok(password)
 }
 
@@ -792,7 +789,7 @@ fn cmd_user(db: &Database, action: UserAction) -> Result<()> {
             if !auth::valid_slug(&username, 3, 32) {
                 anyhow::bail!("Username: 3 to 32 letters, digits, '-', '_' or '.'");
             }
-            let hash = auth::hash_password(&read_password(password_stdin)?)?;
+            let hash = auth::hash_password(&read_password(password_stdin, &username)?)?;
             db.create_account(&username, email.as_deref(), &hash, admin)?;
             println!("Account '{}' created{}", username, if admin { " (admin)" } else { "" });
         }
@@ -800,7 +797,7 @@ fn cmd_user(db: &Database, action: UserAction) -> Result<()> {
             let (account, _) = db
                 .get_credentials(&username)?
                 .ok_or_else(|| anyhow::anyhow!("No web account named '{}'", username))?;
-            db.set_password(account.id, &auth::hash_password(&read_password(password_stdin)?)?)?;
+            db.set_password(account.id, &auth::hash_password(&read_password(password_stdin, &account.username)?)?)?;
             println!("Password updated for '{}'", account.username);
         }
         UserAction::ResetMfa { username } => {
