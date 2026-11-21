@@ -3,6 +3,17 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## Unreleased (0.1.3)
+
+- The key that encrypts the stored secrets can come from a secret manager: `VULNIZARD_KEY_FILE`,
+  a systemd credential, or the new NixOS option `services.vulnizard.keyFile` (sops-nix, agenix).
+- `vulnizard key path` and `vulnizard key export` tell where the key is and print it for a backup;
+  *Admin → Status* shows where it is. It is not downloadable from the web interface.
+- Docker: the image has a `/keys` directory for a separate key volume (commented example in
+  `docker-compose.yml`).
+- The old enrichment plan file is removed from the repository; what remains of it is tracked as
+  an issue.
+
 ## 0.1.2 — first public release
 
 No functional change from 0.1.1. The repository is published with a fresh history; issue numbers

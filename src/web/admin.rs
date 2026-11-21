@@ -97,6 +97,11 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                         }
                         dt { "Self-registration" }
                         dd { @if st.config.web.allow_registration { "open" } @else { "closed" } }
+                        dt { "Key of stored secrets" }
+                        dd {
+                            code { (crate::secrets::key_path(&st.db_path).display()) }
+                            " " span.muted { "— back it up apart from the database (" code { "vulnizard key export" } ")" }
+                        }
                     }
                 }
                 h2 { "Recent syncs" }

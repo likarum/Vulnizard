@@ -9,8 +9,14 @@ services:
     volumes:
       - vulnizard-data:/data
       # - ./config.toml:/etc/vulnizard/config.toml:ro
+      # The key that encrypts the stored secrets is /data/vulnizard.db.key by default.
+      # To keep it out of the database volume (and of its backups), before the first start:
+      # - vulnizard-key:/keys
+    # environment:
+    #   VULNIZARD_KEY_FILE: /keys/vulnizard.key
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
 volumes:
   vulnizard-data:
+  # vulnizard-key:
