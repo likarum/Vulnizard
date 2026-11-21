@@ -1,0 +1,68 @@
+# Vulnizard Configuration
+# Copy this file to config.toml and customize
+
+# Path to SQLite database
+db_path = "vulnizard.db"
+
+[sync]
+# Number of years of CVE history to fetch (default: 2)
+history_years = 2
+
+# Sources to sync (available: nvd, cisa_kev, epss, vulnrichment, osv, distros, exploitdb, metasploit)
+# distros = advisories of Linux distributions; it skips itself while no inventory reports system packages
+# Can also be changed in the UI (Admin → Vulnerability sources), which overrides this file
+sources = ["nvd", "cisa_kev", "epss", "vulnrichment", "distros"]
+
+[inventory]
+# Preview, not part of the first release: inventory sources (collector, Git file),
+# groups and distribution advisories. Closed and shown greyed out unless enabled.
+# enabled = false
+
+[nvd]
+# NVD API key (optional but recommended)
+# Without API key: ~5 requests per 30 seconds
+# With API key: ~50 requests per 30 seconds
+# Get one at: https://nvd.nist.gov/developers/request-an-api-key
+# api_key = "your-api-key-here"
+
+[web]
+# Listen address of `vulnizard serve`
+bind = "127.0.0.1:8000"
+# Public URL (used in notification links)
+base_url = "http://127.0.0.1:8000"
+# Self-registration from the UI (the first registered account becomes admin).
+# Off by default: create accounts with `vulnizard user create [--admin]`.
+allow_registration = false
+# Minutes between two background syncs (0 = no periodic sync)
+sync_interval_minutes = 60
+# Set to true behind HTTPS (Secure flag on the session cookie)
+secure_cookies = false
+# Reverse proxies (other than one on this machine) whose X-Forwarded-For tells the client
+# address, used to count failed sign-ins per client
+# trusted_proxies = ["10.0.0.2"]
+
+# Allow notification targets and Git inventory sources on loopback/private addresses
+allow_private_webhooks = false
+
+# Default SMTP server for email destinations that do not define their own (optional).
+# Each email destination can have its own server (project Settings). Port 465 = implicit TLS, 25 = plain, other = STARTTLS
+# [smtp]
+# host = "smtp.example.org"
+# port = 587
+# username = "vulnizard"
+# password = "secret"
+# from = "Vulnizard <vulnizard@example.org>"
+
+# Single sign-on. Providers are normally added in the UI (Admin → Single sign-on);
+# one can also be declared here (identifier "config").
+# Redirect URI to register at the provider: <web.base_url>/auth/oidc/config/callback
+# [oidc]
+# issuer = "https://id.example.org"
+# client_id = "vulnizard"
+# client_secret = "secret"
+# name = "Pocket-ID"                 # label of the login button
+# scopes = "openid profile email groups"
+# auto_create = true                 # create an account at first login
+# link_existing_accounts = false     # link to the local account of the same username (trusted providers only)
+# admin_group = "vulnizard-admins"   # members of this group are administrators (synced at each login)
+# allowed_domains = ["example.org"]  # only verified emails of these domains may sign in

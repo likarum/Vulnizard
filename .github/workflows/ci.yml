@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t vulnizard:ci .
+      - name: Start it and create an account
+        run: |
+          docker run -d --name vulnizard -p 127.0.0.1:8000:8000 \
+            --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            -v vulnizard-data:/data vulnizard:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:8000/login && break
+            sleep 1
+          done
+          curl -sf -o /dev/null http://127.0.0.1:8000/login
+          password=$(head -c 18 /dev/urandom | base64)
+          printf '%s\n' "$password" | docker exec -i vulnizard \
+            vulnizard --config /etc/vulnizard/config.toml user create ci-admin --admin --password-stdin
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Origin: http://127.0.0.1:8000' \
+            --data-urlencode 'username=ci-admin' --data-urlencode "password=$password" \
+            http://127.0.0.1:8000/login)
+          test "$code" = 303
+      - name: Logs
+        if: always()
+        run: docker logs vulnizard || true

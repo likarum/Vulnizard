@@ -1,0 +1,16 @@
+# docker compose up -d
+# docker compose exec vulnizard vulnizard user create admin --admin
+services:
+  vulnizard:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # put a reverse proxy with HTTPS in front
+    volumes:
+      - vulnizard-data:/data
+      # - ./config.toml:/etc/vulnizard/config.toml:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+volumes:
+  vulnizard-data:

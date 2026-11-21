@@ -1,0 +1,20 @@
+name: Bug
+description: Signaler un comportement incorrect (pas une faille de sécurité)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Ce qui se passe
+      description: Comportement observé, comportement attendu, message d'erreur éventuel.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Pour reproduire
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Sortie de `vulnizard --version` ou commit, et mode de déploiement (binaire, Docker, NixOS).

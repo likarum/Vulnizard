@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Vulnizard">
+  <title>Vulnizard</title>
+  <!-- Shield -->
+  <path d="M64 8 108 22v36c0 30-18 50-44 62C38 108 20 88 20 58V22z" fill="#2a1a4a"/>
+  <path d="M64 8 108 22v36c0 30-18 50-44 62z" fill="#3a2566"/>
+  <!-- A lizard drawn as a V: head on the left arm, tail curling off the right one -->
+  <path d="M40 40 62 88 78 52c5-12 22-13 24 0 2 12-13 17-18 8-3-6 3-11 7-8" fill="none" stroke="#c9a9ff" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="40" cy="38" r="8.5" fill="#c9a9ff"/>
+  <circle cx="37" cy="36" r="2.6" fill="#2a1a4a"/>
+</svg>

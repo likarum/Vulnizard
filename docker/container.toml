@@ -1,0 +1,10 @@
+# Defaults of the container image. Mount your own file over
+# /etc/vulnizard/config.toml to change them (see config.example.toml).
+db_path = "/data/vulnizard.db"
+
+[web]
+# Inside the container only; publish the port with `-p` (ideally behind a reverse proxy with HTTPS)
+bind = "0.0.0.0:8000"
+base_url = "http://localhost:8000"
+sync_interval_minutes = 60
+secure_cookies = false
