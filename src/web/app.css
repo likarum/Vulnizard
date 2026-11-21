@@ -368,12 +368,27 @@ div.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-
 /* QR code of the authenticator app setup */
 .qr svg { width: 220px; height: 220px; background: #fff; padding: 8px; border-radius: 6px; }
 
+footer.bottom {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px 24px 28px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  font-size: 13px;
+  color: var(--muted);
+}
+footer.bottom a { color: var(--muted); text-decoration: underline; }
+footer.bottom a:hover { color: var(--accent); }
+
 /* ---------- Narrow screens (phones) ----------
    The layout is the desktop one made to fit: navigation on single scrolling
    lines, forms in one column, and tables that scroll sideways inside their
    own box instead of widening the page. */
 @media (max-width: 760px) {
   main { padding: 14px 12px 48px; }
+  footer.bottom { padding: 14px 12px 24px; }
   h1 { font-size: 21px; margin: 4px 0 12px; }
   h2 { font-size: 17px; margin: 22px 0 8px; }
 

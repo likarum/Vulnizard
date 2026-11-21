@@ -2931,6 +2931,12 @@ mod tests {
         // The stylesheet has a layout for narrow screens, and pages tell phones not to zoom out
         assert!(app.get("/static/app.css", None).await.body.contains("@media (max-width: 760px)"));
         assert!(app.get("/login", None).await.body.contains("name=\"viewport\" content=\"width=device-width"));
+        // Signed out, a page shows nothing of the instance: no menus, no sync state, no version
+        let login = app.get("/login", None).await.body;
+        for hidden in ["CVE database", "/vendors", "/weaknesses", "Database synced", "Sync now", "never synced", env!("CARGO_PKG_VERSION")] {
+            assert!(!login.contains(hidden), "the login page shows '{hidden}'");
+        }
+        assert!(login.contains("footer") && login.contains("DISCLAIMER.md"));
         assert!(cves_icon(&app).await);
         let cves = app.get("/cve", Some(&alice)).await.body;
         assert!(cves.contains("src=\"/static/filter.js\"") && cves.contains("class=\"filters\""));
