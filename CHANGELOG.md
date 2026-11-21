@@ -45,6 +45,9 @@ before 1.0, a minor version may change behaviour.
 
 ### Fixed
 
+- `/push/inbox` answered an empty list without a session; it now refuses. Found by a new test
+  that reads every route from the source and calls each one with five methods and five kinds
+  of missing or forged credentials: nothing but sign-in pages and static files may answer.
 - **Signed out, a page no longer shows the menus, the state of the last synchronization or the
   "Sync now" button.** The pages behind them already required a session; the header did not.
 - **Sources that skipped a cycle were never synchronized again.** A source that found itself up

@@ -856,18 +856,23 @@ pub async fn push_unsubscribe(State(st): St, User(user): User, Json(body): Json<
 }
 
 /// Messages waiting for the signed-in user; read (and removed) by the service
-/// worker when a push wakes it. Without a session the list is empty.
-pub async fn push_inbox(State(st): St, headers: axum::http::HeaderMap, MaybeUser(user): MaybeUser) -> Result<impl IntoResponse, AppError> {
+/// worker when a push wakes it. Without a session nothing answers (the worker
+/// then shows its generic message).
+pub async fn push_inbox(State(st): St, headers: axum::http::HeaderMap, MaybeUser(user): MaybeUser) -> Result<axum::response::Response, AppError> {
+    let Some(user) = user else {
+        return Ok((axum::http::StatusCode::UNAUTHORIZED, [(header::CACHE_CONTROL, "no-store")], Json(json!({ "error": "sign in" }))).into_response());
+    };
     // Reading empties the inbox: another site must not be able to trigger it
     let cross_site = headers
         .get("sec-fetch-site")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|site| site != "same-origin");
-    let items = match user.filter(|_| !cross_site) {
-        Some(user) => blocking(|| st.db()?.push_take(user.id).map_err(AppError::from))?,
-        None => Vec::new(),
+    let items = if cross_site {
+        Vec::new()
+    } else {
+        blocking(|| st.db()?.push_take(user.id).map_err(AppError::from))?
     };
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(items)))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(items)).into_response())
 }
 
 pub async fn push_script() -> impl IntoResponse {
