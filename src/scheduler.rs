@@ -21,6 +21,8 @@ pub enum SyncRequest {
     All,
     /// One source, enabled or not
     Source(String),
+    /// Some sources (what is left of a request once those that just ran are set aside)
+    Sources(Vec<String>),
 }
 
 /// A sync asked by someone (`by` = user id) or by the clock (`by` = None)
@@ -100,6 +102,7 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
         let sources = match order.request {
             SyncRequest::All => config.sync.sources.clone(),
             SyncRequest::Source(source) => vec![source],
+            SyncRequest::Sources(sources) => sources,
         };
         tracing::info!("scheduler: sync cycle started ({})", sources.join(", "));
         let started = |source: &str| {

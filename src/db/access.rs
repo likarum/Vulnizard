@@ -623,6 +623,19 @@ impl Database {
     }
 
     /// Last completed sync (UTC, `YYYY-MM-DD HH:MM:SS`) and whether one is running
+    /// Sources that are running, or that started less than `minutes` ago
+    pub fn recently_synced_sources(&self, minutes: u64) -> Result<Vec<String>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT DISTINCT source FROM sync_history
+             WHERE (status = 'running' AND started_at > datetime('now', '-3 hours'))
+                OR (?1 > 0 AND started_at > datetime('now', '-' || ?1 || ' minutes'))",
+        )?;
+        let rows = stmt
+            .query_map(params![minutes as i64], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn sync_status(&self) -> Result<(Option<String>, bool)> {
         let last: Option<String> = self.conn().query_row(
             "SELECT MAX(completed_at) FROM sync_history WHERE status = 'completed'",

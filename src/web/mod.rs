@@ -68,6 +68,43 @@ impl AppState {
         Ok(crate::settings::effective(&self.config, db)?)
     }
 
+    /// Asks the scheduler for a synchronization of one source, or of every
+    /// enabled one. Sources already waiting, running, or started less than
+    /// `web.min_manual_sync_minutes` ago are set aside: asking again and again
+    /// does not hammer the upstream services or pile up cycles. Returns the
+    /// sources that will be synchronized, or why none will.
+    pub fn request_sync(&self, db: &Database, source: Option<String>, by: i64) -> Result<Vec<String>, String> {
+        use crate::scheduler::{SyncOrder, SyncRequest};
+        let config = crate::settings::effective(&self.config, db).map_err(|e| e.to_string())?;
+        let all = source.is_none();
+        let wanted = match source {
+            Some(source) => vec![source],
+            None => config.sync.sources.clone(),
+        };
+        let minutes = config.web.min_manual_sync_minutes;
+        let recent = db.recently_synced_sources(minutes).map_err(|e| e.to_string())?;
+        let mut queued = self.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let accepted: Vec<String> = wanted.iter().filter(|s| !queued.contains(s) && !recent.contains(s)).cloned().collect();
+        if accepted.is_empty() {
+            return Err(if minutes > 0 {
+                format!("already waiting, running, or synchronized less than {minutes} minutes ago")
+            } else {
+                "already waiting or running".to_string()
+            });
+        }
+        let request = match (all && accepted.len() == wanted.len(), accepted.as_slice()) {
+            (true, _) => SyncRequest::All,
+            (false, [one]) if !all => SyncRequest::Source(one.clone()),
+            _ => SyncRequest::Sources(accepted.clone()),
+        };
+        let sent = self.sync_trigger.lock().map(|tx| tx.send(SyncOrder { request, by: Some(by) }).is_ok()).unwrap_or(false);
+        if !sent {
+            return Err("the scheduler is not running".to_string());
+        }
+        queued.extend(accepted.iter().cloned());
+        Ok(accepted)
+    }
+
     pub fn secure_cookies(&self) -> bool {
         self.config.web.secure_cookies || self.config.web.base_url.starts_with("https://")
     }
@@ -475,26 +512,8 @@ async fn mcp_http(State(state): St, ApiUser(user): ApiUser, headers: axum::http:
         }
         let user_id = user.id;
         // A synchronization asked through MCP is queued like one asked in the UI
-        let trigger = |source: Option<String>| {
-            let (request, sources) = match source {
-                Some(source) => (crate::scheduler::SyncRequest::Source(source.clone()), vec![source]),
-                None => (
-                    crate::scheduler::SyncRequest::All,
-                    state.effective_config(&db).map(|c| c.sync.sources).unwrap_or_default(),
-                ),
-            };
-            let order = crate::scheduler::SyncOrder { request, by: Some(user_id) };
-            let sent = state.sync_trigger.lock().map(|tx| tx.send(order).is_ok()).unwrap_or(false);
-            if sent {
-                let mut queued = state.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
-                for source in sources {
-                    if !queued.contains(&source) {
-                        queued.push(source);
-                    }
-                }
-            }
-            sent
-        };
+        // A synchronization asked through MCP goes through the same gate as one asked in the UI
+        let trigger = |source: Option<String>| state.request_sync(&db, source, user_id);
         let server = crate::mcp::Mcp {
             db: &db,
             caller: crate::mcp::Caller::User(user),
@@ -1458,8 +1477,20 @@ mod tests {
         let run = db.start_sync("osv").unwrap();
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("synchronizing…"));
         db.complete_sync(run, 3, 0).unwrap();
+        // Asking again for a source that is waiting or just ran is not repeated, and says why
+        let again = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
+        let flash = again.cookie.expect("explanation");
+        assert!(flash.contains("not%20requested") && flash.contains("less%20than%205%20minutes"), "{flash}");
+        assert!(app.sync_rx.try_recv().is_err());
+        // "Sync now" leaves out what just ran and asks for the rest; a second click asks for nothing
         app.post("/sync", Some(&admin), "back=%2Fadmin").await;
-        assert_eq!(app.sync_rx.try_recv().unwrap().request, SyncRequest::All);
+        assert_eq!(
+            app.sync_rx.try_recv().unwrap().request,
+            SyncRequest::Sources(vec!["nvd".into(), "cisa_kev".into(), "vulnrichment".into()])
+        );
+        let second = app.post("/sync", Some(&admin), "back=%2Fadmin").await;
+        assert_eq!(second.location.as_deref(), Some("/admin"));
+        assert!(app.sync_rx.try_recv().is_err());
 
         let saved = app.post("/admin/sources", Some(&admin), "interval=15&nvd_api_key=secret-key-1").await;
         assert_eq!(saved.status, StatusCode::SEE_OTHER);

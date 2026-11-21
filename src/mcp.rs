@@ -42,7 +42,7 @@ pub struct Mcp<'a> {
     pub allow_write: bool,
     /// Asks the running server for a synchronization (None: no server, e.g. stdio).
     /// The argument is one source, or None for every enabled source.
-    pub request_sync: Option<&'a dyn Fn(Option<String>) -> bool>,
+    pub request_sync: Option<&'a dyn Fn(Option<String>) -> std::result::Result<Vec<String>, String>>,
     /// Inventory tools are offered (`[inventory] enabled`)
     pub inventory: bool,
 }
@@ -318,7 +318,7 @@ fn write_tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "request_sync",
-            "Start a synchronization of the vulnerability sources now (instance administrators, on the running server). Without `source`, every enabled source.",
+            "Start a synchronization of the vulnerability sources now (instance administrators, on the running server). Without `source`, every enabled source. A source already waiting, running, or synchronized a few minutes ago is not synchronized again: the answer lists the sources that will be.",
             json!({ "source": { "type": "string", "description": "One source: nvd, cisa_kev, epss, vulnrichment, osv, exploitdb, metasploit" } }),
             &[],
         ),
@@ -685,10 +685,9 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
             let trigger = self
                 .request_sync
                 .ok_or_else(|| anyhow!("no server is running here: use `vulnizard sync` on this machine"))?;
-            if !trigger(source.map(String::from)) {
-                return Err(anyhow!("the scheduler is not running"));
-            }
-            json!({ "requested": source.unwrap_or("all enabled sources") })
+            // Sources that just ran or are already waiting are not synchronized again
+            let accepted = trigger(source.map(String::from)).map_err(|reason| anyhow!("synchronization not requested: {reason}"))?;
+            json!({ "requested": accepted })
         }
         "database_status" => {
             let stats = db.stats()?;
@@ -1161,8 +1160,11 @@ mod tests {
         assert!(run(&alice_mcp, "request_sync", json!({})).is_err());
         let asked = std::cell::RefCell::new(Vec::new());
         let trigger = |source: Option<String>| {
-            asked.borrow_mut().push(source);
-            true
+            if asked.borrow().contains(&source) {
+                return Err("already waiting".to_string());
+            }
+            asked.borrow_mut().push(source.clone());
+            Ok(source.into_iter().collect())
         };
         let admin_mcp = Mcp {
             db: &db,
@@ -1171,7 +1173,10 @@ mod tests {
             request_sync: Some(&trigger),
             inventory: true,
         };
-        run(&admin_mcp, "request_sync", json!({ "source": "osv" })).unwrap();
+        assert_eq!(run(&admin_mcp, "request_sync", json!({ "source": "osv" })).unwrap(), json!({ "requested": ["osv"] }));
+        // Asking again for what is already waiting is refused, with the reason
+        let again = run(&admin_mcp, "request_sync", json!({ "source": "osv" })).unwrap_err();
+        assert!(again.to_string().contains("already waiting"));
         assert!(run(&admin_mcp, "request_sync", json!({ "source": "bogus" })).is_err());
         assert_eq!(*asked.borrow(), [Some("osv".to_string())]);
         assert!(run(&carol_mcp, "get_audit_log", scope.clone()).is_err());

@@ -104,6 +104,9 @@ pub struct WebConfig {
     /// the client address (used to throttle sign-in attempts). A proxy on
     /// this machine (loopback) is always trusted.
     pub trusted_proxies: Vec<String>,
+    /// Minutes before a source that just ran can be synchronized again on
+    /// request (web, MCP). 0 = no limit. The periodic cycle is not concerned.
+    pub min_manual_sync_minutes: u64,
     /// Contact given to browser push services with each notification
     /// (`mailto:someone@example.org` or an https URL). Defaults to the public
     /// URL when it is https.
@@ -120,6 +123,7 @@ impl Default for WebConfig {
             secure_cookies: false,
             allow_private_webhooks: false,
             trusted_proxies: Vec::new(),
+            min_manual_sync_minutes: 5,
             push_contact: None,
         }
     }

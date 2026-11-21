@@ -9,7 +9,6 @@ use super::views::{self, layout, Nav};
 use super::{blocking, AppError, St, User};
 use crate::auth;
 use crate::db::{normalize_domains, Account, Provider, CONFIG_PROVIDER};
-use crate::scheduler::SyncRequest;
 use crate::settings;
 
 pub(super) fn require_admin(user: &Account) -> Result<(), AppError> {
@@ -30,22 +29,6 @@ pub(super) fn admin_tabs(active: &str) -> maud::Markup {
         ("/admin/sso", "Single sign-on", active == "sso"),
         ("/admin/security", "Security log", active == "security"),
     ])
-}
-
-/// Asks the scheduler for a sync and records the sources as queued, so the
-/// request is visible before the scheduler picks it up.
-fn request_sync(st: &super::AppState, request: SyncRequest, sources: &[String], by: i64) -> bool {
-    let order = crate::scheduler::SyncOrder { request, by: Some(by) };
-    let sent = st.sync_trigger.lock().map(|tx| tx.send(order).is_ok()).unwrap_or(false);
-    if sent {
-        let mut queued = st.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
-        for source in sources {
-            if !queued.contains(source) {
-                queued.push(source.clone());
-            }
-        }
-    }
-    sent
 }
 
 pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
@@ -143,12 +126,13 @@ pub struct SyncForm {
 /// Starts a sync cycle now (button of the page header)
 pub async fn sync_now(State(st): St, User(user): User, Form(form): Form<SyncForm>) -> ActionResult {
     require_admin(&user)?;
-    let enabled = blocking(|| -> Result<Vec<String>, AppError> {
-        Ok(st.effective_config(&st.db()?)?.sync.sources)
-    })?;
-    let sent = request_sync(&st, SyncRequest::All, &enabled, user.id);
-    if !sent {
-        return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
+    // A request for sources that just ran or are already waiting is simply not repeated:
+    // the header shows the state of the synchronization either way
+    let asked = blocking(|| -> Result<Result<Vec<String>, String>, AppError> { Ok(st.request_sync(&st.db()?, None, user.id)) })?;
+    if let Err(reason) = asked {
+        if reason.contains("scheduler") {
+            return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
+        }
     }
     // Back to the page the button was on (local paths only)
     let back = form.back.as_str();
@@ -879,10 +863,10 @@ pub async fn source_action(
             "enable" => settings::set_source_enabled(&st.config, &db, &source, true)?,
             "disable" => settings::set_source_enabled(&st.config, &db, &source, false)?,
             "sync" => {
-                if !request_sync(&st, SyncRequest::Source(source.clone()), std::slice::from_ref(&source), user.id) {
-                    return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
-                }
-                return Ok(flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} requested.")));
+                return Ok(match st.request_sync(&db, Some(source.clone()), user.id) {
+                    Ok(_) => flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} requested.")),
+                    Err(reason) => flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} not requested: {reason}.")),
+                });
             }
             _ => return Err(AppError::Bad("Invalid action".into())),
         }
