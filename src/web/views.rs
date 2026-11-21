@@ -192,7 +192,8 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                 header.top {
                     div.bar {
                         a.brand href="/" { img src="/static/logo.svg" alt="" width="22" height="22"; "Vulnizard" }
-                        (sync_status(&ctx, user))
+                        // Nothing about the instance is shown to who is not signed in
+                        @if user.is_some() { (sync_status(&ctx, user)) }
                         div.user {
                             @if let Some(u) = user {
                                 @if u.is_admin {
@@ -207,8 +208,8 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                             }
                         }
                     }
-                    div.zones {
-                        @if user.is_some() {
+                    @if user.is_some() {
+                        div.zones {
                             nav.zone.product {
                                 span.zone-label { "My products" }
                                 (project_menu(&ctx, scope, if view.is_empty() { "overview" } else { view }))
@@ -219,16 +220,27 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                                     a href=(product_url(scope, "settings")) class=[(view == "settings").then_some("active")] { "Settings" }
                                 }
                             }
-                        }
-                        nav.zone.info {
-                            span.zone-label { "CVE database" }
-                            (info(ExploreTab::Cves, "/cve", "CVEs"))
-                            (info(ExploreTab::Vendors, "/vendors", "Vendors"))
-                            (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                            nav.zone.info {
+                                span.zone-label { "CVE database" }
+                                (info(ExploreTab::Cves, "/cve", "CVEs"))
+                                (info(ExploreTab::Vendors, "/vendors", "Vendors"))
+                                (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                            }
                         }
                     }
                 }
                 main { (body) }
+                footer.bottom {
+                    span {
+                        "Vulnizard"
+                        // The version helps whoever attacks: only for signed-in users
+                        @if user.is_some() { " " (env!("CARGO_PKG_VERSION")) }
+                    }
+                    a href="https://github.com/likarum/Vulnizard" rel="noreferrer noopener" target="_blank" { "Source" }
+                    a href="https://github.com/likarum/Vulnizard/blob/main/DISCLAIMER.md" rel="noreferrer noopener" target="_blank" { "Disclaimer" }
+                    a href="https://github.com/likarum/Vulnizard/issues" rel="noreferrer noopener" target="_blank" { "Report a problem" }
+                    span.muted { "Provided as is, without warranty." }
+                }
                 script src="/static/filter.js" defer {}
             }
         }

@@ -18,6 +18,8 @@ before 1.0, a minor version may change behaviour.
   `?source=` in the API, `source` in MCP `search_cves`, `search --from-source` on the command
   line), and a CVE page names its sources. Which source wrote what is not recorded: it is told
   from the fields only that source fills.
+- A page footer: links to the source, the disclaimer and the issue tracker; the version, for
+  signed-in users only.
 - **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
 - **Synchronizations cannot be requested over and over**: a source already waiting, running, or
   started less than `web.min_manual_sync_minutes` ago (5 by default) is not synchronized again,
@@ -26,6 +28,8 @@ before 1.0, a minor version may change behaviour.
 
 ### Fixed
 
+- **Signed out, a page no longer shows the menus, the state of the last synchronization or the
+  "Sync now" button.** The pages behind them already required a session; the header did not.
 - **Sources that skipped a cycle were never synchronized again.** A source that found itself up
   to date was recorded as synchronized, which pushed its next download back at every cycle: CISA
   KEV, EPSS, OSV, Exploit-DB and Metasploit stopped being refreshed while the server ran.
