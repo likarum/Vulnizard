@@ -319,7 +319,7 @@ fn write_tool_definitions() -> Vec<Value> {
         write_tool(
             "request_sync",
             "Start a synchronization of the vulnerability sources now (instance administrators, on the running server). Without `source`, every enabled source. A source already waiting, running, or synchronized a few minutes ago is not synchronized again: the answer lists the sources that will be.",
-            json!({ "source": { "type": "string", "description": "One source: nvd, cisa_kev, epss, vulnrichment, osv, exploitdb, metasploit" } }),
+            json!({ "source": { "type": "string", "description": "One source: nvd, cisa_kev, epss, vulnrichment, osv, exploitdb, metasploit, nuclei" } }),
             &[],
         ),
         write_tool(

@@ -8,7 +8,7 @@ db_path = "vulnizard.db"
 # Number of years of CVE history to fetch (default: 2)
 history_years = 2
 
-# Sources to sync (available: nvd, cisa_kev, epss, vulnrichment, osv, distros, exploitdb, metasploit)
+# Sources to sync (available: nvd, cisa_kev, epss, vulnrichment, osv, distros, exploitdb, metasploit, nuclei)
 # distros = advisories of Linux distributions; it skips itself while no inventory reports system packages
 # Can also be changed in the UI (Admin → Vulnerability sources), which overrides this file
 sources = ["nvd", "cisa_kev", "epss", "vulnrichment", "distros"]

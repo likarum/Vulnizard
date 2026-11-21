@@ -9,6 +9,7 @@ use crate::sources::distros::DistrosSource;
 use crate::sources::epss::EpssSource;
 use crate::sources::exploitdb::ExploitDbSource;
 use crate::sources::metasploit::MetasploitSource;
+use crate::sources::nuclei::NucleiSource;
 use crate::sources::nvd::NvdSource;
 use crate::sources::osv::OsvSource;
 use crate::sources::vulnrichment::VulnrichmentSource;
@@ -27,6 +28,7 @@ pub fn run_source(
         "epss" => EpssSource::new().sync(db, opts),
         "exploitdb" => ExploitDbSource::new().sync(db, opts),
         "metasploit" => MetasploitSource::new().sync(db, opts),
+        "nuclei" => NucleiSource::new().sync(db, opts),
         "osv" => OsvSource::new().sync(db, opts),
         "distros" => DistrosSource::new().sync(db, opts),
         "vulnrichment" => VulnrichmentSource::new().sync(db, opts),

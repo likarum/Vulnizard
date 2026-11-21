@@ -779,6 +779,7 @@ mod tests {
         let mut cve = crate::models::Cve::new("CVE-2024-4242".into());
         cve.description = Some("Test <script>alert(1)</script> vulnerability".into());
         cve.cvss_v3_score = Some(9.8);
+        cve.nuclei_template = Some("http/cves/2024/CVE-2024-4242.yaml".into());
         db.upsert_cve(&cve).unwrap();
         drop(db);
 
@@ -921,6 +922,9 @@ mod tests {
         assert_eq!(detail.status, StatusCode::OK);
         assert!(detail.body.contains("&lt;script&gt;"));
         assert!(detail.body.contains("New CVE"));
+        // A detection template is shown as such, with a link to it, and is not an exploit
+        assert!(detail.body.contains("https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2024/CVE-2024-4242.yaml"));
+        assert!(detail.body.contains("Detection") && !detail.body.contains("public exploit"));
 
         assert_eq!(app.get("/cve/CVE-1999-0000", Some(&alice)).await.status, StatusCode::NOT_FOUND);
         assert_eq!(app.get("/nope", Some(&alice)).await.status, StatusCode::NOT_FOUND);

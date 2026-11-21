@@ -87,7 +87,7 @@ enum Commands {
         #[arg(long)]
         months: Option<u32>,
 
-        /// Only sync specific source (nvd, cisa_kev, epss, exploitdb, metasploit, osv, vulnrichment, distros)
+        /// Only sync specific source (nvd, cisa_kev, epss, exploitdb, metasploit, nuclei, osv, vulnrichment, distros)
         #[arg(long)]
         source: Option<String>,
 
@@ -852,6 +852,11 @@ fn cmd_info(db: &Database, cve_id: &str) -> Result<()> {
             }
 
             // Exploit information
+            if let Some(ref template) = cve.nuclei_template {
+                println!("Detection:");
+                println!("  Nuclei template: {}", template);
+                println!();
+            }
             if cve.exploit_public || !cve.exploit_urls.is_empty() || cve.metasploit_module.is_some() {
                 println!("Exploits:");
                 if cve.exploit_public {

@@ -3,6 +3,7 @@ pub mod distros;
 pub mod epss;
 pub mod exploitdb;
 pub mod metasploit;
+pub mod nuclei;
 pub mod nvd;
 pub mod osv;
 pub mod vulnrichment;

@@ -11,6 +11,10 @@ before 1.0, a minor version may change behaviour.
   after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
   (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
   export offline. MCP gains `get_security_log` for administrators. Schema v22.
+- **Nuclei templates** as a source (`nuclei`): a CVE page, `vulnizard info`, the API and MCP say
+  when a ready-made detection template exists, with a link to it. A template is a check, not an
+  exploit. Not enabled by default on an existing instance: *Admin → Vulnerability sources*.
+- **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
 - **Synchronizations cannot be requested over and over**: a source already waiting, running, or
   started less than `web.min_manual_sync_minutes` ago (5 by default) is not synchronized again,
   from the web or through MCP, and the answer says so.

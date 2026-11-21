@@ -214,12 +214,19 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
                             dt { "Weaknesses" }
                             dd { @for cwe in &cve.cwe_ids { a href={ "/cve?cwe=" (enc(cwe)) } { (cwe) } " " } }
                         }
-                        @if cve.exploit_public || cve.metasploit_module.is_some() || cve.nuclei_template.is_some() {
+                        @if cve.exploit_public || cve.metasploit_module.is_some() {
                             dt { "Exploitation" }
                             dd {
                                 @if cve.exploit_public { span.tag { "public exploit" } " " }
                                 @if let Some(m) = &cve.metasploit_module { span.tag { "metasploit" } " " (m) " " }
-                                @if let Some(n) = &cve.nuclei_template { span.tag { "nuclei" } " " (n) }
+                            }
+                        }
+                        @if let Some(n) = &cve.nuclei_template {
+                            dt { "Detection" }
+                            dd {
+                                span.tag { "nuclei" } " "
+                                a href={ "https://github.com/projectdiscovery/nuclei-templates/blob/main/" (n) } rel="noreferrer noopener" target="_blank" { (n) }
+                                span.muted { " — a ready-made check exists for this CVE" }
                             }
                         }
                     }

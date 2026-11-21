@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::db::Database;
 
 /// Vulnerability sources: (key, label, what it provides)
-pub const SOURCES: [(&str, &str, &str); 8] = [
+pub const SOURCES: [(&str, &str, &str); 9] = [
     ("nvd", "NVD", "CVE records: description, CVSS, weaknesses, affected products (CPE), references"),
     ("cisa_kev", "CISA KEV", "Known Exploited Vulnerabilities catalog"),
     ("epss", "EPSS", "Exploit Prediction Scoring System: probability of exploitation"),
@@ -21,6 +21,7 @@ pub const SOURCES: [(&str, &str, &str); 8] = [
     ),
     ("exploitdb", "Exploit-DB", "Public exploits referencing a CVE"),
     ("metasploit", "Metasploit", "Metasploit modules referencing a CVE"),
+    ("nuclei", "Nuclei templates", "CVEs that have a ready-made detection template (ProjectDiscovery)"),
 ];
 
 const KEY_SOURCES: &str = "setting.sources";

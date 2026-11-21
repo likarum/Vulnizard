@@ -5,8 +5,8 @@
 Administrators manage the instance from the *Admin* menu; settings saved there override the
 configuration file and apply without restart.
 
-- **Vulnerability sources**: enable or disable NVD, CISA KEV, EPSS, Vulnrichment, OSV, Exploit-DB and
-  Metasploit; see the last run of each and sync one on demand — the page shows which sources are
+- **Vulnerability sources**: enable or disable NVD, CISA KEV, EPSS, Vulnrichment, OSV, Exploit-DB,
+  Metasploit and Nuclei templates; see the last run of each and sync one on demand — the page shows which sources are
   waiting, running or done, and refreshes until the sync ends; set the sync interval and the NVD API key
 - **Notifications**, in three tabs: *Enabled per project* (every rule of the instance: test, disable,
   delete), *Destinations* (every destination, of the instance, an organization or a project) and
