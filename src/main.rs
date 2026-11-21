@@ -71,6 +71,8 @@ enum Commands {
         #[command(subcommand)]
         action: UserAction,
     },
+    /// Print the one-time code that opens the first-run setup page (while no account exists)
+    SetupCode,
     /// The key that encrypts the secrets stored in the database
     Key {
         #[command(subcommand)]
@@ -485,6 +487,16 @@ fn main() -> Result<()> {
         }
         // Handled before the database is opened (see above)
         Commands::Log { .. } => unreachable!("log commands do not open the database"),
+        Commands::SetupCode => match db.setup_code()? {
+            Some(code) => {
+                println!("{code}");
+                eprintln!("Enter it at {}/setup to create the administrator.", config.web.base_url.trim_end_matches('/'));
+            }
+            None => {
+                eprintln!("This instance is already set up: an account exists, the setup page is closed.");
+                std::process::exit(1);
+            }
+        },
         Commands::Key { action } => match action {
             KeyAction::Path => println!("{}", secrets::key_path(&db_path).display()),
             KeyAction::Export => {

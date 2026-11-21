@@ -3,10 +3,27 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
-## Unreleased (0.2)
+## 0.2.0
+
+### Things to know before upgrading
+
+- The database moves to schema v22 at first start (the existing log entries are chained). Back
+  it up first; an older version does not open it afterwards.
+- With open registration, the first account is no longer the administrator for whoever registers
+  first: it takes the setup code (see below) or the command line. Existing instances, which have
+  accounts, are not affected.
+- The Nuclei templates source is not enabled on an existing instance: *Admin → Vulnerability
+  sources*.
 
 ### Added
 
+- **First-run setup page.** While no account exists, the instance leads to `/setup`, which
+  creates the administrator for whoever holds a one-time setup code. The code is written in the
+  server log at start and printed by `vulnizard setup-code`: it proves access to the server, so
+  the page cannot be used by whoever reaches the instance first. Wrong codes are limited per
+  address, and the page is gone for good once an account exists. `/welcome` then lists the
+  optional next steps (first synchronization, two-step sign-in, single sign-on, provisioning).
+  `vulnizard user create --admin` still works, for automated deployments.
 - **Logs that show tampering.** The security log and the audit of decisions are chained, entry
   after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
   (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
@@ -49,8 +66,7 @@ before 1.0, a minor version may change behaviour.
 - A source asked for by name (its button, MCP `request_sync` with a source, `sync --source`) runs
   even if it was synchronized recently.
 
-## 0.1.3
-
+### Also in this release (prepared as 0.1.3, never published separately)
 
 - The key that encrypts the stored secrets can come from a secret manager: `VULNIZARD_KEY_FILE`,
   a systemd credential, or the new NixOS option `services.vulnizard.keyFile` (sops-nix, agenix).
