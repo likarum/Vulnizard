@@ -87,6 +87,20 @@
               default = false;
               description = "Open the listen port in the firewall.";
             };
+            keyFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              example = "/run/secrets/vulnizard-key";
+              description = ''
+                File holding the key that encrypts the secrets stored in the database
+                (64 hexadecimal characters, e.g. `openssl rand -hex 32`), typically a
+                sops-nix or agenix secret. It is handed to the service as a systemd
+                credential, so it does not have to be readable by the service user.
+                When null, the key is created next to the database in /var/lib/vulnizard.
+                Set it before the first start, or move the existing key into the secret:
+                a database that holds encrypted secrets does not start with another key.
+              '';
+            };
             settings = lib.mkOption {
               inherit (toml) type;
               default = { };
@@ -107,6 +121,7 @@
                 exec ${pkgs.systemd}/bin/systemd-run --quiet --pty --wait --collect \
                   --property=DynamicUser=yes --property=User=vulnizard \
                   --property=StateDirectory=vulnizard --working-directory=/var/lib/vulnizard \
+                  ${lib.optionalString (cfg.keyFile != null) "--property=LoadCredential=vulnizard.key:${cfg.keyFile}"} \
                   ${lib.getExe cfg.package} --config ${configFile} "$@"
               '')
             ];
@@ -120,6 +135,7 @@
               after = [ "network-online.target" ];
               serviceConfig = {
                 ExecStart = "${lib.getExe cfg.package} --config ${configFile} serve";
+                LoadCredential = lib.optional (cfg.keyFile != null) "vulnizard.key:${cfg.keyFile}";
                 Restart = "on-failure";
                 DynamicUser = true;
                 User = "vulnizard";

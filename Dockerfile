@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin vulnizard \
-    && install -d -o vulnizard -g vulnizard /data
+    && install -d -o vulnizard -g vulnizard /data /keys
 COPY --from=build /out/vulnizard /out/vulnizard-collector /usr/local/bin/
 COPY docker/container.toml /etc/vulnizard/config.toml
 USER vulnizard

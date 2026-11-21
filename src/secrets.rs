@@ -64,12 +64,36 @@ pub fn open(key: &Key, stored: &str) -> Result<String> {
     String::from_utf8(plain).map_err(|_| anyhow!("stored secret is damaged"))
 }
 
-/// Where the key of a database lives
+/// Name of the key among the credentials systemd hands to the service
+/// (`LoadCredential=vulnizard.key:/path/to/secret`)
+const CREDENTIAL_NAME: &str = "vulnizard.key";
+
+/// Where the key of a database lives: the file named by `VULNIZARD_KEY_FILE`,
+/// else a credential passed by systemd, else `<database>.key`.
 pub fn key_path(db_path: &Path) -> PathBuf {
-    match std::env::var_os(KEY_FILE_ENV) {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => PathBuf::from(format!("{}.key", db_path.display())),
+    resolve_key_path(std::env::var_os(KEY_FILE_ENV), std::env::var_os("CREDENTIALS_DIRECTORY"), db_path)
+}
+
+fn resolve_key_path(named: Option<std::ffi::OsString>, credentials: Option<std::ffi::OsString>, db_path: &Path) -> PathBuf {
+    if let Some(path) = named.filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
     }
+    if let Some(dir) = credentials.filter(|d| !d.is_empty()) {
+        let credential = Path::new(&dir).join(CREDENTIAL_NAME);
+        if credential.exists() {
+            return credential;
+        }
+    }
+    PathBuf::from(format!("{}.key", db_path.display()))
+}
+
+/// The key as it is written in its file, for a backup. Never creates one.
+pub fn export_key(db_path: &Path) -> Result<String> {
+    let path = key_path(db_path);
+    let text = std::fs::read_to_string(&path).with_context(|| format!("cannot read the key file {}", path.display()))?;
+    let bytes = hex::decode(text.trim()).map_err(|_| anyhow!("{} is not a key file", path.display()))?;
+    Key::try_from(bytes.as_slice()).map_err(|_| anyhow!("{} is not a key file", path.display()))?;
+    Ok(text.trim().to_string())
 }
 
 /// Key of a database, read from its file and created on first use (readable
@@ -172,5 +196,32 @@ mod tests {
         let refused = crate::db::Database::open(&path).err().expect("must refuse");
         assert!(refused.to_string().contains("key file"));
         assert!(!key_file.exists());
+    }
+
+    #[test]
+    fn the_key_comes_from_the_named_file_then_a_credential_then_beside_the_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("v.db");
+        let beside = PathBuf::from(format!("{}.key", db.display()));
+        assert_eq!(resolve_key_path(None, None, &db), beside);
+        assert_eq!(resolve_key_path(Some("".into()), Some("".into()), &db), beside);
+        // A credentials directory only counts if it holds the key
+        let credentials = dir.path().join("credentials");
+        std::fs::create_dir(&credentials).unwrap();
+        assert_eq!(resolve_key_path(None, Some(credentials.clone().into()), &db), beside);
+        std::fs::write(credentials.join("vulnizard.key"), hex::encode(random_key())).unwrap();
+        assert_eq!(resolve_key_path(None, Some(credentials.clone().into()), &db), credentials.join("vulnizard.key"));
+        // The named file wins over everything
+        assert_eq!(resolve_key_path(Some("/keys/k".into()), Some(credentials.into()), &db), PathBuf::from("/keys/k"));
+    }
+
+    #[test]
+    fn exporting_never_creates_a_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("v.db");
+        assert!(export_key(&db).is_err());
+        assert!(!key_path(&db).exists());
+        let key = key_for(&db).unwrap();
+        assert_eq!(export_key(&db).unwrap(), hex::encode(key));
     }
 }

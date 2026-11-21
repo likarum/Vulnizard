@@ -49,6 +49,19 @@ created at first start and readable by its owner only.
   it is lost for good, the secrets are too: second factors must be reset and passwords, client
   secrets and tokens entered again. Back it up apart from the database.
 
+`vulnizard key path` tells where the key is and `vulnizard key export` prints it, for whoever can
+already read the file on the server. It is deliberately not downloadable from the web interface.
+
+The key can also come from a secret manager instead of being created next to the database. It is
+64 hexadecimal characters (`openssl rand -hex 32`). Provide it **before the first start**, or move
+the existing key into the secret.
+
+- **NixOS**: `services.vulnizard.keyFile = config.sops.secrets."vulnizard-key".path;` (sops-nix,
+  agenix or any file). The key is passed to the service as a systemd credential.
+- **Docker**: mount it and name it, e.g. a second volume or a secret at `/keys`, with
+  `VULNIZARD_KEY_FILE=/keys/vulnizard.key` (commented example in `docker-compose.yml`).
+- **Elsewhere**: `VULNIZARD_KEY_FILE=/path/to/key`.
+
 ## Configuration
 
 Create a `config.toml` file (optional):

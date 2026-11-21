@@ -70,6 +70,11 @@ enum Commands {
         #[command(subcommand)]
         action: UserAction,
     },
+    /// The key that encrypts the secrets stored in the database
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
     /// Synchronize CVE data from all sources
     Sync {
         /// Override history months from config (default: 6, for initial sync)
@@ -182,6 +187,14 @@ enum Commands {
         #[command(subcommand)]
         action: CompletionsAction,
     },
+}
+
+#[derive(Subcommand)]
+enum KeyAction {
+    /// Print where the key file is
+    Path,
+    /// Print the key, to back it up (it is a secret)
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -420,6 +433,17 @@ fn main() -> Result<()> {
         Commands::User { action } => {
             cmd_user(&db, action)?;
         }
+        Commands::Key { action } => match action {
+            KeyAction::Path => println!("{}", secrets::key_path(&db_path).display()),
+            KeyAction::Export => {
+                eprintln!(
+                    "Key of the secrets stored in {}. Keep it apart from the database backups: \
+                     together they reveal the stored secrets.",
+                    db_path.display()
+                );
+                println!("{}", secrets::export_key(&db_path)?);
+            }
+        },
         Commands::Stats => {
             cmd_stats(&db)?;
         }
