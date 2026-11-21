@@ -56,6 +56,17 @@ It stores everything in one SQLite file, on one machine. What this is expected t
 
 If you need many concurrent writers or high availability, this is the wrong tool as it stands.
 
+## Not everything was tested for real
+
+Several features were only exercised by automated tests or against stand-ins written for the
+purpose, never against the real thing. In particular, some features need an account at a
+third-party service that the maintainer does not have: single sign-on with a real identity
+provider (Google, Microsoft Entra ID, Okta…), SCIM provisioning, Slack, a real mail provider,
+browser push services. They are written from the specifications and may not work as they are.
+
+The wiki keeps an honest, feature-by-feature list:
+[What has been tested](https://github.com/likarum/Vulnizard/wiki/What-has-been-tested).
+
 ## Early software
 
 This is pre-release software. Features, configuration and the database schema may change without
