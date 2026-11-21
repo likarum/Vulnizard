@@ -1158,6 +1158,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
         let base = format!("/orgs/{}", enc(&org.name));
         let manage_members = org.can(Permission::ManageMembers);
         let requires_mfa = db.org_requires_mfa(org.id)?;
+        let audit_integrity = db.check_audit_log(org.id)?;
+        let fingerprint = db.log_key_fingerprint()?;
         Ok(views::layout(
             views::Nav::PRODUCTS,
             &org.name,
@@ -1166,6 +1168,10 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                 p { a href="/orgs" { "← Organizations" } }
                 h1 { (org.name) }
                 p.muted { "Your role: " (org.role) }
+
+                h2 { "Audit of decisions" }
+                p.muted { "Every decision taken on the CVEs of this organization's projects — who, when, why — as one chained log." }
+                (super::admin::log_integrity(&audit_integrity, &fingerprint, &format!("{base}/audit/export")))
 
                 h2 { "Projects" }
                 table.list {
@@ -1315,6 +1321,20 @@ pub async fn member_remove(
         require(&org, Permission::ManageMembers)?;
         db.remove_member(org.id, user_id).map_err(AppError::bad)?;
         Ok(redirect(format!("/orgs/{}", enc(&org.name))))
+    })
+}
+
+/// Signed export of the audit of an organization, for whoever can read the organization
+pub async fn org_audit_export(
+    State(st): St,
+    User(user): User,
+    Path(org): Path<String>,
+    Query(q): Query<super::admin::ExportQuery>,
+) -> ActionResult {
+    blocking(|| {
+        let db = st.db()?;
+        let org = load_org(&db, &user, &org)?;
+        super::admin::export_response(&db.export_audit_log(org.id, &org.name)?, &q.format, &format!("audit-{}", org.name))
     })
 }
 

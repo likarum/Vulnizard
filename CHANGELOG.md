@@ -3,7 +3,42 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
-## Unreleased (0.1.3)
+## Unreleased (0.2)
+
+### Added
+
+- **Logs that show tampering.** The security log and the audit of decisions are chained, entry
+  after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
+  (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
+  export offline. MCP gains `get_security_log` for administrators. Schema v22.
+- **Synchronizations cannot be requested over and over**: a source already waiting, running, or
+  started less than `web.min_manual_sync_minutes` ago (5 by default) is not synchronized again,
+  from the web or through MCP, and the answer says so.
+- `web.push_contact`: the contact given to browser push services.
+
+### Fixed
+
+- **Sources that skipped a cycle were never synchronized again.** A source that found itself up
+  to date was recorded as synchronized, which pushed its next download back at every cycle: CISA
+  KEV, EPSS, OSV, Exploit-DB and Metasploit stopped being refreshed while the server ran.
+- **NVD**: a full import left one day out every hundred days, and a period that could not be read
+  was skipped silently. Periods are now contiguous and an unreadable one fails the run, which is
+  then tried again from the same date.
+- **Vulnrichment**: after a long interruption only the first hundred changes were read, and
+  changes that could not be read were ignored; both now trigger a full read.
+- The product filter of the CVE list did nothing without a vendor (web, API, MCP).
+- Browser notifications: the test says what is missing (no browser registered, or the push
+  service refusing) instead of "sent to 0 of your browsers"; enabling reports the real error.
+- *Admin → Notifications* shows how many projects a shared destination serves instead of a bare
+  count of rules.
+
+### Changed
+
+- A source asked for by name (its button, MCP `request_sync` with a source, `sync --source`) runs
+  even if it was synchronized recently.
+
+## 0.1.3
+
 
 - The key that encrypts the stored secrets can come from a secret manager: `VULNIZARD_KEY_FILE`,
   a systemd credential, or the new NixOS option `services.vulnizard.keyFile` (sops-nix, agenix).

@@ -15,6 +15,7 @@ mod platform;
 mod provisioning;
 mod roles;
 mod sso;
+mod trail;
 pub use access::*;
 pub use destinations::*;
 pub use distro::*;
@@ -22,6 +23,7 @@ pub use inventory::*;
 pub use lifecycle::*;
 pub use mfa::*;
 pub use sso::*;
+pub use trail::*;
 pub use platform::*;
 pub use provisioning::*;
 
@@ -562,6 +564,12 @@ impl Database {
             }
         }
 
+        // Migration v21 -> v22: chained logs
+        if schema_version < 22 {
+            tracing::info!("Upgrading database schema to v22 (chained logs)");
+            self.migrate_trail()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -660,6 +668,7 @@ impl Database {
         self.migrate_passkey_login()?;
         self.migrate_access_v20()?;
         self.migrate_seal_secrets()?;
+        self.migrate_trail()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1530,14 +1539,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 21
+        // Check schema version is 22
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "21");
+        assert_eq!(version, "22");
     }
 
     #[test]

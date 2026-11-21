@@ -477,6 +477,68 @@ pub async fn mfa_requirement(
     })
 }
 
+/// Says whether a log still chains from its first entry, and offers its
+/// signed export
+pub(super) fn log_integrity(check: &crate::db::ChainCheck, fingerprint: &str, export: &str) -> maud::Markup {
+    html! {
+        div.card {
+            p {
+                @match check.broken_at {
+                    None => { strong { "Chain intact" } " — " (check.entries) " entr" @if check.entries == 1 { "y" } @else { "ies" } ", each linked to the previous one." }
+                    Some((position, id)) => {
+                        strong.error { "Chain broken at entry " (position) " (id " (id) ")" }
+                        ": this entry, or one before it, was changed or removed outside the application."
+                    }
+                }
+            }
+            p {
+                a.button href={ (export) "?format=json" } { "Export (signed JSON)" }
+                " " a href={ (export) "?format=csv" } { "CSV, for reading" }
+            }
+            p.muted {
+                "The JSON export is signed by this instance (key " code { (fingerprint) } ") and can be checked anywhere with "
+                code { "vulnizard log verify <file> --key " (fingerprint) } ". "
+                "Keep exports somewhere else: whoever controls this server could rewrite the log and sign it again, and an earlier export is what shows it."
+            }
+        }
+    }
+}
+
+/// A log export as a download
+pub(super) fn export_response(export: &crate::trail::Export, format: &str, name: &str) -> Result<axum::response::Response, AppError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let (body, content_type, extension) = match format {
+        "csv" => (crate::trail::to_csv(export), "text/csv; charset=utf-8", "csv"),
+        "json" | "" => (
+            serde_json::to_string_pretty(export).map_err(anyhow::Error::from)?,
+            "application/json",
+            "json",
+        ),
+        _ => return Err(AppError::Bad("Unknown format: json or csv.".into())),
+    };
+    let day = export.exported_at.get(..10).unwrap_or("export");
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"vulnizard-{name}-{day}.{extension}\"")),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ExportQuery {
+    #[serde(default)]
+    pub format: String,
+}
+
+pub async fn security_log_export(State(st): St, User(user): User, Query(q): Query<ExportQuery>) -> ActionResult {
+    require_admin(&user)?;
+    blocking(|| export_response(&st.db()?.export_security_log()?, &q.format, "security-log"))
+}
+
 /// Trail of account security events (second factors, requirement)
 pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
     require_admin(&user)?;
@@ -490,6 +552,8 @@ pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
             |e| format!("{} {} {} {} {}", e.at, e.label(), e.username, e.actor, e.detail.as_deref().unwrap_or("")),
             |_, _| None,
         );
+        let integrity = db.check_security_log()?;
+        let fingerprint = db.log_key_fingerprint()?;
         Ok(layout(
             Nav::Admin,
             "Security log",
@@ -498,6 +562,7 @@ pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
                 h1 { "Administration" }
                 (admin_tabs("security"))
                 p.muted { "Second factors set up, removed or reset, recovery codes used, and changes of the requirement. Entries cannot be changed or removed." }
+                (log_integrity(&integrity, &fingerprint, "/admin/security/export"))
                 (listing.filter_box("Filter: account, event, author…", events.len(), total))
                 (super::mfa::events_table(&events, true))
                 @if total == 1000 { p.muted { "Showing the 1000 most recent entries." } }

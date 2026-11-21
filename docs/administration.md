@@ -104,5 +104,30 @@ It can be **required**:
   removed, recovery codes generated or used, lock after too many wrong answers, reset, change of
   the requirement. Entries cannot be changed or removed.
 
+## Logs that show tampering
+
+Two logs are chained: the **security log** (one chain for the instance) and the **audit of
+decisions** (one chain per organization). Each entry stores a hash of its content and of the
+previous entry, so changing, removing or reordering an entry breaks the chain from there on. The
+pages (*Admin → Security log*, and an organization's page) say whether the chain is intact.
+
+Both export as **signed JSON** — from the page, from the API (`/api/security-log`,
+`/api/organizations/{org}/audit`) — and as CSV for reading. The JSON carries every entry, the last
+hash and a signature by a key of the instance. Anyone can check it, offline:
+
+```bash
+vulnizard log verify vulnizard-security-log-2026-11-21.json --key 9960a4d6b9b1ce90
+```
+
+The key fingerprint is the one the page shows. The check fails if a field was changed, an entry
+removed or inserted, the order changed, or if another key signed.
+
+**What this proves, and what it does not.** It proves that an export is what the instance signed
+and that nothing was altered in between. It does not protect against whoever controls the server:
+they hold the signing key and could rewrite a log and sign it again. The defence is to **keep
+exports elsewhere** (or have them fetched regularly through the API): a later export must begin
+with the same entries and the same hashes, and a rewrite shows as soon as two exports disagree.
+Deleting an organization deletes its audit.
+
 ---
 [← Back to the README](../README.md)

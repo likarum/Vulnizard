@@ -639,6 +639,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/orgs/{org}/leave", post(mfa::org_leave))
         .route("/admin/mfa", post(admin::mfa_requirement))
         .route("/admin/security", get(admin::security_log))
+        .route("/admin/security/export", get(admin::security_log_export))
+        .route("/orgs/{org}/audit/export", get(pages::org_audit_export))
         .route("/settings/password", post(pages::password_change))
         .route("/settings/tokens", post(pages::token_create))
         .route("/settings/tokens/{id}/delete", post(pages::token_delete))
@@ -685,6 +687,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/vendors", get(api::vendors))
         .route("/vendors/{vendor}/products", get(api::products))
         .route("/weaknesses", get(api::weaknesses))
+        .route("/security-log", get(api::security_log))
+        .route("/organizations/{org}/audit", get(api::audit_log))
         .route("/organizations", get(api::organizations))
         .route("/organizations/{org}/projects", get(api::projects))
         .route("/organizations/{org}/projects/{project}", get(api::project))
@@ -2850,6 +2854,34 @@ mod tests {
         assert!(!app.get("/orgs", Some(&bob)).await.body.contains("acme"));
         assert_eq!(app.post("/orgs/carols/leave", Some(&carol), "").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post("/orgs/acme/leave", Some(&carol), "").await.status, StatusCode::NOT_FOUND);
+
+        // The security log exports signed, for administrators only, and the export verifies
+        assert_eq!(app.get("/admin/security/export?format=json", Some(&carol)).await.status, StatusCode::FORBIDDEN);
+        let page = app.get("/admin/security", Some(&root)).await.body;
+        assert!(page.contains("Chain intact") && page.contains("/admin/security/export?format=json"));
+        let exported = app.get("/admin/security/export?format=json", Some(&root)).await;
+        assert_eq!(exported.status, StatusCode::OK);
+        let export: crate::trail::Export = serde_json::from_str(&exported.body).unwrap();
+        let verified = crate::trail::verify(&export, Some(&db.log_key_fingerprint().unwrap())).unwrap();
+        assert!(verified.count >= 4 && verified.scope == "instance");
+        let csv = app.get("/admin/security/export?format=csv", Some(&root)).await.body;
+        assert!(csv.starts_with("id,at,actor_id,actor,") && csv.lines().count() == verified.count + 1);
+        assert_eq!(app.get("/admin/security/export?format=xml", Some(&root)).await.status, StatusCode::BAD_REQUEST);
+        // Same content through the API, with an administrator's token only
+        let root_token = tokens_of(&app.post("/settings/tokens", Some(&root), "name=audit&password=a-long-password").await.body).remove(0);
+        let api = app.api("/api/security-log", Some(&format!("Bearer {root_token}"))).await;
+        let api_export: crate::trail::Export = serde_json::from_str(&api.body).unwrap();
+        assert_eq!(api_export.head, crate::trail::verify(&api_export, None).unwrap().head);
+        let carol_token = tokens_of(&app.post("/settings/tokens", Some(&carol), "name=x&password=a-long-password").await.body).remove(0);
+        assert_eq!(app.api("/api/security-log", Some(&format!("Bearer {carol_token}"))).await.status, StatusCode::FORBIDDEN);
+        // The audit of an organization exports for its members, not for others
+        assert!(app.get("/orgs/acme", Some(&root)).await.body.contains("/orgs/acme/audit/export?format=json"));
+        let audit = app.get("/orgs/acme/audit/export?format=json", Some(&root)).await;
+        let audit: crate::trail::Export = serde_json::from_str(&audit.body).unwrap();
+        assert_eq!(crate::trail::verify(&audit, None).unwrap().scope, "organization:acme");
+        assert_eq!(app.get("/orgs/acme/audit/export?format=json", Some(&carol)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/organizations/acme/audit", Some(&format!("Bearer {carol_token}"))).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/organizations/acme/audit", Some(&format!("Bearer {root_token}"))).await.status, StatusCode::OK);
 
         // The administrators read who did what; nobody else
         assert_eq!(app.get("/admin/security", Some(&carol)).await.status, StatusCode::FORBIDDEN);

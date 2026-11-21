@@ -354,7 +354,8 @@ impl Database {
             "INSERT INTO security_events (actor_id, actor, user_id, username, event, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![actor.user_id, actor.name, user_id, username, event, detail],
         )?;
-        Ok(())
+        // Linked to the previous entry at once: from then on it cannot be changed unnoticed
+        self.seal_security_events()
     }
 
     /// Most recent events first; of one account, or all of them

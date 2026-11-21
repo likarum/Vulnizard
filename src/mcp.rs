@@ -472,6 +472,12 @@ fn read_tool_definitions() -> Vec<Value> {
             &["project"],
         ),
         tool(
+            "get_security_log",
+            "Security log of the instance (instance administrators): second factors set up, removed or reset, recovery codes used, changes of the requirement; most recent first. Also says whether the log still chains from its first entry (an entry changed or removed outside the application breaks it) and which key signs its exports.",
+            json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Entries returned (default 100)" } }),
+            &[],
+        ),
+        tool(
             "database_status",
             "Database statistics and the most recent synchronization runs per source.",
             json!({}),
@@ -688,6 +694,25 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
             // Sources that just ran or are already waiting are not synchronized again
             let accepted = trigger(source.map(String::from)).map_err(|reason| anyhow!("synchronization not requested: {reason}"))?;
             json!({ "requested": accepted })
+        }
+        "get_security_log" => {
+            if !self.sees_internals() {
+                return Err(anyhow!("only instance administrators can read the security log"));
+            }
+            let limit = args.get("limit").and_then(Value::as_i64).unwrap_or(100).clamp(1, 1000);
+            let check = db.check_security_log()?;
+            let events: Vec<Value> = db
+                .list_security_events(None, limit)?
+                .iter()
+                .map(|e| json!({ "at": e.at, "event": e.event, "label": e.label(), "account": e.username, "by": e.actor, "detail": e.detail }))
+                .collect();
+            json!({
+                "entries": check.entries,
+                "chain_intact": check.intact(),
+                "broken_at_entry": check.broken_at.map(|(position, _)| position),
+                "signing_key": db.log_key_fingerprint()?,
+                "events": events,
+            })
         }
         "database_status" => {
             let stats = db.stats()?;
@@ -914,7 +939,7 @@ mod tests {
         let db = db();
         let list = call(&db, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(!t["description"].as_str().unwrap().is_empty());
@@ -957,7 +982,7 @@ mod tests {
         let ask = |msg: Value| server.handle(&msg.to_string()).unwrap();
         let list = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 23);
         assert!(!names.contains(&"list_inventory") && !names.contains(&"choose_components"));
         for name in INVENTORY_TOOLS {
             let answer = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": name, "arguments": {} } }));
@@ -977,7 +1002,7 @@ mod tests {
                 "search_cves", "get_cve", "list_vendors", "list_products", "list_weaknesses", "list_projects",
                 "list_reports", "get_report", "list_applications", "list_watchlist",
                 "get_evolution", "get_state_at", "get_audit_log", "list_inventory", "list_notifications",
-                "database_status",
+                "get_security_log", "database_status",
                 // write
                 "create_project", "subscribe", "unsubscribe", "add_application",
                 "choose_components", "request_sync", "set_cve_status", "update_application_version",
@@ -1003,7 +1028,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
         assert!(!names.contains(&"subscribe"));
 
         let refused = handle_line(
@@ -1179,6 +1204,13 @@ mod tests {
         assert!(again.to_string().contains("already waiting"));
         assert!(run(&admin_mcp, "request_sync", json!({ "source": "bogus" })).is_err());
         assert_eq!(*asked.borrow(), [Some("osv".to_string())]);
+        // The security log is for instance administrators, and says whether its chain holds
+        db.log_security_event(&crate::db::Actor::user(alice, "alice"), Some(alice), "totp_enabled", None).unwrap();
+        assert!(run(&alice_mcp, "get_security_log", json!({})).is_err());
+        let log = run(&admin_mcp, "get_security_log", json!({ "limit": 5 })).unwrap();
+        assert_eq!((log["entries"].as_i64(), log["chain_intact"].as_bool()), (Some(1), Some(true)));
+        assert_eq!(log["events"][0]["event"], "totp_enabled");
+        assert_eq!(log["signing_key"].as_str().unwrap().len(), 16);
         assert!(run(&carol_mcp, "get_audit_log", scope.clone()).is_err());
         assert_eq!(run(&carol_mcp, "get_audit_log", json!({ "decision": "all" })).unwrap(), json!([]));
         assert!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap().as_array().unwrap().is_empty());

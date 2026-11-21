@@ -7,6 +7,7 @@ mod extraction;
 mod inventory;
 mod mfa;
 mod secrets;
+mod trail;
 mod mcp;
 mod models;
 mod notify;
@@ -18,7 +19,7 @@ mod sources;
 mod sync;
 mod web;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use std::io;
@@ -74,6 +75,11 @@ enum Commands {
     Key {
         #[command(subcommand)]
         action: KeyAction,
+    },
+    /// Signed log exports (security log, audit of decisions)
+    Log {
+        #[command(subcommand)]
+        action: LogAction,
     },
     /// Synchronize CVE data from all sources
     Sync {
@@ -186,6 +192,18 @@ enum Commands {
     Completions {
         #[command(subcommand)]
         action: CompletionsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum LogAction {
+    /// Check a signed export: nothing changed, removed or reordered, and who signed it
+    Verify {
+        /// The JSON export
+        file: PathBuf,
+        /// Fingerprint of the key expected to have signed (shown by the instance)
+        #[arg(long)]
+        key: Option<String>,
     },
 }
 
@@ -390,6 +408,34 @@ fn main() -> Result<()> {
     let config = Config::load_or_default(cli.config.as_deref())?;
 
     // Determine DB path
+    // Checking an export file needs no database: nothing is opened, created or migrated
+    if let Commands::Log { action } = cli.command {
+        match action {
+            LogAction::Verify { file, key } => {
+                let text = std::fs::read_to_string(&file).with_context(|| format!("cannot read {}", file.display()))?;
+                let export: trail::Export = serde_json::from_str(&text).context("this is not a signed log export (JSON)")?;
+                match trail::verify(&export, key.as_deref()) {
+                    Ok(v) => {
+                        println!("OK: {} log of {} — {} entries, exported {}", v.log, v.scope, v.count, v.exported_at);
+                        println!("    every entry chains to the previous one; head {}", if v.head.is_empty() { "(empty log)" } else { &v.head });
+                        match key {
+                            Some(_) => println!("    signed by the expected key {}", v.key_fingerprint),
+                            None => println!(
+                                "    signed by key {} — compare it with the one shown by the instance, or pass --key",
+                                v.key_fingerprint
+                            ),
+                        }
+                    }
+                    Err(reason) => {
+                        eprintln!("INVALID: {reason}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let db_path = cli.db.unwrap_or(config.db_path.clone());
 
     // Open database (auto-creates if not exists)
@@ -433,6 +479,8 @@ fn main() -> Result<()> {
         Commands::User { action } => {
             cmd_user(&db, action)?;
         }
+        // Handled before the database is opened (see above)
+        Commands::Log { .. } => unreachable!("log commands do not open the database"),
         Commands::Key { action } => match action {
             KeyAction::Path => println!("{}", secrets::key_path(&db_path).display()),
             KeyAction::Export => {

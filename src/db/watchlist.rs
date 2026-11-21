@@ -769,6 +769,9 @@ impl Database {
                     existing_entries += 1;
                 }
             }
+            if new_entries > 0 {
+                self.seal_audit_events()?;
+            }
             Ok((new_entries, existing_entries))
         })
     }
