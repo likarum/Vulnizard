@@ -2919,6 +2919,9 @@ mod tests {
         // Live filters: the script is on every page and the forms carry what it refreshes
         assert!(app.get("/static/filter.js", None).await.body.contains("form.filters"));
         assert!(app.get("/static/logo.svg", None).await.body.starts_with("<svg"));
+        // The stylesheet has a layout for narrow screens, and pages tell phones not to zoom out
+        assert!(app.get("/static/app.css", None).await.body.contains("@media (max-width: 760px)"));
+        assert!(app.get("/login", None).await.body.contains("name=\"viewport\" content=\"width=device-width"));
         assert!(cves_icon(&app).await);
         let cves = app.get("/cve", Some(&alice)).await.body;
         assert!(cves.contains("src=\"/static/filter.js\"") && cves.contains("class=\"filters\""));
