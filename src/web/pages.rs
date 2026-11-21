@@ -839,9 +839,16 @@ pub async fn filter_script() -> impl IntoResponse {
     )
 }
 
-pub async fn login_form(State(st): St) -> HtmlResult {
+pub async fn login_form(State(st): St) -> ActionResult {
     blocking(|| {
-        Ok(auth_page("Log in", None, false, registration_open(&st), &super::oidc::login_buttons(&st), super::mfa::passkeys_available(&st)))
+        // Nobody can sign in to an instance without accounts: it is set up first
+        let sso = super::oidc::login_buttons(&st);
+        // Nobody can sign in with a password to an instance without accounts: it is set up
+        // first. With single sign-on declared, accounts may come from there: the page stays.
+        if sso.is_empty() && st.db()?.setup_is_open()? {
+            return Ok(Redirect::to("/setup").into_response());
+        }
+        Ok(auth_page("Log in", None, false, registration_open(&st), &sso, super::mfa::passkeys_available(&st)).into_response())
     })
 }
 
@@ -881,12 +888,15 @@ pub async fn login(
     })
 }
 
-pub async fn register_form(State(st): St) -> HtmlResult {
+pub async fn register_form(State(st): St) -> ActionResult {
     blocking(|| {
+        if st.db()?.setup_is_open()? {
+            return Ok(Redirect::to("/setup").into_response());
+        }
         if !registration_open(&st) {
             return Err(AppError::Bad("Registration is disabled on this instance.".into()));
         }
-        Ok(auth_page("Register", None, true, false, &[], false))
+        Ok(auth_page("Register", None, true, false, &[], false).into_response())
     })
 }
 
@@ -903,6 +913,11 @@ pub async fn register(State(st): St, Form(form): Form<RegisterForm>) -> ActionRe
         let db = st.db()?;
         if !registration_open(&st) {
             return Err(AppError::Bad("Registration is disabled on this instance.".into()));
+        }
+        // The first account is the administrator: it is not left to whoever registers
+        // first, it takes the setup code (or the command line)
+        if db.setup_is_open()? {
+            return Err(AppError::Bad("This instance is not set up yet: create its administrator at /setup.".into()));
         }
         let fail = |msg: &str| -> ActionResult {
             Ok((

@@ -9,8 +9,9 @@ scheduler runs in-process.
 
 ```bash
 vulnizard sync                      # initial import (once)
-vulnizard user create alice --admin # prompts for the password (or --password-stdin)
 vulnizard serve                     # http://127.0.0.1:8000
+vulnizard setup-code                # code asked by the setup page at first visit
+# or, without the page: vulnizard user create alice --admin
 ```
 
 The navigation has two visibly separate sides, and the header always shows when the

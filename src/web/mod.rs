@@ -15,6 +15,7 @@ mod pages;
 mod product;
 mod projects;
 mod scim;
+mod setup;
 mod views;
 
 use anyhow::Result;
@@ -616,6 +617,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Accounts
         .route("/login", get(pages::login_form).post(pages::login))
         .route("/register", get(pages::register_form).post(pages::register))
+        .route("/setup", get(setup::form).post(setup::submit))
+        .route("/welcome", get(setup::welcome))
         .route("/logout", post(pages::logout))
         .route("/auth/oidc/{provider}/login", get(oidc::login))
         .route("/auth/oidc/{provider}/callback", get(oidc::callback))
@@ -728,6 +731,7 @@ pub fn serve(db_path: PathBuf, config: Config) -> Result<()> {
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(&bind).await?;
         tracing::info!("listening on http://{}", listener.local_addr()?);
+        setup::announce(&state);
         if !base_url_is_https && !listener.local_addr()?.ip().is_loopback() {
             tracing::warn!(
                 "listening beyond this machine without HTTPS: put a reverse proxy with HTTPS in front \
@@ -889,10 +893,20 @@ mod tests {
             self.state.login_guard.record(&auth::ThrottleKey::second_step(id), true);
         }
 
+        /// The setup code of an instance without accounts
+        fn setup_code(&self) -> Option<String> {
+            Database::connect(&self.db_path).unwrap().setup_code().unwrap()
+        }
+
+        /// Creates an account: the first through the setup page, the others by registration
         async fn register(&self, username: &str) -> String {
-            let reply = self
-                .post("/register", None, &format!("username={username}&password=a-long-password"))
-                .await;
+            let reply = match self.setup_code() {
+                Some(code) => {
+                    let form = format!("code={code}&username={username}&password=a-long-password&confirm=a-long-password");
+                    self.post("/setup", None, &form).await
+                }
+                None => self.post("/register", None, &format!("username={username}&password=a-long-password")).await,
+            };
             assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
             reply.cookie.expect("session cookie")
         }
@@ -907,9 +921,10 @@ mod tests {
             assert_eq!(r.status, StatusCode::SEE_OTHER, "{path}");
             assert_eq!(r.location.as_deref(), Some("/login"), "{path}");
         }
-        // Static assets and the login page stay public.
+        // Static assets stay public; without any account, signing in leads to the setup page
         assert_eq!(app.get("/static/app.css", None).await.status, StatusCode::OK);
-        assert_eq!(app.get("/login", None).await.status, StatusCode::OK);
+        assert_eq!(app.get("/login", None).await.location.as_deref(), Some("/setup"));
+        assert_eq!(app.get("/setup", None).await.status, StatusCode::OK);
 
         // Signed in, the pages render and escape stored content.
         let alice = app.register("alice").await;
@@ -1222,6 +1237,154 @@ mod tests {
         assert_eq!(app.post(&own, Some(&admin), "action=disable").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&own, Some(&admin), "action=revoke_admin").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&action, Some(&admin), "action=bogus").await.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_administrator_takes_the_setup_code() {
+        // Registration is open here: even so, the first account is not for whoever comes first
+        let app = app(open_registration());
+        let db = Database::connect(&app.db_path).unwrap();
+        let code = app.setup_code().unwrap();
+        let good = |code: &str| format!("code={code}&username=root&password=a-long-password&confirm=a-long-password");
+
+        let page = app.get("/setup", None).await;
+        assert!(page.status == StatusCode::OK && page.body.contains("Setup code") && !page.body.contains(&code));
+        assert_eq!(app.get("/register", None).await.location.as_deref(), Some("/setup"));
+        assert_eq!(app.post("/register", None, "username=eve&password=a-long-password").await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(app.get("/welcome", None).await.location.as_deref(), Some("/login"));
+
+        // Without the code nothing is created, and nothing else is told
+        let wrong = app.post("/setup", None, "code=AAAAA-AAAAA-AAAAA-AAAAA&username=x&password=short&confirm=other").await;
+        assert!(wrong.status == StatusCode::UNAUTHORIZED && wrong.body.contains("Wrong setup code") && wrong.cookie.is_none());
+        // With it, the usual rules on the account apply
+        let mismatch = app.post("/setup", None, &format!("code={code}&username=root&password=a-long-password&confirm=another-password")).await;
+        assert!(mismatch.status == StatusCode::BAD_REQUEST && mismatch.body.contains("passwords differ"));
+        let short = app.post("/setup", None, &format!("code={code}&username=root&password=short&confirm=short")).await;
+        assert_eq!(short.status, StatusCode::BAD_REQUEST);
+        assert_eq!(db.count_accounts().unwrap(), 0);
+
+        // Guessing is cut short, for the address that guesses only
+        for _ in 0..auth::MAX_FAILURES {
+            app.post_from("203.0.113.9", "/setup", None, &good("AAAAA-AAAAA-AAAAA-AAAAB")).await;
+        }
+        assert_eq!(app.post_from("203.0.113.9", "/setup", None, &good(&code)).await.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(db.count_accounts().unwrap(), 0);
+
+        // The code, typed loosely, creates the administrator and signs them in
+        let done = app.post("/setup", None, &good(&code.to_lowercase().replace('-', ""))).await;
+        assert_eq!((done.status, done.location.as_deref()), (StatusCode::SEE_OTHER, Some("/welcome")));
+        let root = done.cookie.expect("session cookie");
+        let account = db.get_credentials("root").unwrap().unwrap().0;
+        assert!(account.is_admin);
+        let welcome = app.get("/welcome", Some(&root)).await;
+        assert!(welcome.status == StatusCode::OK && welcome.body.contains("Single sign-on") && welcome.body.contains("/admin/sso"));
+        assert_eq!(db.list_security_events(Some(account.id), 10).unwrap()[0].event, "instance_set_up");
+
+        // Closed for good: the page is gone, the code is dead, a second try creates nothing
+        assert_eq!(app.setup_code(), None);
+        assert_eq!(app.get("/setup", None).await.location.as_deref(), Some("/login"));
+        let replay = app.post("/setup", None, &format!("code={code}&username=mallory&password=a-long-password&confirm=a-long-password")).await;
+        assert_eq!(replay.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.count_accounts().unwrap(), 1);
+        assert_eq!(app.get("/login", None).await.status, StatusCode::OK);
+        // Later accounts register as before, without administration rights
+        let bob = app.register("bob").await;
+        assert!(!db.get_credentials("bob").unwrap().unwrap().0.is_admin);
+        assert_eq!(app.get("/welcome", Some(&bob)).await.status, StatusCode::FORBIDDEN);
+
+        // The session given by the setup is an ordinary administrator session, and the
+        // password chosen there is the one that signs in afterwards
+        assert_eq!(app.get("/admin", Some(&root)).await.status, StatusCode::OK);
+        assert_eq!(app.post("/logout", Some(&root), "").await.location.as_deref(), Some("/login"));
+        assert_eq!(app.get("/admin", Some(&root)).await.location.as_deref(), Some("/login"));
+        assert_eq!(app.post("/login", None, "username=root&password=another-password").await.status, StatusCode::UNAUTHORIZED);
+        let signed_in = app.post("/login", None, "username=root&password=a-long-password").await;
+        assert_eq!(signed_in.location.as_deref(), Some("/"));
+        assert_eq!(app.get("/welcome", Some(&signed_in.cookie.unwrap())).await.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_setup_refuses_what_a_sign_in_would_refuse() {
+        let app = app(Config::default());
+        let db = Database::connect(&app.db_path).unwrap();
+        let code = app.setup_code().unwrap();
+        let form = |username: &str, extra: &str| format!("code={code}&username={username}&password=a-long-password&confirm=a-long-password{extra}");
+
+        // Nothing answers without an account: no page, no API
+        for path in ["/product", "/cve", "/admin", "/welcome", "/settings"] {
+            assert_eq!(app.get(path, None).await.location.as_deref(), Some("/login"), "{path}");
+        }
+        assert_eq!(app.api("/api/cve", None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.api("/api/cve", Some(&format!("Bearer {code}"))).await.status, StatusCode::UNAUTHORIZED);
+        // The setup code is not a password: it signs nobody in
+        assert_eq!(app.post("/login", None, &format!("username=root&password={code}")).await.status, StatusCode::UNAUTHORIZED);
+
+        // A form posted from another site is refused, even with the right code
+        for origin in [None, Some("http://evil.example")] {
+            let mut req = HttpRequest::post("/setup")
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+            if let Some(o) = origin {
+                req = req.header(header::ORIGIN, o);
+            }
+            let reply = app.send(req.body(Body::from(form("root", ""))).unwrap()).await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "origin {origin:?}");
+        }
+        // Names and addresses follow the rules of every account
+        assert!(auth::is_reserved_username("default"));
+        for (username, extra) in [("default", ""), ("ab", ""), ("ro ot", ""), ("root", "&email=not-an-address")] {
+            let reply = app.post("/setup", None, &form(&username.replace(' ', "+"), extra)).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{username} {extra}");
+            assert!(reply.cookie.is_none());
+        }
+        let too_long = format!("code={code}&username=root&password={0}&confirm={0}", "x".repeat(auth::MAX_PASSWORD_LEN + 1));
+        assert_eq!(app.post("/setup", None, &too_long).await.status, StatusCode::BAD_REQUEST);
+        // A missing field is a bad request, not an account
+        assert!(app.post("/setup", None, &format!("code={code}&username=root")).await.status.is_client_error());
+        assert_eq!(db.count_accounts().unwrap(), 0);
+        // None of this used up the code or the attempts of the address
+        assert_eq!(app.setup_code().as_deref(), Some(code.as_str()));
+        assert_eq!(app.post("/setup", None, &form("root", "&email=root%40example.org")).await.location.as_deref(), Some("/welcome"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_setup_closes_however_the_first_account_comes() {
+        // From the command line: the page never opens, and a code read before is dead
+        let app_cli = app(open_registration());
+        let code = app_cli.setup_code().unwrap();
+        let db = Database::connect(&app_cli.db_path).unwrap();
+        let admin = db.create_account("root", None, &auth::hash_password("a-long-password").unwrap(), true).unwrap();
+        let form = format!("code={code}&username=mallory&password=a-long-password&confirm=a-long-password");
+        assert_eq!(app_cli.setup_code(), None);
+        assert_eq!(app_cli.get("/setup", None).await.location.as_deref(), Some("/login"));
+        assert_eq!(app_cli.get("/login", None).await.status, StatusCode::OK);
+        assert_eq!(app_cli.post("/setup", None, &form).await.status, StatusCode::NOT_FOUND);
+        // The last administrator cannot be disabled, and a disabled account is still an
+        // account: the setup does not come back that way
+        assert!(db.set_disabled(admin, true).is_err());
+        let other = db.create_account("other", None, "h", true).unwrap();
+        db.set_disabled(admin, true).unwrap();
+        db.set_disabled(other, true).unwrap_err();
+        assert_eq!(app_cli.post("/login", None, "username=root&password=a-long-password").await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app_cli.post("/setup", None, &form).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.count_accounts().unwrap(), 2);
+
+        // With single sign-on declared, the sign-in page stays (accounts come from there);
+        // the setup is still there for who has the code, until the first account exists
+        let idp = mock_idp().await;
+        let app_sso = app(sso_config(&idp));
+        let code = app_sso.setup_code().unwrap();
+        let form = format!("code={code}&username=mallory&password=a-long-password&confirm=a-long-password");
+        let login = app_sso.get("/login", None).await;
+        assert!(login.status == StatusCode::OK && login.body.contains("Log in with Mock"));
+        assert_eq!(app_sso.get("/setup", None).await.status, StatusCode::OK);
+        let (state, cookie) = sso_begin(&app_sso, &idp).await;
+        let done = app_sso.get(&format!("/auth/oidc/config/callback?code=good-code&state={state}"), Some(&cookie)).await;
+        assert_eq!(done.status, StatusCode::SEE_OTHER, "{}", done.body);
+        assert_eq!(app_sso.setup_code(), None);
+        assert_eq!(app_sso.post("/setup", None, &form).await.status, StatusCode::NOT_FOUND);
+        let db = Database::connect(&app_sso.db_path).unwrap();
+        assert_eq!(db.list_accounts().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2782,7 +2945,7 @@ mod tests {
         assert_eq!(
             trail,
             [
-                "totp_enabled", "recovery_codes_generated", "recovery_code_used", "second_step_locked",
+                "instance_set_up", "totp_enabled", "recovery_codes_generated", "recovery_code_used", "second_step_locked",
                 "recovery_codes_generated", "recovery_code_used", "totp_removed"
             ]
         );

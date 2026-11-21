@@ -461,9 +461,16 @@ impl Database {
     /// cannot both be granted administrator rights.
     pub fn register_account(&self, username: &str, email: Option<&str>, password_hash: &str) -> Result<i64> {
         self.conn().execute_batch("BEGIN IMMEDIATE")?;
-        let result = self
-            .count_accounts()
-            .and_then(|n| self.create_account(username, email, password_hash, n == 0));
+        // Registration never creates the first account, hence never an administrator: the
+        // first account takes the setup code or the command line
+        let result = self.count_accounts().and_then(|n| {
+            if n == 0 {
+                return Err(anyhow::Error::new(super::watchlist::UserFacing(
+                    "This instance is not set up yet: create its administrator first.".into(),
+                )));
+            }
+            self.create_account(username, email, password_hash, false)
+        });
         match &result {
             Ok(_) => self.conn().execute_batch("COMMIT")?,
             Err(_) => self.conn().execute_batch("ROLLBACK")?,
@@ -1492,9 +1499,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_registration_is_admin_and_password_change_revokes_tokens() {
+    fn registration_never_makes_an_administrator_and_password_change_revokes_tokens() {
         let db = Database::open_in_memory().unwrap();
-        let first = db.register_account("first", None, "hash").unwrap();
+        // Nobody registers into an instance that has no administrator yet
+        assert!(db.register_account("eve", None, "hash").unwrap_err().to_string().contains("not set up"));
+        assert_eq!(db.count_accounts().unwrap(), 0);
+        let first = db.create_first_administrator("first", None, "hash").unwrap();
         let second = db.register_account("second", None, "hash").unwrap();
         assert!(db.get_credentials("first").unwrap().unwrap().0.is_admin);
         assert!(!db.get_credentials("second").unwrap().unwrap().0.is_admin);

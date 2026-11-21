@@ -63,13 +63,16 @@ Details: [MCP server](docs/mcp.md)
 
 ## Quick start
 
-The first administrator is created from the command line; nothing is open by default.
+At first start the address shows a setup page that creates the administrator. It asks for a
+one-time **setup code**, written in the server log and printed by `vulnizard setup-code`, so that
+only someone with access to the server can use it. (`vulnizard user create <name> --admin` does
+the same from the command line.)
 
 **Docker**
 
 ```bash
 docker compose up -d
-docker compose exec vulnizard vulnizard user create admin --admin   # asks for the password
+docker compose exec vulnizard vulnizard setup-code   # then open http://localhost:8000
 ```
 
 **NixOS** (flake)
@@ -80,15 +83,14 @@ services.vulnizard = { enable = true; baseUrl = "https://vulnizard.example.org";
 ```
 
 ```bash
-sudo vulnizard-admin user create admin --admin
+sudo vulnizard-admin setup-code
 ```
 
 **From source**
 
 ```bash
 cargo build --release
-./target/release/vulnizard user create admin --admin
-./target/release/vulnizard serve        # http://127.0.0.1:8000
+./target/release/vulnizard serve        # http://127.0.0.1:8000, the setup code is in its output
 ```
 
 The first import of the CVE database starts by itself and takes a while. Then open the address,

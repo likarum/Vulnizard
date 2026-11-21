@@ -8,8 +8,13 @@ and starts by itself.
 
 ```bash
 docker compose up -d                                              # or: docker build -t vulnizard .
-docker compose exec vulnizard vulnizard user create admin --admin # prompts for the password
+docker compose exec vulnizard vulnizard setup-code                # code asked by the setup page
 ```
+
+The first visit shows a setup page that creates the administrator; it asks for that code, which
+is also in `docker compose logs vulnizard`. For an unattended deployment,
+`vulnizard user create admin --admin --password-stdin` creates the administrator instead and the
+setup page never opens.
 
 The database lives in the `/data` volume; the image runs as an unprivileged user on a read-only
 root. Mount your own file over `/etc/vulnizard/config.toml` to change the defaults
@@ -33,7 +38,8 @@ root. Mount your own file over `/etc/vulnizard/config.toml` to change the defaul
 ```
 
 The service runs hardened under a dynamic user, with its database in `/var/lib/vulnizard`.
-`sudo vulnizard-admin user create admin --admin` runs any Vulnizard command on that database.
+`sudo vulnizard-admin setup-code` prints the code asked by the setup page at first visit
+(`vulnizard-admin` runs any Vulnizard command on that database, e.g. `user create admin --admin`).
 `nix build`, `nix run . -- --help` and `nix develop` work from a checkout.
 
 ## The key file

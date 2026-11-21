@@ -14,6 +14,7 @@ mod mfa;
 mod platform;
 mod provisioning;
 mod roles;
+mod setup;
 mod sso;
 mod trail;
 pub use access::*;
@@ -24,6 +25,7 @@ pub use lifecycle::*;
 pub use mfa::*;
 pub use sso::*;
 pub use trail::*;
+pub use setup::SetupClosed;
 pub use platform::*;
 pub use provisioning::*;
 

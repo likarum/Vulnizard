@@ -83,6 +83,7 @@ INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '18');
 
 /// Kinds of security events and what they are shown as
 pub const SECURITY_EVENTS: &[(&str, &str)] = &[
+    ("instance_set_up", "Instance set up: first administrator created"),
     ("totp_enabled", "Authenticator app set up"),
     ("totp_removed", "Authenticator app removed"),
     ("passkey_added", "Passkey added"),
