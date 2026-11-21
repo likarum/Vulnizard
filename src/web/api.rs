@@ -120,3 +120,20 @@ pub async fn report(
         Ok(Json(json!({ "day": day, "changes": changes })))
     })
 }
+
+/// Signed export of the security log (instance administrators)
+pub async fn security_log(State(st): St, ApiUser(user): ApiUser) -> ApiResult {
+    if !user.is_admin {
+        return Err(AppError::Forbidden.into());
+    }
+    blocking(|| Ok(Json(json!(st.db()?.export_security_log()?))))
+}
+
+/// Signed export of the audit of decisions of an organization
+pub async fn audit_log(State(st): St, ApiUser(user): ApiUser, Path(org): Path<String>) -> ApiResult {
+    blocking(|| {
+        let db = st.db()?;
+        let org = super::pages::load_org(&db, &user, &org)?;
+        Ok(Json(json!(db.export_audit_log(org.id, &org.name)?)))
+    })
+}

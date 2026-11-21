@@ -35,11 +35,12 @@ It is also meant for AI assistants: the same data and the same rights through MC
 - **Notifications** by email, ntfy, Slack, webhook or browser, per project, filtered by event and CVSS
 - **Evolution and audit**: charts over time, state at any past date, who decided what and why
 - **CVE database** to browse: search, vendors, products, weaknesses, change history, personal tags
-- **Sources**: NVD, CISA KEV, EPSS, CISA Vulnrichment (SSVC), OSV, Exploit-DB, Metasploit —
+- **Sources**: NVD, CISA KEV, EPSS, CISA Vulnrichment (SSVC), OSV, Exploit-DB, Metasploit, Nuclei templates —
   synchronized in the background, on a schedule you set
 - **Sign-in**: passwords, OpenID Connect (SSO), SCIM provisioning, authenticator app, passkeys,
   recovery codes; two-step sign-in can be required
-- **Security log**: append-only record of second-factor changes
+- **Logs that show tampering**: the security log and the audit of decisions are chained and export
+  as signed files anyone can verify offline
 
 Details: [web interface](docs/web.md) · [administration, users and sign-in](docs/administration.md)
 

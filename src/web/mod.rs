@@ -68,6 +68,43 @@ impl AppState {
         Ok(crate::settings::effective(&self.config, db)?)
     }
 
+    /// Asks the scheduler for a synchronization of one source, or of every
+    /// enabled one. Sources already waiting, running, or started less than
+    /// `web.min_manual_sync_minutes` ago are set aside: asking again and again
+    /// does not hammer the upstream services or pile up cycles. Returns the
+    /// sources that will be synchronized, or why none will.
+    pub fn request_sync(&self, db: &Database, source: Option<String>, by: i64) -> Result<Vec<String>, String> {
+        use crate::scheduler::{SyncOrder, SyncRequest};
+        let config = crate::settings::effective(&self.config, db).map_err(|e| e.to_string())?;
+        let all = source.is_none();
+        let wanted = match source {
+            Some(source) => vec![source],
+            None => config.sync.sources.clone(),
+        };
+        let minutes = config.web.min_manual_sync_minutes;
+        let recent = db.recently_synced_sources(minutes).map_err(|e| e.to_string())?;
+        let mut queued = self.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let accepted: Vec<String> = wanted.iter().filter(|s| !queued.contains(s) && !recent.contains(s)).cloned().collect();
+        if accepted.is_empty() {
+            return Err(if minutes > 0 {
+                format!("already waiting, running, or synchronized less than {minutes} minutes ago")
+            } else {
+                "already waiting or running".to_string()
+            });
+        }
+        let request = match (all && accepted.len() == wanted.len(), accepted.as_slice()) {
+            (true, _) => SyncRequest::All,
+            (false, [one]) if !all => SyncRequest::Source(one.clone()),
+            _ => SyncRequest::Sources(accepted.clone()),
+        };
+        let sent = self.sync_trigger.lock().map(|tx| tx.send(SyncOrder { request, by: Some(by) }).is_ok()).unwrap_or(false);
+        if !sent {
+            return Err("the scheduler is not running".to_string());
+        }
+        queued.extend(accepted.iter().cloned());
+        Ok(accepted)
+    }
+
     pub fn secure_cookies(&self) -> bool {
         self.config.web.secure_cookies || self.config.web.base_url.starts_with("https://")
     }
@@ -475,26 +512,8 @@ async fn mcp_http(State(state): St, ApiUser(user): ApiUser, headers: axum::http:
         }
         let user_id = user.id;
         // A synchronization asked through MCP is queued like one asked in the UI
-        let trigger = |source: Option<String>| {
-            let (request, sources) = match source {
-                Some(source) => (crate::scheduler::SyncRequest::Source(source.clone()), vec![source]),
-                None => (
-                    crate::scheduler::SyncRequest::All,
-                    state.effective_config(&db).map(|c| c.sync.sources).unwrap_or_default(),
-                ),
-            };
-            let order = crate::scheduler::SyncOrder { request, by: Some(user_id) };
-            let sent = state.sync_trigger.lock().map(|tx| tx.send(order).is_ok()).unwrap_or(false);
-            if sent {
-                let mut queued = state.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
-                for source in sources {
-                    if !queued.contains(&source) {
-                        queued.push(source);
-                    }
-                }
-            }
-            sent
-        };
+        // A synchronization asked through MCP goes through the same gate as one asked in the UI
+        let trigger = |source: Option<String>| state.request_sync(&db, source, user_id);
         let server = crate::mcp::Mcp {
             db: &db,
             caller: crate::mcp::Caller::User(user),
@@ -620,6 +639,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/orgs/{org}/leave", post(mfa::org_leave))
         .route("/admin/mfa", post(admin::mfa_requirement))
         .route("/admin/security", get(admin::security_log))
+        .route("/admin/security/export", get(admin::security_log_export))
+        .route("/orgs/{org}/audit/export", get(pages::org_audit_export))
         .route("/settings/password", post(pages::password_change))
         .route("/settings/tokens", post(pages::token_create))
         .route("/settings/tokens/{id}/delete", post(pages::token_delete))
@@ -666,6 +687,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/vendors", get(api::vendors))
         .route("/vendors/{vendor}/products", get(api::products))
         .route("/weaknesses", get(api::weaknesses))
+        .route("/security-log", get(api::security_log))
+        .route("/organizations/{org}/audit", get(api::audit_log))
         .route("/organizations", get(api::organizations))
         .route("/organizations/{org}/projects", get(api::projects))
         .route("/organizations/{org}/projects/{project}", get(api::project))
@@ -756,6 +779,7 @@ mod tests {
         let mut cve = crate::models::Cve::new("CVE-2024-4242".into());
         cve.description = Some("Test <script>alert(1)</script> vulnerability".into());
         cve.cvss_v3_score = Some(9.8);
+        cve.nuclei_template = Some("http/cves/2024/CVE-2024-4242.yaml".into());
         db.upsert_cve(&cve).unwrap();
         drop(db);
 
@@ -898,6 +922,9 @@ mod tests {
         assert_eq!(detail.status, StatusCode::OK);
         assert!(detail.body.contains("&lt;script&gt;"));
         assert!(detail.body.contains("New CVE"));
+        // A detection template is shown as such, with a link to it, and is not an exploit
+        assert!(detail.body.contains("https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2024/CVE-2024-4242.yaml"));
+        assert!(detail.body.contains("Detection") && !detail.body.contains("public exploit"));
 
         assert_eq!(app.get("/cve/CVE-1999-0000", Some(&alice)).await.status, StatusCode::NOT_FOUND);
         assert_eq!(app.get("/nope", Some(&alice)).await.status, StatusCode::NOT_FOUND);
@@ -1458,8 +1485,20 @@ mod tests {
         let run = db.start_sync("osv").unwrap();
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("synchronizing…"));
         db.complete_sync(run, 3, 0).unwrap();
+        // Asking again for a source that is waiting or just ran is not repeated, and says why
+        let again = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
+        let flash = again.cookie.expect("explanation");
+        assert!(flash.contains("not%20requested") && flash.contains("less%20than%205%20minutes"), "{flash}");
+        assert!(app.sync_rx.try_recv().is_err());
+        // "Sync now" leaves out what just ran and asks for the rest; a second click asks for nothing
         app.post("/sync", Some(&admin), "back=%2Fadmin").await;
-        assert_eq!(app.sync_rx.try_recv().unwrap().request, SyncRequest::All);
+        assert_eq!(
+            app.sync_rx.try_recv().unwrap().request,
+            SyncRequest::Sources(vec!["nvd".into(), "cisa_kev".into(), "vulnrichment".into()])
+        );
+        let second = app.post("/sync", Some(&admin), "back=%2Fadmin").await;
+        assert_eq!(second.location.as_deref(), Some("/admin"));
+        assert!(app.sync_rx.try_recv().is_err());
 
         let saved = app.post("/admin/sources", Some(&admin), "interval=15&nvd_api_key=secret-key-1").await;
         assert_eq!(saved.status, StatusCode::SEE_OTHER);
@@ -1618,6 +1657,19 @@ mod tests {
         let alice_id = db.get_credentials("alice").unwrap().unwrap().0.id;
         assert_eq!(db.list_push_subscriptions(alice_id).unwrap().len(), 1);
         assert!(app.get("/settings", Some(&alice)).await.body.contains("laptop"));
+
+        // A test through a browser destination says so when nobody is there to receive it
+        let admin = app.register("zadmin").await; // not the first account: grant it below
+        db.set_admin(db.get_credentials("zadmin").unwrap().unwrap().0.id, true).unwrap();
+        let admin = app.post("/login", None, "username=zadmin&password=a-long-password").await.cookie.unwrap_or(admin);
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Browsers").await;
+        let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
+        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
+        let flash = tested.cookie.unwrap();
+        assert!(flash.contains("failed") && flash.contains("none%20of%20your%20browsers"), "{flash}");
+        // The list tells how many projects a shared destination serves
+        let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
+        assert!(listed.contains("available to all") && listed.contains("0 of 1 project"));
 
         // The inbox is read once, by its owner only; signed out, it is empty
         db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
@@ -2807,6 +2859,34 @@ mod tests {
         assert_eq!(app.post("/orgs/carols/leave", Some(&carol), "").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post("/orgs/acme/leave", Some(&carol), "").await.status, StatusCode::NOT_FOUND);
 
+        // The security log exports signed, for administrators only, and the export verifies
+        assert_eq!(app.get("/admin/security/export?format=json", Some(&carol)).await.status, StatusCode::FORBIDDEN);
+        let page = app.get("/admin/security", Some(&root)).await.body;
+        assert!(page.contains("Chain intact") && page.contains("/admin/security/export?format=json"));
+        let exported = app.get("/admin/security/export?format=json", Some(&root)).await;
+        assert_eq!(exported.status, StatusCode::OK);
+        let export: crate::trail::Export = serde_json::from_str(&exported.body).unwrap();
+        let verified = crate::trail::verify(&export, Some(&db.log_key_fingerprint().unwrap())).unwrap();
+        assert!(verified.count >= 4 && verified.scope == "instance");
+        let csv = app.get("/admin/security/export?format=csv", Some(&root)).await.body;
+        assert!(csv.starts_with("id,at,actor_id,actor,") && csv.lines().count() == verified.count + 1);
+        assert_eq!(app.get("/admin/security/export?format=xml", Some(&root)).await.status, StatusCode::BAD_REQUEST);
+        // Same content through the API, with an administrator's token only
+        let root_token = tokens_of(&app.post("/settings/tokens", Some(&root), "name=audit&password=a-long-password").await.body).remove(0);
+        let api = app.api("/api/security-log", Some(&format!("Bearer {root_token}"))).await;
+        let api_export: crate::trail::Export = serde_json::from_str(&api.body).unwrap();
+        assert_eq!(api_export.head, crate::trail::verify(&api_export, None).unwrap().head);
+        let carol_token = tokens_of(&app.post("/settings/tokens", Some(&carol), "name=x&password=a-long-password").await.body).remove(0);
+        assert_eq!(app.api("/api/security-log", Some(&format!("Bearer {carol_token}"))).await.status, StatusCode::FORBIDDEN);
+        // The audit of an organization exports for its members, not for others
+        assert!(app.get("/orgs/acme", Some(&root)).await.body.contains("/orgs/acme/audit/export?format=json"));
+        let audit = app.get("/orgs/acme/audit/export?format=json", Some(&root)).await;
+        let audit: crate::trail::Export = serde_json::from_str(&audit.body).unwrap();
+        assert_eq!(crate::trail::verify(&audit, None).unwrap().scope, "organization:acme");
+        assert_eq!(app.get("/orgs/acme/audit/export?format=json", Some(&carol)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/organizations/acme/audit", Some(&format!("Bearer {carol_token}"))).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/organizations/acme/audit", Some(&format!("Bearer {root_token}"))).await.status, StatusCode::OK);
+
         // The administrators read who did what; nobody else
         assert_eq!(app.get("/admin/security", Some(&carol)).await.status, StatusCode::FORBIDDEN);
         let log = app.get("/admin/security", Some(&root)).await.body;
@@ -2843,6 +2923,9 @@ mod tests {
         // Live filters: the script is on every page and the forms carry what it refreshes
         assert!(app.get("/static/filter.js", None).await.body.contains("form.filters"));
         assert!(app.get("/static/logo.svg", None).await.body.starts_with("<svg"));
+        // The stylesheet has a layout for narrow screens, and pages tell phones not to zoom out
+        assert!(app.get("/static/app.css", None).await.body.contains("@media (max-width: 760px)"));
+        assert!(app.get("/login", None).await.body.contains("name=\"viewport\" content=\"width=device-width"));
         assert!(cves_icon(&app).await);
         let cves = app.get("/cve", Some(&alice)).await.body;
         assert!(cves.contains("src=\"/static/filter.js\"") && cves.contains("class=\"filters\""));

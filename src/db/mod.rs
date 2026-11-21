@@ -15,6 +15,7 @@ mod platform;
 mod provisioning;
 mod roles;
 mod sso;
+mod trail;
 pub use access::*;
 pub use destinations::*;
 pub use distro::*;
@@ -22,6 +23,7 @@ pub use inventory::*;
 pub use lifecycle::*;
 pub use mfa::*;
 pub use sso::*;
+pub use trail::*;
 pub use platform::*;
 pub use provisioning::*;
 
@@ -562,6 +564,12 @@ impl Database {
             }
         }
 
+        // Migration v21 -> v22: chained logs
+        if schema_version < 22 {
+            tracing::info!("Upgrading database schema to v22 (chained logs)");
+            self.migrate_trail()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -660,6 +668,7 @@ impl Database {
         self.migrate_passkey_login()?;
         self.migrate_access_v20()?;
         self.migrate_seal_secrets()?;
+        self.migrate_trail()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1190,10 +1199,17 @@ impl Database {
         Ok(())
     }
 
-    /// Récupère la date du dernier sync réussi pour une source
+    /// Forgets a run that turned out to have nothing to do
+    pub fn discard_sync(&self, sync_id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM sync_history WHERE id = ?1 AND status = 'running'", params![sync_id])?;
+        Ok(())
+    }
+
+    /// When the last successful sync of a source **started**: what changed
+    /// upstream while it was running is then covered by the next one.
     pub fn get_last_sync(&self, source: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         let result: Option<String> = self.conn.query_row(
-            "SELECT completed_at FROM sync_history WHERE source = ?1 AND status = 'completed' ORDER BY completed_at DESC LIMIT 1",
+            "SELECT started_at FROM sync_history WHERE source = ?1 AND status = 'completed' ORDER BY started_at DESC LIMIT 1",
             params![source],
             |row| row.get(0),
         ).optional()?;
@@ -1523,14 +1539,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 21
+        // Check schema version is 22
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "21");
+        assert_eq!(version, "22");
     }
 
     #[test]

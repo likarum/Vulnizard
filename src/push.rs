@@ -55,6 +55,18 @@ fn vapid_authorization(key: &SigningKey, endpoint: &reqwest::Url, subject: &str,
     )
 }
 
+/// Who the push service may contact about this sender. The standard asks for
+/// a `mailto:` or `https:` URI and some services refuse anything else: the
+/// configured contact, else the public URL when it is https, else a
+/// placeholder address (an instance reached over plain http has no better).
+fn vapid_subject(config: &Config) -> String {
+    match config.web.push_contact.as_deref().map(str::trim) {
+        Some(contact) if contact.starts_with("mailto:") || contact.starts_with("https://") => contact.to_string(),
+        _ if config.web.base_url.starts_with("https://") => config.web.base_url.clone(),
+        _ => "mailto:admin@vulnizard.invalid".to_string(),
+    }
+}
+
 /// A push endpoint is given by the browser, hence by the user: it must be an
 /// https URL of a public host, whatever the "private targets" setting.
 pub fn check_endpoint(base: &Config, endpoint: &str) -> Result<crate::notify::Target> {
@@ -72,7 +84,7 @@ pub fn notify_user(db: &Database, config: &Config, user_id: i64) -> usize {
     let Ok(key) = signing_key(db) else {
         return 0;
     };
-    let subject = config.web.base_url.clone();
+    let subject = vapid_subject(config);
     let now = chrono::Utc::now().timestamp();
     let mut reached = 0;
     for (endpoint, _) in db.list_push_subscriptions(user_id).unwrap_or_default() {
@@ -147,5 +159,17 @@ mod tests {
         assert!(check_endpoint(&config, "https://127.0.0.1/push").is_err());
         assert!(check_endpoint(&config, "https://10.0.0.5/push").is_err());
         assert!(check_endpoint(&config, "https://8.8.8.8/push").is_ok());
+    }
+
+    #[test]
+    fn the_contact_given_to_push_services_is_a_mailto_or_https_uri() {
+        let mut config = Config::default(); // http://127.0.0.1:8000
+        assert_eq!(vapid_subject(&config), "mailto:admin@vulnizard.invalid");
+        config.web.base_url = "https://vulnizard.example.org".into();
+        assert_eq!(vapid_subject(&config), "https://vulnizard.example.org");
+        config.web.push_contact = Some("mailto:secops@example.org".into());
+        assert_eq!(vapid_subject(&config), "mailto:secops@example.org");
+        config.web.push_contact = Some("not a uri".into());
+        assert_eq!(vapid_subject(&config), "https://vulnizard.example.org");
     }
 }

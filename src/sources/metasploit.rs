@@ -85,12 +85,12 @@ impl CveSource for MetasploitSource {
         let mut result = SyncResult::default();
 
         // Metasploit est mis à jour quelques fois par semaine - skip si sync < 24h
-        if !opts.force_full {
+        if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
                 if hours_since < 24 {
                     println!("━━━ Metasploit: Skipped (last sync {}h ago) ━━━", hours_since);
-                    return Ok(result);
+                    return Ok(SyncResult::skipped());
                 }
             }
         }

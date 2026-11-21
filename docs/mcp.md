@@ -21,7 +21,8 @@ claude mcp add vulnizard -- /path/to/vulnizard --db /path/to/vulnizard.db mcp
 
 Read tools: `search_cves`, `get_cve`, `list_vendors`, `list_products`, `list_weaknesses`,
 `list_projects`, `list_reports`, `get_report`, `list_applications`, `list_watchlist`, `get_evolution`,
-`get_state_at`, `get_audit_log`, `list_inventory`, `list_notifications`, `database_status`.
+`get_state_at`, `get_audit_log`, `list_inventory`, `list_notifications`, `get_security_log` (administrators),
+`database_status`.
 
 Write tools (off by default: *Admin → MCP* for HTTP, `--allow-write` for stdio): `create_project`,
 `subscribe`, `unsubscribe`, `add_application`, `update_application_version`, `choose_components`

@@ -9,7 +9,6 @@ use super::views::{self, layout, Nav};
 use super::{blocking, AppError, St, User};
 use crate::auth;
 use crate::db::{normalize_domains, Account, Provider, CONFIG_PROVIDER};
-use crate::scheduler::SyncRequest;
 use crate::settings;
 
 pub(super) fn require_admin(user: &Account) -> Result<(), AppError> {
@@ -30,22 +29,6 @@ pub(super) fn admin_tabs(active: &str) -> maud::Markup {
         ("/admin/sso", "Single sign-on", active == "sso"),
         ("/admin/security", "Security log", active == "security"),
     ])
-}
-
-/// Asks the scheduler for a sync and records the sources as queued, so the
-/// request is visible before the scheduler picks it up.
-fn request_sync(st: &super::AppState, request: SyncRequest, sources: &[String], by: i64) -> bool {
-    let order = crate::scheduler::SyncOrder { request, by: Some(by) };
-    let sent = st.sync_trigger.lock().map(|tx| tx.send(order).is_ok()).unwrap_or(false);
-    if sent {
-        let mut queued = st.sync_queue.lock().unwrap_or_else(|e| e.into_inner());
-        for source in sources {
-            if !queued.contains(source) {
-                queued.push(source.clone());
-            }
-        }
-    }
-    sent
 }
 
 pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
@@ -143,12 +126,13 @@ pub struct SyncForm {
 /// Starts a sync cycle now (button of the page header)
 pub async fn sync_now(State(st): St, User(user): User, Form(form): Form<SyncForm>) -> ActionResult {
     require_admin(&user)?;
-    let enabled = blocking(|| -> Result<Vec<String>, AppError> {
-        Ok(st.effective_config(&st.db()?)?.sync.sources)
-    })?;
-    let sent = request_sync(&st, SyncRequest::All, &enabled, user.id);
-    if !sent {
-        return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
+    // A request for sources that just ran or are already waiting is simply not repeated:
+    // the header shows the state of the synchronization either way
+    let asked = blocking(|| -> Result<Result<Vec<String>, String>, AppError> { Ok(st.request_sync(&st.db()?, None, user.id)) })?;
+    if let Err(reason) = asked {
+        if reason.contains("scheduler") {
+            return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
+        }
     }
     // Back to the page the button was on (local paths only)
     let back = form.back.as_str();
@@ -493,6 +477,68 @@ pub async fn mfa_requirement(
     })
 }
 
+/// Says whether a log still chains from its first entry, and offers its
+/// signed export
+pub(super) fn log_integrity(check: &crate::db::ChainCheck, fingerprint: &str, export: &str) -> maud::Markup {
+    html! {
+        div.card {
+            p {
+                @match check.broken_at {
+                    None => { strong { "Chain intact" } " — " (check.entries) " entr" @if check.entries == 1 { "y" } @else { "ies" } ", each linked to the previous one." }
+                    Some((position, id)) => {
+                        strong.error { "Chain broken at entry " (position) " (id " (id) ")" }
+                        ": this entry, or one before it, was changed or removed outside the application."
+                    }
+                }
+            }
+            p {
+                a.button href={ (export) "?format=json" } { "Export (signed JSON)" }
+                " " a href={ (export) "?format=csv" } { "CSV, for reading" }
+            }
+            p.muted {
+                "The JSON export is signed by this instance (key " code { (fingerprint) } ") and can be checked anywhere with "
+                code { "vulnizard log verify <file> --key " (fingerprint) } ". "
+                "Keep exports somewhere else: whoever controls this server could rewrite the log and sign it again, and an earlier export is what shows it."
+            }
+        }
+    }
+}
+
+/// A log export as a download
+pub(super) fn export_response(export: &crate::trail::Export, format: &str, name: &str) -> Result<axum::response::Response, AppError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let (body, content_type, extension) = match format {
+        "csv" => (crate::trail::to_csv(export), "text/csv; charset=utf-8", "csv"),
+        "json" | "" => (
+            serde_json::to_string_pretty(export).map_err(anyhow::Error::from)?,
+            "application/json",
+            "json",
+        ),
+        _ => return Err(AppError::Bad("Unknown format: json or csv.".into())),
+    };
+    let day = export.exported_at.get(..10).unwrap_or("export");
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"vulnizard-{name}-{day}.{extension}\"")),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ExportQuery {
+    #[serde(default)]
+    pub format: String,
+}
+
+pub async fn security_log_export(State(st): St, User(user): User, Query(q): Query<ExportQuery>) -> ActionResult {
+    require_admin(&user)?;
+    blocking(|| export_response(&st.db()?.export_security_log()?, &q.format, "security-log"))
+}
+
 /// Trail of account security events (second factors, requirement)
 pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
     require_admin(&user)?;
@@ -506,6 +552,8 @@ pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
             |e| format!("{} {} {} {} {}", e.at, e.label(), e.username, e.actor, e.detail.as_deref().unwrap_or("")),
             |_, _| None,
         );
+        let integrity = db.check_security_log()?;
+        let fingerprint = db.log_key_fingerprint()?;
         Ok(layout(
             Nav::Admin,
             "Security log",
@@ -514,6 +562,7 @@ pub async fn security_log(State(st): St, User(user): User) -> HtmlResult {
                 h1 { "Administration" }
                 (admin_tabs("security"))
                 p.muted { "Second factors set up, removed or reset, recovery codes used, and changes of the requirement. Entries cannot be changed or removed." }
+                (log_integrity(&integrity, &fingerprint, "/admin/security/export"))
                 (listing.filter_box("Filter: account, event, author…", events.len(), total))
                 (super::mfa::events_table(&events, true))
                 @if total == 1000 { p.muted { "Showing the 1000 most recent entries." } }
@@ -879,10 +928,10 @@ pub async fn source_action(
             "enable" => settings::set_source_enabled(&st.config, &db, &source, true)?,
             "disable" => settings::set_source_enabled(&st.config, &db, &source, false)?,
             "sync" => {
-                if !request_sync(&st, SyncRequest::Source(source.clone()), std::slice::from_ref(&source), user.id) {
-                    return Err(AppError::Internal(anyhow::anyhow!("scheduler is not running")));
-                }
-                return Ok(flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} requested.")));
+                return Ok(match st.request_sync(&db, Some(source.clone()), user.id) {
+                    Ok(_) => flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} requested.")),
+                    Err(reason) => flash_redirect(&st, "/admin/sources", &format!("Synchronization of {source} not requested: {reason}.")),
+                });
             }
             _ => return Err(AppError::Bad("Invalid action".into())),
         }

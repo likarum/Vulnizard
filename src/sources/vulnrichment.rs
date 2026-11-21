@@ -121,6 +121,13 @@ impl VulnrichmentSource {
         let commits: Vec<GitHubCommit> = response.json()
             .with_context(|| "Failed to parse commits response")?;
 
+        // One page of commits is read. A full page means there are more (a long
+        // interruption): rather than miss files, everything is read again.
+        if commits.len() >= 100 {
+            println!("  Too many commits since the last sync: full sync");
+            return self.full_sync(db);
+        }
+
         if commits.is_empty() {
             println!("  No new commits since last sync");
             return Ok(result);
@@ -146,15 +153,19 @@ impl VulnrichmentSource {
                 .header("Accept", "application/vnd.github.v3+json")
                 .send();
 
-            if let Ok(resp) = commit_response {
-                if resp.status().is_success() {
-                    if let Ok(details) = resp.json::<GitHubCommitDetails>() {
-                        for file in details.files {
-                            if file.filename.ends_with(".json") && file.filename.contains("/CVE-") {
-                                modified_cve_files.insert(file.filename);
-                            }
-                        }
-                    }
+            // A commit that cannot be read (rate limit, network) would leave its files
+            // unknown while the sync is recorded as done: read everything instead
+            let details = match commit_response {
+                Ok(resp) if resp.status().is_success() => resp.json::<GitHubCommitDetails>().ok(),
+                _ => None,
+            };
+            let Some(details) = details else {
+                println!("  A commit could not be read: full sync");
+                return self.full_sync(db);
+            };
+            for file in details.files {
+                if file.filename.ends_with(".json") && file.filename.contains("/CVE-") {
+                    modified_cve_files.insert(file.filename);
                 }
             }
         }
@@ -296,13 +307,13 @@ impl CveSource for VulnrichmentSource {
 
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         // Check if sync should be skipped (< 24h since last sync)
-        if !opts.force_full {
+        if opts.may_skip_if_fresh() {
             if let Ok(Some(last_sync_str)) = db.get_metadata(METADATA_KEY_LAST_SYNC) {
                 if let Ok(last_sync) = DateTime::parse_from_rfc3339(&last_sync_str) {
                     let hours_since = (Utc::now() - last_sync.with_timezone(&Utc)).num_hours();
                     if hours_since < 24 {
                         println!("━━━ Vulnrichment: Skipped (last sync {}h ago, updates daily) ━━━", hours_since);
-                        return Ok(SyncResult::default());
+                        return Ok(SyncResult::skipped());
                     }
                 }
             }

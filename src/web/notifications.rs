@@ -584,8 +584,18 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
     );
     let new_kind = new_kind.filter(|k| DESTINATION_KINDS.iter().any(|(kind, _)| kind == k));
     let base = "/admin/notifications?tab=destinations";
+    // Organization of every project, to tell how many projects a shared destination is offered to
+    let projects: Vec<Option<i64>> = {
+        let mut stmt = db.conn().prepare("SELECT organization_id FROM projects")?;
+        let rows = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
     Ok(html! {
-        p.muted { "Every destination. Each belongs to the instance, an organization or a single project, which decides who can use it." }
+        p.muted {
+            "Every destination. Each belongs to the instance, an organization or a single project, which decides who can use it. "
+            "A project is notified through a destination once it has a rule for it (its Settings). "
+            "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
+        }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
         table.list {
             thead {
@@ -607,7 +617,17 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
                                 _ => { "project " (d.scope_label) }
                             }
                         }
-                        td { (d.rules) " project" @if d.rules != 1 { "s" } }
+                        td {
+                            // A shared destination is offered to every project of its scope; a rule makes a project use it
+                            @match d.scope.as_str() {
+                                "instance" => { (d.rules) " of " (projects.len()) " project" @if projects.len() != 1 { "s" } div.muted { "available to all" } }
+                                "organization" => {
+                                    @let within = projects.iter().filter(|org| **org == d.scope_id).count();
+                                    (d.rules) " of " (within) " project" @if within != 1 { "s" } div.muted { "available to its organization" }
+                                }
+                                _ => { @if d.rules > 0 { "its project" } @else { span.muted { "not used yet" } } }
+                            }
+                        }
                         td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
                         td.right.nowrap {
                             form.inline method="post" action={ "/admin/notifications/destinations/" (d.id) } {
@@ -690,8 +710,22 @@ pub async fn admin_destination_action(
             "test" => {
                 let config = st.effective_config(&db)?;
                 let outcome = if destination.kind == "browser" {
-                    crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings")
-                        .map(|reached| format!("sent to {reached} of your browsers"))
+                    // Browsers are addressed per person: the test goes to those of whoever asks
+                    let registered = db.list_push_subscriptions(user.id)?.len();
+                    if registered == 0 {
+                        Err(anyhow::anyhow!(
+                            "none of your browsers is registered. Enable notifications for this browser first, in Settings → Browser notifications"
+                        ))
+                    } else {
+                        crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
+                            |reached| match reached {
+                                0 => Err(anyhow::anyhow!(
+                                    "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
+                                )),
+                                n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
+                            },
+                        )
+                    }
                 } else {
                     notify::send_system(&config, &destination, "Test", "Test message sent from the Vulnizard administration.")
                         .map(|()| "sent".to_string())

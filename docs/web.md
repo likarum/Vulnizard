@@ -38,7 +38,8 @@ database was last synchronized (administrators can start a sync from there):
   notifications (`web.sync_interval_minutes`)
 - **Read-only REST API** under `/api` (`Authorization: Bearer <token>` created in *Settings*, or HTTP Basic):
   `/api/cve`, `/api/cve/{id}`, `/api/vendors`, `/api/vendors/{vendor}/products`, `/api/weaknesses`,
-  `/api/organizations`, `/api/organizations/{org}/projects[/{project}[/reports[/{day}]]]`
+  `/api/organizations`, `/api/organizations/{org}/projects[/{project}[/reports[/{day}]]]`,
+  `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
 Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin
 files: browser notifications (Web Push), passkeys, and filters that apply while typing. Every list

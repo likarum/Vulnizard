@@ -8,7 +8,7 @@ db_path = "vulnizard.db"
 # Number of years of CVE history to fetch (default: 2)
 history_years = 2
 
-# Sources to sync (available: nvd, cisa_kev, epss, vulnrichment, osv, distros, exploitdb, metasploit)
+# Sources to sync (available: nvd, cisa_kev, epss, vulnrichment, osv, distros, exploitdb, metasploit, nuclei)
 # distros = advisories of Linux distributions; it skips itself while no inventory reports system packages
 # Can also be changed in the UI (Admin → Vulnerability sources), which overrides this file
 sources = ["nvd", "cisa_kev", "epss", "vulnrichment", "distros"]
@@ -37,6 +37,13 @@ allow_registration = false
 sync_interval_minutes = 60
 # Set to true behind HTTPS (Secure flag on the session cookie)
 secure_cookies = false
+# Minutes before a source that just ran can be synchronized again on request (0 = no limit)
+# min_manual_sync_minutes = 5
+
+# Contact given to browser push services (a mailto: or https: URI). Defaults to base_url when it
+# is https.
+# push_contact = "mailto:security@example.org"
+
 # Reverse proxies (other than one on this machine) whose X-Forwarded-For tells the client
 # address, used to count failed sign-ins per client
 # trusted_proxies = ["10.0.0.2"]

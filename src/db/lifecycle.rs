@@ -223,7 +223,12 @@ impl Database {
              WHERE w.id = ?1 AND p.organization_id IS NOT NULL",
             params![entry_id, kind, status, previous, actor.user_id, actor.name, comment],
         )?;
-        Ok(())
+        // Linked to the previous event of the organization at once. Detections come by
+        // the thousand during a scan: the scan links them all when it ends.
+        if kind == "detected" {
+            return Ok(());
+        }
+        self.seal_audit_events()
     }
 
     /// Records the detection of a new entry (called by the scan)
@@ -312,7 +317,7 @@ impl Database {
             ),
             params![id, actor.user_id, actor.name, comment],
         )?;
-        Ok(())
+        self.seal_audit_events()
     }
 
     /// Deletes a project. Its decision history is kept (shown as a deleted

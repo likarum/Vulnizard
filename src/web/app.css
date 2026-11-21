@@ -367,3 +367,68 @@ div.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-
 
 /* QR code of the authenticator app setup */
 .qr svg { width: 220px; height: 220px; background: #fff; padding: 8px; border-radius: 6px; }
+
+/* ---------- Narrow screens (phones) ----------
+   The layout is the desktop one made to fit: navigation on single scrolling
+   lines, forms in one column, and tables that scroll sideways inside their
+   own box instead of widening the page. */
+@media (max-width: 760px) {
+  main { padding: 14px 12px 48px; }
+  h1 { font-size: 21px; margin: 4px 0 12px; }
+  h2 { font-size: 17px; margin: 22px 0 8px; }
+
+  header.top .bar { padding: 8px 12px; gap: 6px 12px; }
+  header.top .user { margin-left: 0; width: 100%; justify-content: flex-end; }
+  header.top .zones { flex-direction: column; flex-wrap: nowrap; }
+  .zone, .zone.product {
+    flex: none;
+    flex-wrap: nowrap;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    padding: 6px 12px 8px;
+    scrollbar-width: none;
+  }
+  .zone::-webkit-scrollbar { display: none; }
+  .zone.info { border-left: none; border-top: 1px solid var(--border); }
+  .zone-label { flex: none; }
+  details.menu { flex: none; }
+  details.menu summary { min-width: 0; }
+  details.menu ul { position: fixed; left: 12px; right: 12px; top: auto; min-width: 0; }
+
+  nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  nav.tabs::-webkit-scrollbar { display: none; }
+  nav.tabs a { white-space: nowrap; padding: 8px 10px; }
+
+  .card { padding: 12px; }
+  .charts { grid-template-columns: 1fr; }
+  .tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .tile .value { font-size: 24px; }
+  dl.meta { grid-template-columns: 1fr; gap: 0; }
+  dl.meta dt { margin-top: 8px; font-size: 13px; }
+
+  /* A table scrolls inside its box; cells keep a readable width */
+  table.list {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+  table.list th, table.list td { padding: 7px 9px; }
+  table.list td { min-width: 5.5em; }
+  table.list td.right, table.list td.nowrap { min-width: 0; }
+
+  form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
+  form.filters > *, form.row > * { width: 100%; }
+  form.filters label, form.row label { display: flex; align-items: center; gap: 8px; }
+  form.filters label input[type="checkbox"], form.row label input[type="checkbox"] { width: auto; }
+  form.stack { max-width: none; }
+  fieldset label { display: flex; margin: 4px 0; }
+  td form.inline { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+  input, select, textarea { max-width: 100%; }
+  input, select, button, a.button { min-height: 36px; }
+  button.small { min-height: 30px; }
+  .pager { justify-content: space-between; }
+  .head { align-items: flex-start; }
+  code.token { overflow-wrap: anywhere; }
+}

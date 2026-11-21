@@ -1248,7 +1248,12 @@ impl Database {
                 sql.push_str(" AND c.cve_id IN (SELECT cve_id FROM affected_products_normalized WHERE vendor = ?)");
                 args.push(Box::new(vendor.to_string()));
             }
-            _ => {}
+            // A product alone: whatever its vendor
+            (None, Some(product)) => {
+                sql.push_str(" AND c.cve_id IN (SELECT cve_id FROM affected_products_normalized WHERE product = ?)");
+                args.push(Box::new(product.to_string()));
+            }
+            (None, None) => {}
         }
         match filter.cvss.as_deref() {
             Some("none") => sql.push_str(" AND c.cvss_v3_score IS NULL"),
@@ -1566,6 +1571,10 @@ mod tests {
         assert_eq!(ids(CveFilter { search: Some("cve-2024".into()), ..Default::default() }), ["CVE-2024-0200"]);
         assert_eq!(ids(CveFilter { search: Some("DESCRIPTION OF".into()), ..Default::default() }).len(), 2);
         assert_eq!(ids(CveFilter { vendor: Some("nginx".into()), ..Default::default() }), ["CVE-2023-0201"]);
+        // A product alone filters too, whatever the vendor; a vendor and a product must both match
+        assert_eq!(ids(CveFilter { product: Some("nginx".into()), ..Default::default() }), ["CVE-2023-0201"]);
+        assert!(ids(CveFilter { product: Some("nope".into()), ..Default::default() }).is_empty());
+        assert!(ids(CveFilter { vendor: Some("nginx".into()), product: Some("nope".into()), ..Default::default() }).is_empty());
         assert_eq!(ids(CveFilter { cvss: Some("critical".into()), ..Default::default() }), ["CVE-2024-0200"]);
         assert_eq!(ids(CveFilter { cwe: Some("CWE-79".into()), ..Default::default() }), ["CVE-2023-0201"]);
         assert_eq!(ids(CveFilter { tag: Some((alice, "todo".into())), ..Default::default() }), ["CVE-2023-0201"]);
