@@ -7,8 +7,9 @@ decide what to do about each one, and keep the trace of who decided what.
 
 > **Disclaimer.** Vulnizard is largely written by an AI coding assistant under human direction and
 > has had no independent security audit. It comes with no warranty and no liability of any kind, its
-> data can be wrong or incomplete, it has not been tested at scale, and it should not be exposed to
-> the Internet. Read the full [disclaimer](DISCLAIMER.md) before using it.
+> data can be wrong or incomplete, it has not been tested at scale, several features were never
+> tried against the real third-party service, and it should not be exposed to the Internet. Read
+> the full [disclaimer](DISCLAIMER.md) and [what has been tested](https://github.com/likarum/Vulnizard/wiki/What-has-been-tested).
 
 ![Overview of all projects: counters, charts by project and severity, CVEs to review first](docs/overview.png)
 
@@ -100,6 +101,7 @@ sign in, and add what you run. Reverse proxy, HTTPS and settings: [deployment](d
 - [Deployment and configuration](docs/deployment.md)
 - [Command line](docs/cli.md)
 - [Inventory collection (preview)](docs/inventory.md)
+- [What has been tested](https://github.com/likarum/Vulnizard/wiki/What-has-been-tested) — how far each feature was really verified
 
 ## Project
 
