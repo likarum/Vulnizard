@@ -7,7 +7,7 @@ before 1.0, a minor version may change behaviour.
 
 ### Things to know before upgrading
 
-- The database moves to schema v23 at first start (the existing log entries are chained, version
+- The database moves to schema v24 at first start (the existing log entries are chained, version
   ranges record whether their bounds are included). Back it up first; an older version does not
   open it afterwards.
 - **The first synchronization after the upgrade reads the whole history of the NVD again**: about
@@ -63,6 +63,11 @@ before 1.0, a minor version may change behaviour.
   version. Zero means the name is unknown (wrong name, or software the NVD does not describe),
   not that the version is safe. The web form now takes the package ecosystem, as MCP and the
   command line did.
+- **Entries kept without a version are marked.** When no source gives the versions a CVE
+  affects (`*` or `-` in the NVD, an advisory without a range), the application is still matched
+  out of caution; the entry now says *version not given* in the lists to review, and
+  `version_unknown` in MCP `list_watchlist`: read the CVE before deciding. The mark goes when a
+  source gives the versions.
 - A page footer: links to the source, the disclaimer and the issue tracker; the version, for
   signed-in users only.
 - **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
@@ -90,7 +95,7 @@ before 1.0, a minor version may change behaviour.
   and a refusal is tried again instead of failing the run.
 - **"Up to 1.4 included" was read as "before 1.4"** (and "after 1.2" as "from 1.2"): the last
   affected version of such a range was not matched. Each bound now records whether it is
-  included (schema v23); the NVD is read again once to fill it in.
+  included; the NVD is read again once to fill it in.
 - **Product names were matched as substrings**: `docker` matched `mailcow-dockerized`, `podman`
   matched `podman_desktop`. The product is now the application itself, case and separators aside
   (`home_assistant` now matches `home-assistant`, which it did not); with a vendor, the products

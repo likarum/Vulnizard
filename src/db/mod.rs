@@ -610,6 +610,12 @@ impl Database {
             self.migrate_bounds()?;
         }
 
+        // Migration v23 -> v24: entries kept without a version from the sources
+        if schema_version < 24 {
+            tracing::info!("Upgrading database schema to v24 (entries whose version no source gives)");
+            self.migrate_version_unknown()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -644,6 +650,18 @@ impl Database {
              ALTER TABLE applications ADD COLUMN known_cves INTEGER;
              DELETE FROM metadata WHERE key IN ('nvd.history_from', 'nvd.backfill_until');
              INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '23');
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    /// v24: whether an entry is kept without any source giving the affected
+    /// versions. Filled in by the next scan.
+    fn migrate_version_unknown(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE watchlist_entries ADD COLUMN version_unknown INTEGER NOT NULL DEFAULT 0;
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '24');
              COMMIT;",
         )?;
         Ok(())
@@ -729,6 +747,7 @@ impl Database {
         self.migrate_seal_secrets()?;
         self.migrate_trail()?;
         self.migrate_bounds()?;
+        self.migrate_version_unknown()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1627,14 +1646,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 23
+        // Check schema version is 24
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "23");
+        assert_eq!(version, "24");
     }
 
     #[test]

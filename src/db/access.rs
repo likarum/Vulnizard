@@ -72,6 +72,8 @@ pub struct TriageItem {
     pub description: Option<String>,
     /// Group of inventory sources the application is tracked for (empty: added by hand)
     pub group: String,
+    /// Kept without any source giving the affected versions
+    pub version_unknown: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -445,7 +447,7 @@ impl Database {
 
 const TRIAGE_SELECT: &str = "
     SELECT w.id, w.cve_id, w.status, w.priority, a.name, a.version, o.name, p.name,
-           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp
+           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown
     FROM watchlist_entries w
     JOIN applications a ON a.id = w.app_id
     JOIN projects p ON p.id = a.project_id
@@ -469,6 +471,7 @@ fn triage_row(r: &rusqlite::Row) -> rusqlite::Result<TriageItem> {
         kev: r.get::<_, i64>(9)? != 0,
         description: r.get(10)?,
         group: r.get(11)?,
+        version_unknown: r.get(12)?,
     })
 }
 

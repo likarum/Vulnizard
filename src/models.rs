@@ -352,6 +352,10 @@ pub struct WatchlistEntryWithContext {
     pub cve_cvss: Option<f64>,
     pub cve_description: Option<String>,
     pub cve_kev: bool,
+    /// Kept without any source giving the affected versions: to be read
+    /// before being believed
+    #[serde(default)]
+    pub version_unknown: bool,
 }
 
 /// Summary statistics for watchlist

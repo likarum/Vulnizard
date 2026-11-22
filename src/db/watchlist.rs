@@ -517,7 +517,7 @@ impl Database {
                 a.name as app_name, a.version as app_version,
                 p.name as project_name,
                 u.username,
-                c.cvss_v3_score, c.description, c.kev_known_exploited
+                c.cvss_v3_score, c.description, c.kev_known_exploited, w.version_unknown
                FROM watchlist_entries w
                JOIN applications a ON w.app_id = a.id
                JOIN projects p ON a.project_id = p.id
@@ -583,6 +583,7 @@ impl Database {
                 username: row.get(13)?,
                 cve_cvss: row.get(14)?,
                 cve_description: row.get(15)?,
+                version_unknown: row.get(17)?,
                 cve_kev: kev.unwrap_or(0) != 0,
             })
         })?.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -775,13 +776,21 @@ pub(crate) fn like_contains(text: &str) -> String {
 impl Database {
     /// CVE ids currently matching an application (product and package strategies)
     pub fn matching_cve_ids(&self, app: &Application) -> Result<Vec<String>> {
+        Ok(self.matching_cves(app)?.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Same, each CVE with whether it is kept without any source giving its
+    /// versions (`*` or `-` in the NVD, an advisory without a range): the
+    /// application is matched out of caution, the CVE is to be read. Always
+    /// false for an application without a version, which matches everything.
+    pub fn matching_cves(&self, app: &Application) -> Result<Vec<(String, bool)>> {
         // A distribution package is judged by its distribution, which backports
         // fixes: upstream version ranges would be wrong
         if let Some(ecosystem) = app.ecosystem.as_deref().filter(|e| crate::db::is_distro_ecosystem(e)) {
-            return match app.version.as_deref() {
-                Some(version) => self.distro_cves(ecosystem, &app.name, version),
-                None => Ok(Vec::new()),
-            };
+            return Ok(match app.version.as_deref() {
+                Some(version) => self.distro_cves(ecosystem, &app.name, version)?.into_iter().map(|id| (id, false)).collect(),
+                None => Vec::new(),
+            });
         }
         // `%`, `_` or a single letter is not a name
         if !is_matchable_name(&app.name) {
@@ -794,11 +803,14 @@ impl Database {
         if let Some(ref ecosystem) = app.ecosystem {
             self.package_verdicts(ecosystem, &app.name, app.version.as_deref(), &mut said)?;
         }
-        let ids = said.affected();
-        if ids.len() > MAX_APP_MATCHES {
-            return Err(TooGeneric(ids.len()).into());
+        let mut matches = said.affected();
+        if matches.len() > MAX_APP_MATCHES {
+            return Err(TooGeneric(matches.len()).into());
         }
-        Ok(ids)
+        if app.version.is_none() {
+            matches.iter_mut().for_each(|(_, unknown)| *unknown = false);
+        }
+        Ok(matches)
     }
 
     /// How many CVEs the sources hold for an application under its name,
@@ -830,7 +842,7 @@ impl Database {
     /// created per CVE, so catch-all names would fill the database.
     pub fn scan_app_for_cves(&self, app: &Application) -> Result<(i64, i64)> {
         let app_id = app.id.ok_or_else(|| anyhow!("Application must have an ID"))?;
-        let ids = self.matching_cve_ids(app)?;
+        let matches = self.matching_cves(app)?;
         let known = self.known_cve_count(app)?;
         self.write_scope("scan_app", || {
             self.conn().execute("UPDATE applications SET known_cves = ?1 WHERE id = ?2", params![known, app_id])?;
@@ -840,8 +852,14 @@ impl Database {
                 |r| r.get(0),
             )?;
             let (mut new_entries, mut existing_entries) = (0i64, 0i64);
-            for cve_id in &ids {
-                if self.add_watchlist_entry_if_new(app_id, cve_id)? {
+            for (cve_id, version_unknown) in &matches {
+                let added = self.add_watchlist_entry_if_new(app_id, cve_id)?;
+                // The sources are corrected over time: the mark follows them
+                self.conn().execute(
+                    "UPDATE watchlist_entries SET version_unknown = ?1 WHERE app_id = ?2 AND cve_id = ?3 AND version_unknown != ?1",
+                    params![version_unknown, app_id, cve_id],
+                )?;
+                if added {
                     new_entries += 1;
                     if tracked + new_entries > MAX_PROJECT_ENTRIES {
                         return Err(UserFacing(format!(
@@ -1281,10 +1299,17 @@ impl Said {
         self.order.len()
     }
 
-    /// The CVEs that affect the application, all things said
-    fn affected(self) -> Vec<String> {
+    /// The CVEs that affect the application, all things said, each with
+    /// whether it is only kept because no source gives its versions
+    fn affected(self) -> Vec<(String, bool)> {
         let Said { order, verdicts } = self;
-        order.into_iter().filter(|id| verdicts[id].affected()).collect()
+        order
+            .into_iter()
+            .filter_map(|id| {
+                let said = verdicts[&id];
+                said.affected().then(|| (id, !said.precise()))
+            })
+            .collect()
     }
 }
 
@@ -1657,5 +1682,42 @@ mod tests {
         // Without the ecosystem, only the NVD speaks
         assert_eq!(matching("podman", None, None, "5.8.9"), "02 03 04 05");
         assert_eq!(matching("openssl", Some("openssl"), None, "3.6.5"), "07");
+    }
+
+    #[test]
+    fn an_entry_kept_without_any_version_from_the_sources_is_marked() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db);
+        let product = |id: &str, version: &str, end: Option<&str>| {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some("jellyfin".into()),
+                product: Some("jellyfin".into()),
+                version: Some(version.into()),
+                version_end: end.map(String::from),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        };
+        product("CVE-2026-0001", "-", None);
+        product("CVE-2026-0002", "*", Some("10.12.0"));
+        let mut app = Application::new(project, "jellyfin".into());
+        app.version = Some("10.11.11".into());
+        assert_eq!(db.add_application_scanned(&mut app).unwrap(), 2);
+        let marks = || -> Vec<(String, bool)> {
+            db.project_triage(project, false).unwrap().into_iter().map(|i| (i.cve_id[9..].to_string(), i.version_unknown)).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+        };
+        assert_eq!(marks(), [("0001".to_string(), true), ("0002".to_string(), false)]);
+        // The source gives the versions later: the mark goes
+        product("CVE-2026-0001", "*", Some("10.12.0"));
+        db.rescan_all_applications().unwrap();
+        assert_eq!(marks(), [("0001".to_string(), false), ("0002".to_string(), false)]);
+        // Without a version, everything matches and nothing is marked
+        let mut any = Application::new(project, "Jellyfin".into());
+        any.vendor = Some("jellyfin".into());
+        product("CVE-2026-0003", "-", None);
+        assert!(db.matching_cves(&any).unwrap().iter().all(|(_, unknown)| !unknown));
     }
 }

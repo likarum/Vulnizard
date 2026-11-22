@@ -31,7 +31,8 @@ database was last synchronized (administrators can start a sync from there):
     named after the application count too, as `nginx_open_source` for `nginx`); a package ecosystem (Go, npm, PyPI,
     crates.io, Maven) also matches the advisories of the package of that name, at the version.
     When the sources disagree on a CVE, the one that gives versions decides; a CVE for which
-    no source gives any version matches every version (better a false alert than a missed one).
+    no source gives any version matches every version (better a false alert than a missed one)
+    and is marked *version not given* in the list to review: read it before deciding.
     An application marked *unknown to the sources* has no CVE recorded under its name at any
     version, which is not the same as having none at its version. Then the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)

@@ -130,6 +130,11 @@ impl Verdicts {
     pub fn affected(&self) -> bool {
         self.affected || !self.precise
     }
+
+    /// Whether a source gave versions to judge by
+    pub fn precise(&self) -> bool {
+        self.precise
+    }
 }
 
 /// What a product entry of a CVE says of a version: an exact version
