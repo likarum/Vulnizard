@@ -3,6 +3,21 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.1
+
+### Fixed
+
+- **"Up to 5.2 included" no longer wins over an advisory saying no fix exists.** Since 0.2.0 a
+  source that gives versions decides against one that says "every version". An included end
+  names the last version known to be affected, not a fix (the NVD often writes the latest
+  release of the day there): it is still enough when nothing else is said, but an application
+  past it is kept when a package advisory declares the package affected without a fix. The entry
+  is marked *version not given*. An excluded end ("before 5.2"), which names the fix, decides as
+  before.
+- **A vendor also matches its `<name>_project` form.** The NVD names many vendors that way
+  (`sudo_project`) where the CISA KEV catalog writes `sudo`: an application declared with the
+  vendor `sudo` only saw the KEV records.
+
 ## 0.2.0
 
 ### Things to know before upgrading

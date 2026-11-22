@@ -102,38 +102,55 @@ pub fn is_name_variant(product: &str, name: &str) -> bool {
 pub enum Verdict {
     /// The version is in what the source gives as affected
     Affected,
-    /// The source gives versions, and this one is not among them
+    /// The source gives versions, and this one is not among them: before the
+    /// first one affected, or from the one that fixes it on
     NotAffected,
+    /// The version is past the last one the source gives as affected ("up to
+    /// 5.2 included"). That names the last version known to be affected, not
+    /// a fix: sources often write the latest release of the day there.
+    PastLastAffected,
+    /// The source says every version is affected and that no fix exists
+    NoFix,
     /// The source gives nothing to judge by: no version recorded, or none asked
     Unknown,
 }
 
 /// For one CVE, what several sources (or several entries of one) say
-/// together: when at least one is precise, only the precise ones count;
-/// "every version" only decides when nothing says more. Better a false alert
-/// than a missed one, but not against a source that knows.
+/// together. Better a false alert than a missed one, but not against a
+/// source that knows:
+/// - a version inside an affected range is affected;
+/// - else a source naming the fix, or a first affected version, decides
+///   against those that say "every version";
+/// - else "past the last version known to be affected" is enough when nothing
+///   else is said, but not against a source saying no fix exists;
+/// - and when no source gives any version, the application is kept.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Verdicts {
     affected: bool,
-    precise: bool,
+    not_affected: bool,
+    past_last: bool,
+    no_fix: bool,
 }
 
 impl Verdicts {
     pub fn add(&mut self, verdict: Verdict) {
         match verdict {
-            Verdict::Affected => (self.affected, self.precise) = (true, true),
-            Verdict::NotAffected => self.precise = true,
+            Verdict::Affected => self.affected = true,
+            Verdict::NotAffected => self.not_affected = true,
+            Verdict::PastLastAffected => self.past_last = true,
+            Verdict::NoFix => self.no_fix = true,
             Verdict::Unknown => {}
         }
     }
 
     pub fn affected(&self) -> bool {
-        self.affected || !self.precise
+        self.affected || (!self.not_affected && (self.no_fix || !self.past_last))
     }
 
-    /// Whether a source gave versions to judge by
-    pub fn precise(&self) -> bool {
-        self.precise
+    /// Whether a source places the version inside an affected range (as
+    /// opposed to an application kept because no source says enough)
+    pub fn in_a_range(&self) -> bool {
+        self.affected
     }
 }
 
@@ -173,6 +190,9 @@ pub fn product_verdict(
         Greater => false,
         _ => end_included,
     });
+    if after_start && !before_end && end_included {
+        return Verdict::PastLastAffected;
+    }
     yes(after_start && before_end)
 }
 
@@ -186,7 +206,7 @@ pub fn product_affects(
     end: Option<&str>,
     end_included: bool,
 ) -> bool {
-    product_verdict(query, version, start, start_excluded, end, end_included) != Verdict::NotAffected
+    !matches!(product_verdict(query, version, start, start_excluded, end, end_included), Verdict::NotAffected | Verdict::PastLastAffected)
 }
 
 #[cfg(test)]
@@ -206,16 +226,21 @@ mod tests {
 
     #[test]
     fn a_precise_source_decides_against_one_that_says_every_version() {
-        use Verdict::{Affected, NotAffected, Unknown};
+        use Verdict::{Affected, NoFix, NotAffected, PastLastAffected, Unknown};
         let together = |verdicts: &[Verdict]| {
             let mut all = Verdicts::default();
             verdicts.iter().for_each(|v| all.add(*v));
             all.affected()
         };
-        assert!(together(&[Unknown]) && together(&[Unknown, Unknown]) && together(&[]));
-        assert!(!together(&[Unknown, NotAffected]) && !together(&[NotAffected, Unknown]));
+        // Nobody gives a version: kept
+        assert!(together(&[Unknown]) && together(&[Unknown, NoFix]) && together(&[NoFix]) && together(&[]));
+        // A fix is named: it decides, whatever says "every version"
+        assert!(!together(&[Unknown, NotAffected]) && !together(&[NotAffected, NoFix]) && !together(&[NotAffected]));
         assert!(together(&[NotAffected, Affected]) && together(&[Affected, Unknown]));
-        assert!(!together(&[NotAffected]));
+        // Past the last version known affected: enough alone, not against "no fix"
+        assert!(!together(&[PastLastAffected]) && !together(&[PastLastAffected, Unknown]));
+        assert!(together(&[PastLastAffected, NoFix]));
+        assert!(!together(&[PastLastAffected, NoFix, NotAffected]));
     }
 
     #[test]
@@ -275,6 +300,8 @@ mod tests {
         assert_eq!(product_verdict(None, Some("2.0"), None, false, None, false), Verdict::Unknown);
         assert_eq!(product_verdict(Some("1.0"), Some("*"), None, false, Some("2.0"), false), Verdict::Affected);
         assert_eq!(product_verdict(Some("3.0"), Some("*"), None, false, Some("2.0"), false), Verdict::NotAffected);
+        assert_eq!(product_verdict(Some("3.0"), Some("*"), None, false, Some("2.0"), true), Verdict::PastLastAffected);
+        assert_eq!(product_verdict(Some("0.5"), Some("*"), Some("1.0"), false, Some("2.0"), true), Verdict::NotAffected);
         // An exact version covers its line, not its neighbours
         assert!(product_affects(Some("2.4.1"), Some("2.4"), None, false, None, false));
         assert!(!product_affects(Some("2.41"), Some("2.4"), None, false, None, false));

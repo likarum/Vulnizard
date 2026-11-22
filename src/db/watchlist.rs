@@ -921,7 +921,8 @@ impl Database {
         params_vec.push(Box::new(versions::name_key(product)));
         match vendor {
             Some(v) => {
-                sql.push_str("name_key(vendor) = ?2 AND (name_key(product) = ?1 OR name_variant(product, ?3))");
+                // The NVD often names a vendor `<name>_project` (sudo_project)
+                sql.push_str("name_key(vendor) IN (?2, ?2 || 'project') AND (name_key(product) = ?1 OR name_variant(product, ?3))");
                 params_vec.push(Box::new(versions::name_key(v)));
                 params_vec.push(Box::new(product.to_string()));
             }
@@ -1223,9 +1224,10 @@ fn major_of(version: &str) -> Option<u64> {
 /// `>=1.0 <1.4 >=2.0 <=2.3`: each `>=` opens a range, the next `<` or `<=`
 /// closes it, a range left open has no fix.
 ///
-/// Nothing can be told without a version, without a range, with a bound that
-/// is not a version (a commit), or from "every version, no fix" (`>=0`
-/// alone): advisories are often left that way long after the fix.
+/// Nothing can be told without a version, without a range, or with a bound
+/// that is not a version (a commit). "Every version, no fix" (`>=0` alone) is
+/// its own answer: advisories are often left that way long after the fix,
+/// so it gives way to a source that names the fix.
 fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
     use std::cmp::Ordering::{Equal, Greater, Less};
     let (Some(range), Some(version)) = (range, version) else {
@@ -1237,6 +1239,8 @@ fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
     let from_the_start = |start: &str| start == "0" || (versions::is_version(start) && versions::cmp(start, "0") == Equal);
     let mut from: Option<&str> = None;
     let mut open = false;
+    // Past an included end ("last affected"), which names no fix
+    let mut past_last = false;
     for event in range.split_whitespace() {
         if let Some(start) = event.strip_prefix(">=") {
             from = Some(start);
@@ -1260,17 +1264,21 @@ fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
         if after_start && (order == Less || (inclusive && order != Greater)) {
             return Verdict::Affected;
         }
+        past_last |= after_start && inclusive;
     }
     match from {
         Some(start) if open => {
-            if from_the_start(start) || !versions::is_version(start) {
+            if !versions::is_version(start) && start != "0" {
                 Verdict::Unknown
+            } else if from_the_start(start) {
+                Verdict::NoFix
             } else if versions::cmp(version, start) != Less {
                 Verdict::Affected
             } else {
                 Verdict::NotAffected
             }
         }
+        _ if past_last => Verdict::PastLastAffected,
         _ => Verdict::NotAffected,
     }
 }
@@ -1307,7 +1315,7 @@ impl Said {
             .into_iter()
             .filter_map(|id| {
                 let said = verdicts[&id];
-                said.affected().then(|| (id, !said.precise()))
+                said.affected().then(|| (id, !said.in_a_range()))
             })
             .collect()
     }
@@ -1419,7 +1427,7 @@ mod tests {
 
     #[test]
     fn a_version_is_judged_against_the_ranges_of_the_advisory() {
-        let affects = |range: &str, version: &str| range_verdict(Some(range), Some(version)) != Verdict::NotAffected;
+        let affects = |range: &str, version: &str| !matches!(range_verdict(Some(range), Some(version)), Verdict::NotAffected | Verdict::PastLastAffected);
         assert!(affects(">=0 <3.7.3", "3.7.2") && !affects(">=0 <3.7.3", "3.7.3") && !affects(">=0 <3.7.3", "3.7.16"));
         assert!(!affects(">=3.5.0 <3.6.3", "3.4.9") && affects(">=3.5.0 <3.6.3", "3.5.0"));
         // Several ranges: any of them
@@ -1431,7 +1439,11 @@ mod tests {
         // What cannot be told
         let unknown = |range: Option<&str>, version: Option<&str>| range_verdict(range, version) == Verdict::Unknown;
         assert!(unknown(None, Some("1.0")) && unknown(Some(">=0 <1.0"), None));
-        assert!(unknown(Some(">=0"), Some("9.9")) && unknown(Some(">=0.0.0"), Some("9.9")));
+        assert_eq!(range_verdict(Some(">=0"), Some("9.9")), Verdict::NoFix);
+        assert_eq!(range_verdict(Some(">=0.0.0"), Some("9.9")), Verdict::NoFix);
+        assert_eq!(range_verdict(Some(">=1.0 <=1.4"), Some("1.5")), Verdict::PastLastAffected);
+        assert_eq!(range_verdict(Some(">=1.0 <=1.4"), Some("0.9")), Verdict::NotAffected);
+        assert_eq!(range_verdict(Some(">=1.0 <1.4"), Some("1.5")), Verdict::NotAffected);
         assert_eq!(range_verdict(Some(">=2.0"), Some("9.9")), Verdict::Affected);
         assert_eq!(range_verdict(Some(">=0 <1.0"), Some("0.5")), Verdict::Affected);
         assert!(affects(">=0 <0123456789abcdef0123456789abcdef01234567", "9.9"));
@@ -1662,6 +1674,21 @@ mod tests {
         // The previous line never fixed it: it says nothing of this one
         product("CVE-2026-0005", "podman_project", "podman", "*", None);
         add_package("CVE-2026-0005", "github.com/containers/podman/v4", ">=0");
+        // The NVD names the last version known affected, the advisory says no fix exists
+        let mut last = Cve::new("CVE-2024-0008".into());
+        last.description = Some("Flaw".into());
+        last.affected_products.push(AffectedProduct {
+            vendor: Some("podman_project".into()),
+            product: Some("podman".into()),
+            version: Some("*".into()),
+            version_end: Some("5.2.0".into()),
+            version_end_included: true,
+            cpe: Some("cpe".into()),
+            ..Default::default()
+        });
+        db.upsert_cve(&last).unwrap();
+        add_package("CVE-2024-0008", "github.com/containers/podman/v5", ">=0");
+        add_package("CVE-2024-0008", "github.com/containers/podman/v4", ">=0");
         // Another vendor, whose name merely contains this one
         product("CVE-2017-0006", "openssl.js_project", "openssl.js", "*", None);
         product("CVE-2017-0007", "openssl", "openssl", "*", None);
@@ -1677,10 +1704,13 @@ mod tests {
         };
         assert_eq!(matching("dozzle", None, Some("Go"), "11.4.2"), "");
         assert_eq!(matching("dozzle", None, Some("Go"), "10.5.1"), "01");
-        assert_eq!(matching("podman", None, Some("Go"), "5.8.9"), "03 04 05");
-        assert_eq!(matching("podman", None, Some("Go"), "4.4.1"), "02 03 04 05");
-        // Without the ecosystem, only the NVD speaks
+        assert_eq!(matching("podman", None, Some("Go"), "5.8.9"), "08 03 04 05");
+        assert_eq!(matching("podman", None, Some("Go"), "4.4.1"), "02 08 03 04 05");
+        // Without the ecosystem, only the NVD speaks: past the last version it knows affected
         assert_eq!(matching("podman", None, None, "5.8.9"), "02 03 04 05");
+        // A vendor is also its `_project` form in the NVD
+        assert_eq!(matching("podman", Some("podman"), None, "5.1.0"), "02 08 03 04 05");
+        assert_eq!(matching("podman", Some("pod"), None, "5.1.0"), "");
         assert_eq!(matching("openssl", Some("openssl"), None, "3.6.5"), "07");
     }
 
