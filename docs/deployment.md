@@ -78,8 +78,12 @@ Create a `config.toml` file (optional):
 db_path = "vulnizard.db"
 
 [sync]
-# Years of history to sync (default: 2)
-history_years = 2
+# How far back the NVD is read, in months. 0 (the default) reads the whole
+# history: an application is only matched against the CVEs the NVD was read
+# for, so a short history misses the older ones. The reading is done once, at
+# the first synchronization (about half an hour without an API key, a few
+# minutes with one), and goes on where it stopped if it is interrupted.
+history_months = 0
 
 # Sources to sync (default: all)
 sources = ["nvd", "cisa_kev", "epss"]

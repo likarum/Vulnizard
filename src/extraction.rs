@@ -64,6 +64,7 @@ fn extract_pattern_flaw_found(description: &str) -> Option<AffectedProduct> {
         version_start: None,
         version_end,
         cpe: None,
+        ..Default::default()
     })
 }
 
@@ -88,6 +89,7 @@ fn extract_pattern_product_before(description: &str) -> Option<AffectedProduct> 
         version_start: None,
         version_end,
         cpe: None,
+        ..Default::default()
     })
 }
 
@@ -112,6 +114,7 @@ fn extract_pattern_version_earlier(description: &str) -> Option<AffectedProduct>
         version_start: None,
         version_end,
         cpe: None,
+        ..Default::default()
     })
 }
 
@@ -135,6 +138,7 @@ fn extract_pattern_vulnerability_in(description: &str) -> Option<AffectedProduct
         version_start: None,
         version_end: None,
         cpe: None,
+        ..Default::default()
     })
 }
 
@@ -158,6 +162,7 @@ fn extract_pattern_affects(description: &str) -> Option<AffectedProduct> {
         version_start: None,
         version_end: None,
         cpe: None,
+        ..Default::default()
     })
 }
 

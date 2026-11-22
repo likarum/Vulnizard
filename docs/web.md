@@ -24,7 +24,17 @@ database was last synchronized (administrators can start a sync from there):
   - *To review*: CVEs affecting the deployed versions — **close** once fixed, **accept the risk**
     with a justification, or mark **not applicable**
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
-    version closes the CVEs it fixes), the **inventory sources** of the project and the checklist of
+    version closes the CVEs it fixes, and an entry still to review that no longer matches after a
+    source corrected its data is set aside as not applicable). The name is the product name of
+    the CVE database, matched exactly (case and separators aside: `home_assistant` is
+    `home-assistant`, `podman` is not `podman_desktop`; with a vendor, the products of that vendor
+    named after the application count too, as `nginx_open_source` for `nginx`); a package ecosystem (Go, npm, PyPI,
+    crates.io, Maven) also matches the advisories of the package of that name, at the version.
+    When the sources disagree on a CVE, the one that gives versions decides; a CVE for which
+    no source gives any version matches every version (better a false alert than a missed one)
+    and is marked *version not given* in the list to review: read it before deciding.
+    An application marked *unknown to the sources* has no CVE recorded under its name at any
+    version, which is not the same as having none at its version. Then the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)
   - *Subscriptions*: vendors or products whose every CVE change you follow
   - *Evolution*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the

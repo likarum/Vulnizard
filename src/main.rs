@@ -8,6 +8,7 @@ mod inventory;
 mod mfa;
 mod secrets;
 mod trail;
+mod versions;
 mod mcp;
 mod models;
 mod notify;
@@ -85,7 +86,7 @@ enum Commands {
     },
     /// Synchronize CVE data from all sources
     Sync {
-        /// Override history months from config (default: 6, for initial sync)
+        /// How far back the NVD is read, in months (0: the whole history; default: the configuration)
         #[arg(long)]
         months: Option<u32>,
 
@@ -546,7 +547,8 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║         VULNIZARD - Vulnerability Intelligence           ║");
     if force_full {
-        println!("║              FULL SYNC ({} months history)               ║", history_months);
+        let history = if history_months == 0 { "whole history".to_string() } else { format!("{history_months} months history") };
+        println!("║{:^58}║", format!("FULL SYNC ({history})"));
     } else {
         println!("║              INCREMENTAL SYNC                            ║");
     }
@@ -767,7 +769,7 @@ fn cmd_search(
     Ok(())
 }
 
-fn read_password(from_stdin: bool) -> Result<String> {
+fn read_password(from_stdin: bool, username: &str) -> Result<String> {
     let password = if from_stdin {
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
@@ -779,10 +781,7 @@ fn read_password(from_stdin: bool) -> Result<String> {
         }
         password
     };
-    let length = password.chars().count();
-    if length < auth::MIN_PASSWORD_LEN || password.len() > auth::MAX_PASSWORD_LEN {
-        anyhow::bail!("Password must be at least {} characters", auth::MIN_PASSWORD_LEN);
-    }
+    auth::check_new_password(&password, username).map_err(|why| anyhow::anyhow!(why))?;
     Ok(password)
 }
 
@@ -792,7 +791,7 @@ fn cmd_user(db: &Database, action: UserAction) -> Result<()> {
             if !auth::valid_slug(&username, 3, 32) {
                 anyhow::bail!("Username: 3 to 32 letters, digits, '-', '_' or '.'");
             }
-            let hash = auth::hash_password(&read_password(password_stdin)?)?;
+            let hash = auth::hash_password(&read_password(password_stdin, &username)?)?;
             db.create_account(&username, email.as_deref(), &hash, admin)?;
             println!("Account '{}' created{}", username, if admin { " (admin)" } else { "" });
         }
@@ -800,7 +799,7 @@ fn cmd_user(db: &Database, action: UserAction) -> Result<()> {
             let (account, _) = db
                 .get_credentials(&username)?
                 .ok_or_else(|| anyhow::anyhow!("No web account named '{}'", username))?;
-            db.set_password(account.id, &auth::hash_password(&read_password(password_stdin)?)?)?;
+            db.set_password(account.id, &auth::hash_password(&read_password(password_stdin, &account.username)?)?)?;
             println!("Password updated for '{}'", account.username);
         }
         UserAction::ResetMfa { username } => {
@@ -998,31 +997,19 @@ fn get_version_match_indicator(cve: &models::Cve, query_version: &str, product_f
             }
         }
 
-        // Check version match type
-        let version = ap.version.as_deref().unwrap_or("*");
-
-        // Case 1: Exact version match
-        if version != "*" && (version == query_version || query_version.starts_with(&format!("{}.", version))) {
+        // Nothing recorded about versions: unknown
+        if ap.version.as_deref().is_none_or(|v| v == "*" || v == "-") && ap.version_start.is_none() && ap.version_end.is_none() {
+            continue;
+        }
+        if versions::product_affects(
+            Some(query_version),
+            ap.version.as_deref(),
+            ap.version_start.as_deref(),
+            ap.version_start_excluded,
+            ap.version_end.as_deref(),
+            ap.version_end_included,
+        ) {
             return "✓";
-        }
-
-        // Case 2: Version range match
-        if let Some(ref version_end) = ap.version_end {
-            // Query version is within range
-            if query_version < version_end.as_str() {
-                if let Some(ref version_start) = ap.version_start {
-                    if query_version >= version_start.as_str() {
-                        return "✓";
-                    }
-                } else {
-                    return "✓";
-                }
-            }
-        }
-
-        // Case 3: Wildcard with no range = unknown
-        if version == "*" && ap.version_end.is_none() {
-            return "?";
         }
     }
 
@@ -1194,6 +1181,12 @@ fn cmd_watch(db: &Database, action: WatchAction) -> Result<()> {
                             println!("no new CVEs ({} already tracked)", existing);
                         } else {
                             println!("no CVEs found");
+                        }
+                        // Entries to review that no longer match (sources corrected) are set aside
+                        match db.settle_stale_entries(&app) {
+                            Ok((0, 0)) => {}
+                            Ok((aside, back)) => println!("    {aside} entr(ies) no longer matching set aside, {back} brought back"),
+                            Err(e) => println!("    error: {e}"),
                         }
                     }
                     Err(e) => println!("error: {}", e),

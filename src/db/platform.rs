@@ -1407,6 +1407,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: cpe.then(|| format!("cpe:2.3:a:{vendor}:{product}:*")),
+            ..Default::default()
         }
     }
 

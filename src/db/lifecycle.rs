@@ -121,7 +121,7 @@ impl Actor {
         }
     }
 
-    /// Non-interactive origin: "cli", "mcp", "system"
+    /// Non-interactive origin: "cli", "mcp-stdio", "rescan", "system"
     pub fn system(name: &str) -> Self {
         Self {
             user_id: None,
@@ -563,6 +563,7 @@ mod tests {
                 version_start: None,
                 version_end: Some(end.into()),
                 cpe: Some("cpe".into()),
+                ..Default::default()
             });
             db.upsert_cve(&cve).unwrap();
         }
@@ -726,6 +727,8 @@ mod tests {
             .unwrap();
         db.migrate_lifecycle().unwrap();
         db.migrate_history().unwrap();
+        // The table was rebuilt in its v8 shape: the later migrations follow, as on a real upgrade
+        db.migrate_version_unknown().unwrap();
         let events = db.lifecycle_events(alice, Some(project)).unwrap();
         assert_eq!(events.iter().filter(|e| e.kind == "detected").count(), 2);
         let decision = events.iter().find(|e| e.kind == "status").unwrap();

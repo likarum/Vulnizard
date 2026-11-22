@@ -72,6 +72,8 @@ pub struct TriageItem {
     pub description: Option<String>,
     /// Group of inventory sources the application is tracked for (empty: added by hand)
     pub group: String,
+    /// Kept without any source giving the affected versions
+    pub version_unknown: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,6 +110,9 @@ pub struct ScopedApplication {
     pub group: String,
     /// Names of the sources reporting it
     pub sources: Vec<String>,
+    /// CVEs the sources hold under this name, whatever the version; 0: unknown to the sources
+    pub known_cves: Option<i64>,
+    pub ecosystem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -442,7 +447,7 @@ impl Database {
 
 const TRIAGE_SELECT: &str = "
     SELECT w.id, w.cve_id, w.status, w.priority, a.name, a.version, o.name, p.name,
-           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp
+           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown
     FROM watchlist_entries w
     JOIN applications a ON a.id = w.app_id
     JOIN projects p ON p.id = a.project_id
@@ -466,6 +471,7 @@ fn triage_row(r: &rusqlite::Row) -> rusqlite::Result<TriageItem> {
         kev: r.get::<_, i64>(9)? != 0,
         description: r.get(10)?,
         group: r.get(11)?,
+        version_unknown: r.get(12)?,
     })
 }
 
@@ -536,7 +542,8 @@ impl Database {
                     (SELECT COUNT(*) FROM watchlist_entries w WHERE w.app_id = a.id AND w.status = 'untreated'),
                     a.grp,
                     (SELECT GROUP_CONCAT(s.name, char(10)) FROM inventory_components c
-                     JOIN inventory_sources s ON s.id = c.source_id WHERE c.application_id = a.id)
+                     JOIN inventory_sources s ON s.id = c.source_id WHERE c.application_id = a.id),
+                    a.known_cves, a.ecosystem
              FROM applications a
              JOIN projects p ON p.id = a.project_id
              JOIN organizations o ON o.id = p.organization_id
@@ -559,6 +566,8 @@ impl Database {
                         .get::<_, Option<String>>(8)?
                         .map(|names| names.lines().map(String::from).collect())
                         .unwrap_or_default(),
+                    known_cves: r.get(9)?,
+                    ecosystem: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -865,6 +874,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
 

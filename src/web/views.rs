@@ -664,6 +664,7 @@ pub fn triage_table(
                         td.nowrap {
                             a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                             @if item.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
+                            @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                         }
                         td.nowrap { (cvss_badge(item.cvss)) }
                         td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }

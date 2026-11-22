@@ -13,7 +13,8 @@ claude mcp add --transport http vulnizard https://vulnizard.example.org/mcp \
 ```
 
 **Locally over stdio**, on the machine holding the database, without the web server and with full
-access to every project:
+access to every project. There is no account there: what is changed this way is recorded in the
+audit under the name `mcp-stdio` (over HTTP, under the account of the token):
 
 ```bash
 claude mcp add vulnizard -- /path/to/vulnizard --db /path/to/vulnizard.db mcp

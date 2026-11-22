@@ -286,6 +286,7 @@ mod tests {
                 version_start: None,
                 version_end: None,
                 cpe: Some("cpe".into()),
+                ..Default::default()
             });
             db.upsert_cve(&cve).unwrap();
             let mut app = Application::new(project, format!("widget{i}"));

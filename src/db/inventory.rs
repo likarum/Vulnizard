@@ -679,6 +679,7 @@ mod tests {
             version_start: None,
             version_end: Some("2.0".into()),
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
         db.rebuild_catalog().unwrap();

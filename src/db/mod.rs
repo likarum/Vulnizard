@@ -199,6 +199,36 @@ fn restrict_to_owner(path: &Path) {
     let _ = path;
 }
 
+/// SQL functions of the application, available on every connection
+fn register_functions(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    // version_affects(asked, version, start, start_excluded, end, end_included)
+    conn.create_scalar_function("version_affects", 6, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        let text = |i: usize| ctx.get::<Option<String>>(i);
+        let flag = |i: usize| ctx.get::<Option<bool>>(i).map(|v| v.unwrap_or(false));
+        Ok(crate::versions::product_affects(
+            text(0)?.as_deref(),
+            text(1)?.as_deref(),
+            text(2)?.as_deref(),
+            flag(3)?,
+            text(4)?.as_deref(),
+            flag(5)?,
+        ))
+    })?;
+    // name_variant(product, name): `versions::is_name_variant`
+    conn.create_scalar_function("name_variant", 2, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        Ok(match (ctx.get::<Option<String>>(0)?, ctx.get::<Option<String>>(1)?) {
+            (Some(product), Some(name)) => crate::versions::is_name_variant(&product, &name),
+            _ => false,
+        })
+    })?;
+    // name_key(text): a product name as it is compared (`versions::name_key`)
+    conn.create_scalar_function("name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        Ok(ctx.get::<Option<String>>(0)?.map(|text| crate::versions::name_key(&text)))
+    })?;
+    Ok(())
+}
+
 impl Database {
     /// Get a reference to the underlying connection (for watchlist module)
     pub fn conn(&self) -> &Connection {
@@ -282,6 +312,7 @@ impl Database {
                 );
             }
         }
+        register_functions(&conn)?;
         let db = Self { conn, key: crate::secrets::key_for(path)? };
         restrict_to_owner(path);
 
@@ -302,6 +333,7 @@ impl Database {
             .with_context(|| format!("Failed to open database: {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
+        register_functions(&conn)?;
         Ok(Self { conn, key: crate::secrets::key_for(path)? })
     }
 
@@ -572,6 +604,18 @@ impl Database {
             self.migrate_trail()?;
         }
 
+        // Migration v22 -> v23: each bound of a version range is included or not
+        if schema_version < 23 {
+            tracing::info!("Upgrading database schema to v23 (inclusive and exclusive version bounds)");
+            self.migrate_bounds()?;
+        }
+
+        // Migration v23 -> v24: entries kept without a version from the sources
+        if schema_version < 24 {
+            tracing::info!("Upgrading database schema to v24 (entries whose version no source gives)");
+            self.migrate_version_unknown()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -593,6 +637,36 @@ impl Database {
         Ok(())
     }
 
+    /// v23: whether the start of a range is excluded and its end included,
+    /// and how many CVEs the sources hold for each application.
+    /// What is already stored keeps the former reading (start included, end
+    /// excluded) until the NVD is read again, which the import does by itself
+    /// (see `sources::nvd`).
+    fn migrate_bounds(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE affected_products_normalized ADD COLUMN start_excluded INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE affected_products_normalized ADD COLUMN end_included INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE applications ADD COLUMN known_cves INTEGER;
+             DELETE FROM metadata WHERE key IN ('nvd.history_from', 'nvd.backfill_until');
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '23');
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    /// v24: whether an entry is kept without any source giving the affected
+    /// versions. Filled in by the next scan.
+    fn migrate_version_unknown(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE watchlist_entries ADD COLUMN version_unknown INTEGER NOT NULL DEFAULT 0;
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '24');
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
     /// Peuple la table normalisée depuis le JSON existant
     fn populate_normalized_products(&self) -> Result<()> {
         tracing::info!("Populating normalized products table from existing data...");
@@ -609,8 +683,8 @@ impl Database {
 
             for product in products {
                 self.conn.execute(
-                    "INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![cve_id, product.vendor, product.product, product.version, product.version_start, product.version_end, product.cpe],
+                    "INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe, start_excluded, end_included) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![cve_id, product.vendor, product.product, product.version, product.version_start, product.version_end, product.cpe, product.version_start_excluded, product.version_end_included],
                 )?;
                 count += 1;
             }
@@ -624,6 +698,7 @@ impl Database {
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        register_functions(&conn)?;
         let db = Self { conn, key: crate::secrets::random_key() };
         db.init()?;
         Ok(db)
@@ -671,6 +746,8 @@ impl Database {
         self.migrate_access_v20()?;
         self.migrate_seal_secrets()?;
         self.migrate_trail()?;
+        self.migrate_bounds()?;
+        self.migrate_version_unknown()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -678,15 +755,26 @@ impl Database {
 
     /// Insère ou met à jour une CVE
     pub fn upsert_cve(&self, cve: &Cve) -> Result<bool> {
+        self.upsert(cve, true)
+    }
+
+    /// Same, without recording anything as a change of the CVE: for the
+    /// history read long after the fact, which is not news
+    pub fn upsert_cve_untracked(&self, cve: &Cve) -> Result<bool> {
+        self.upsert(cve, false)
+    }
+
+    fn upsert(&self, cve: &Cve, record_changes: bool) -> Result<bool> {
         // Only upserts touching tracked fields can produce change events
         // (an EPSS-only update skips the before/after comparison entirely).
-        let tracked = cve.description.is_some()
+        let touches_tracked = cve.description.is_some()
             || cve.cvss_v3_score.is_some()
             || !cve.cwe_ids.is_empty()
             || !cve.affected_products.is_empty()
             || !cve.references.is_empty()
             || cve.kev_known_exploited;
-        let before = if tracked { self.snapshot(&cve.cve_id)? } else { None };
+        let before = if touches_tracked { self.snapshot(&cve.cve_id)? } else { None };
+        let tracked = touches_tracked && record_changes;
 
         // Products without CPE (KEV catalog, description heuristics) must not
         // replace products already known for this CVE.
@@ -775,8 +863,8 @@ impl Database {
             for product in incoming_products {
                 self.conn.execute(
                     r#"
-                    INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe)
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe, start_excluded, end_included)
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                     "#,
                     params![
                         cve.cve_id,
@@ -786,6 +874,8 @@ impl Database {
                         product.version_start,
                         product.version_end,
                         product.cpe,
+                        product.version_start_excluded,
+                        product.version_end_included,
                     ],
                 )?;
             }
@@ -892,7 +982,7 @@ impl Database {
 
     /// Recherche des CVE
     pub fn search(&self, query: &SearchQuery) -> Result<Vec<Cve>> {
-        let use_product_join = query.product.is_some();
+        let use_product_join = query.product.is_some() || query.version.is_some();
         let use_package_join = query.ecosystem.is_some() || query.package_name.is_some();
 
         let mut sql = if use_product_join || use_package_join {
@@ -999,13 +1089,9 @@ impl Database {
 
         // Version filtering
         if let Some(ref version) = query.version {
-            // Match if:
-            // 1. version = '*' AND no version_end (unknown = include for safety)
-            // 2. exact version match or prefix match (specific version known)
-            // 3. version is within range (version_start <= query < version_end)
-            // Note: We include unknown (*) entries for security (better false positive than miss)
+            // Same judgement as for tracked applications (`versions::product_affects`)
             sql.push_str(&format!(
-                " AND ((ap.version = '*' AND ap.version_end IS NULL) OR ((ap.version IS NOT NULL AND ap.version != '*') AND (ap.version = ?{idx} OR ap.version LIKE ?{idx} || '.%')) OR (ap.version_end IS NOT NULL AND ?{idx} < ap.version_end AND (ap.version_start IS NULL OR ?{idx} >= ap.version_start)))",
+                " AND version_affects(?{idx}, ap.version, ap.version_start, ap.start_excluded, ap.version_end, ap.end_included)",
                 idx = param_idx
             ));
             params.push(Box::new(version.clone()));
@@ -1300,8 +1386,8 @@ impl Database {
                 for product in &products {
                     self.conn.execute(
                         r#"
-                        INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                        INSERT INTO affected_products_normalized (cve_id, vendor, product, version, version_start, version_end, cpe, start_excluded, end_included)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                         "#,
                         params![
                             cve_id,
@@ -1311,6 +1397,8 @@ impl Database {
                             product.version_start,
                             product.version_end,
                             product.cpe,
+                            product.version_start_excluded,
+                            product.version_end_included,
                         ],
                     )?;
                 }
@@ -1349,12 +1437,15 @@ impl Database {
                 continue;
             }
 
-            // Ajouter les packages (sans supprimer les existants)
+            // The ranges of a package already known are brought up to date:
+            // an advisory is corrected after its publication
             for pkg in pkgs {
                 self.conn.execute(
                     r#"
-                    INSERT OR IGNORE INTO affected_packages (cve_id, ecosystem, name, vulnerable_range, fixed_version)
+                    INSERT INTO affected_packages (cve_id, ecosystem, name, vulnerable_range, fixed_version)
                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(cve_id, ecosystem, name) DO UPDATE SET
+                        vulnerable_range = excluded.vulnerable_range, fixed_version = excluded.fixed_version
                     "#,
                     params![
                         cve_id,
@@ -1389,6 +1480,12 @@ impl Database {
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?1, ?2)",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    /// Remove a metadata value
+    pub fn delete_metadata(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM metadata WHERE key = ?1", params![key])?;
         Ok(())
     }
 
@@ -1549,14 +1646,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 22
+        // Check schema version is 24
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "22");
+        assert_eq!(version, "24");
     }
 
     #[test]
@@ -1793,4 +1890,63 @@ mod tests {
         assert!(index_exists.is_ok());
         assert_eq!(index_exists.unwrap(), "idx_cves_ssvc_exploitation");
     }
+    #[test]
+    fn the_history_read_after_the_fact_is_not_a_change() {
+        let db = Database::open_in_memory().unwrap();
+        let changes = |id: &str| -> i64 { db.conn.query_row("SELECT COUNT(*) FROM cve_changes WHERE cve_id = ?1", params![id], |r| r.get(0)).unwrap() };
+        let cve = |id: &str, description: &str| {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some(description.into());
+            cve
+        };
+        db.upsert_cve_untracked(&cve("CVE-2014-0160", "Heartbleed")).unwrap();
+        assert_eq!(changes("CVE-2014-0160"), 0);
+        // A stub left by another source is completed without a word either
+        let mut stub = Cve::new("CVE-2021-3156".into());
+        stub.kev_known_exploited = true;
+        db.upsert_cve(&stub).unwrap();
+        let before = changes("CVE-2021-3156");
+        db.upsert_cve_untracked(&cve("CVE-2021-3156", "Heap overflow in sudo")).unwrap();
+        assert_eq!(changes("CVE-2021-3156"), before);
+        // What changes afterwards is recorded as before
+        db.upsert_cve(&cve("CVE-2014-0160", "Heartbleed, reworded")).unwrap();
+        assert_eq!(changes("CVE-2014-0160"), 1);
+    }
+
+    #[test]
+    fn the_version_filter_of_the_search_orders_versions() {
+        let db = Database::open_in_memory().unwrap();
+        let add = |id: &str, start: Option<&str>, end: Option<&str>, end_included: bool| {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                version_start: start.map(String::from),
+                version_end: end.map(String::from),
+                version_end_included: end_included,
+                cpe: Some("cpe:2.3:a:acme:widget:*".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        };
+        add("CVE-2025-0001", None, Some("3.7.3"), false);
+        add("CVE-2025-0002", Some("3.7.10"), Some("3.7.20"), false);
+        add("CVE-2025-0003", None, Some("10.0"), true);
+        add("CVE-2025-0004", None, None, false);
+        let found = |version: &str| {
+            let query = SearchQuery { product: Some("widget".into()), version: Some(version.into()), limit: 50, ..Default::default() };
+            let mut ids: Vec<String> = db.search(&query).unwrap().into_iter().map(|c| c.cve_id[11..].to_string()).collect();
+            ids.sort();
+            ids.join(" ")
+        };
+        // As text, 3.7.16 sorts before 3.7.3 and 10.0 before 9.0
+        assert_eq!(found("3.7.16"), "02 03 04");
+        assert_eq!(found("3.7.2"), "01 03 04");
+        assert_eq!(found("9.0"), "03 04");
+        assert_eq!(found("10.0"), "03 04");
+        assert_eq!(found("10.1"), "04");
+    }
+
 }

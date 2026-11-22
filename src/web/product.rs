@@ -446,6 +446,7 @@ fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Res
                             td.nowrap {
                                 a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                                 @if item.kev { " " span.tag.kev { "KEV" } }
+                            @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                             }
                             td.nowrap { (views::cvss_badge(item.cvss)) }
                             td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
@@ -529,7 +530,7 @@ fn applications(
                 @for app in &apps {
                     @let base = format!("/orgs/{}/projects/{}/applications/{}", enc(&app.org), enc(&app.project), app.id);
                     tr {
-                        td { (app.name) }
+                        td { (app.name) @if let Some(ecosystem) = &app.ecosystem { " " span.tag { (ecosystem) } } }
                         td { (app.vendor.as_deref().unwrap_or("—")) }
                         td {
                             @if manage && app.group.is_empty() {
@@ -549,7 +550,14 @@ fn applications(
                             }
                         }
                         @if scope.all() { td { a href=(product_url(Some((&app.org, &app.project)), "applications")) { (app.project) } } }
-                        td { (app.untreated) }
+                        td {
+                            (app.untreated)
+                            @if app.known_cves == Some(0) {
+                                " " span.tag.warn title="No source holds a CVE under this name: nothing can be matched. Check the product name and vendor against the CVE database, or give the package ecosystem." { "unknown to the sources" }
+                            } @else if let (0, Some(known)) = (app.untreated, app.known_cves) {
+                                " " span.muted title="CVEs the sources hold under this name, whatever the version" { "of " (known) " known" }
+                            }
+                        }
                         td.right {
                             @if manage && app.group.is_empty() {
                                 form.inline method="post" action={ (base) "/delete" } {
@@ -570,11 +578,18 @@ fn applications(
                 input type="text" name="name" placeholder="product, e.g. vaultwarden" maxlength="100" required;
                 input type="text" name="version" placeholder="version, e.g. 1.37.4" maxlength="64";
                 input type="text" name="vendor" placeholder="vendor (optional)" maxlength="100";
+                select name="ecosystem" title="Package ecosystem, to also match the advisories of its package" {
+                    option value="" { "no package ecosystem" }
+                    @for ecosystem in crate::db::watchlist::PACKAGE_ECOSYSTEMS { option value=(ecosystem) { (ecosystem) } }
+                }
                 button type="submit" { "Add and scan" }
             }
             p.muted {
                 "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
-                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "). The vendor narrows the match."
+                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
+                "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
+                "which is the only way to follow software the NVD does not describe. "
+                "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
             }
         } @else if scope.all() {
             p.muted { "Select a project in the menu to add, update or remove applications, and to connect an inventory source." }

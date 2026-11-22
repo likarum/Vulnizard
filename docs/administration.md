@@ -69,6 +69,20 @@ a password revokes sessions and API tokens.
 Behind a reverse proxy with HTTPS, set `web.secure_cookies = true` and
 `web.base_url`; the proxy must forward the original `Host` header.
 
+## Passwords
+
+- A new password has **at least 15 characters** (NIST SP 800-63B rev. 4, for a password that may
+  be the only factor). There is no composition rule and no expiry.
+- Passwords that are guessed first are refused whatever their length: the same few characters
+  repeated, the alphabet or a keyboard row, very common words with digits around them
+  (`passwordpassword1`), and the username with little else. The check is a built-in list of
+  common words and a few rules; it runs offline and is not a database of leaked passwords.
+- The rules apply when a password is chosen (setup, registration, change, creation or reset by an
+  administrator, command line). Passwords chosen before stay valid until they are changed.
+- **There is no password reset by email.** A lost password is reset by an administrator
+  (*Admin → Users*) or on the server with `vulnizard user passwd <name>`; for the only
+  administrator, the command line is the only way.
+
 ## Two-step sign-in
 
 Accounts that sign in with a password can add a second step (*Settings → Two-step sign-in*):

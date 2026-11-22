@@ -1093,6 +1093,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
 
@@ -1306,6 +1307,58 @@ mod tests {
         let signed_in = app.post("/login", None, "username=root&password=a-long-password").await;
         assert_eq!(signed_in.location.as_deref(), Some("/"));
         assert_eq!(app.get("/admin", Some(&signed_in.cookie.unwrap())).await.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_place_a_password_is_chosen_applies_the_same_rules() {
+        let app = app(open_registration());
+        let db = Database::connect(&app.db_path).unwrap();
+        let code = app.setup_code().unwrap();
+        // Fourteen characters; common words; the alphabet; the username with little around
+        let refused = ["short-pass-001", "passwordpassword1", "abcdefghijklmnopq", "qwertyuiopasdfgh"];
+
+        // Setup
+        for password in refused.iter().chain(["rootroot-2024-x"].iter()) {
+            let reply = app.post("/setup", None, &format!("code={code}&username=rootroot&password={password}&confirm={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "setup accepted {password}");
+            assert!(reply.body.contains("at least 15") || reply.body.contains("easy to guess"), "{password}");
+        }
+        assert_eq!(db.count_accounts().unwrap(), 0);
+        assert!(app.get("/setup", None).await.body.contains("At least 15 characters"));
+        let admin = app.register("root").await;
+
+        // Registration
+        for password in refused.iter().chain(["mallory-mallory1"].iter()) {
+            let reply = app.post("/register", None, &format!("username=mallory&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "registration accepted {password}");
+        }
+        assert!(db.get_credentials("mallory").unwrap().is_none());
+
+        // Change of one's own password: the current one stays in place when the new one is refused
+        for password in refused.iter().chain(["root-root-root-1"].iter()) {
+            let reply = app.post("/settings/password", Some(&admin), &format!("current=a-long-password&new={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "change accepted {password}");
+        }
+        assert_eq!(app.post("/login", None, "username=root&password=a-long-password").await.location.as_deref(), Some("/"));
+
+        // An administrator creating an account, or resetting a password
+        for password in refused.iter().chain(["carol-carol-2024"].iter()) {
+            let reply = app.post("/admin/users", Some(&admin), &format!("username=carol&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "creation accepted {password}");
+        }
+        assert!(db.get_credentials("carol").unwrap().is_none());
+        assert_eq!(app.post("/admin/users", Some(&admin), "username=carol&password=a-long-password").await.status, StatusCode::SEE_OTHER);
+        let carol = db.get_credentials("carol").unwrap().unwrap().0.id;
+        for password in refused.iter().chain(["carol-carol-2024"].iter()) {
+            let reply = app.post("/admin/users/password", Some(&admin), &format!("user_id={carol}&password={password}")).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "reset accepted {password}");
+        }
+        assert_eq!(app.post("/login", None, "username=carol&password=a-long-password").await.location.as_deref(), Some("/"));
+
+        // A password chosen under the old rule (ten characters) still signs in: the rule
+        // applies when a password is chosen, not when it is used
+        db.create_account("oldtimer", None, &auth::hash_password("ten-chars!").unwrap(), false).unwrap();
+        assert_eq!(app.post("/login", None, "username=oldtimer&password=ten-chars!").await.location.as_deref(), Some("/"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1844,9 +1897,9 @@ mod tests {
         let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
         assert!(listed.contains("available to all") && listed.contains("0 of 1 project"));
 
-        // The inbox is read once, by its owner only; signed out, it is empty
+        // The inbox is read once, by its owner only; signed out, nothing answers
         db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
-        assert_eq!(app.get("/push/inbox", None).await.body, "[]");
+        assert_eq!(app.get("/push/inbox", None).await.status, StatusCode::UNAUTHORIZED);
         assert_eq!(app.get("/push/inbox", Some(&bob)).await.body, "[]");
         let inbox = app.get("/push/inbox", Some(&alice)).await.body;
         assert!(inbox.contains("Synchronization finished"));
@@ -2799,6 +2852,188 @@ mod tests {
         let ops = "owner=instance&kind=email&name=ops&to=ops%40example.org";
         assert_eq!(app.post("/admin/notifications/destinations", Some(&owner), ops).await.status, StatusCode::FORBIDDEN);
         assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), ops).await.status, StatusCode::SEE_OTHER);
+    }
+
+    /// Every route declared in the routers, as (path, public). Read from the
+    /// source, so that a route added tomorrow is swept without anyone
+    /// remembering to list it here.
+    fn declared_routes() -> Vec<String> {
+        let marker = concat!(".rou", "te(");
+        let paths = |source: &str, prefix: &str| -> Vec<String> {
+            let source = source.split("#[cfg(test)]").next().unwrap();
+            source
+                .split(marker)
+                .skip(1)
+                .filter_map(|rest| {
+                    let start = rest.find('"')? + 1;
+                    let end = start + rest[start..].find('"')?;
+                    Some(format!("{prefix}{}", &rest[start..end]))
+                })
+                .collect()
+        };
+        let web = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        let (ui, rest) = web.split_once("let api = Router::new()").expect("the API router");
+        let (api, top) = rest.split_once(".nest(\"/api\", api)").expect("the top router");
+        let mut routes = paths(ui, "");
+        routes.extend(paths(api, "/api"));
+        routes.extend(paths(top, ""));
+        routes.extend(paths(include_str!("scim.rs"), "/scim/v2"));
+        routes
+    }
+
+    /// What answers without signing in: signing in itself, and static files
+    const PUBLIC_ROUTES: [&str; 18] = [
+        "/login",
+        "/register",
+        "/setup",
+        "/logout",
+        "/login/mfa",
+        "/login/mfa/passkey/start",
+        "/login/mfa/passkey/finish",
+        "/login/passkey/start",
+        "/login/passkey/finish",
+        "/auth/oidc/{provider}/login",
+        "/auth/oidc/{provider}/callback",
+        "/static/app.css",
+        "/static/logo.svg",
+        "/static/mfa.js",
+        "/static/filter.js",
+        "/static/push.js",
+        "/sw.js",
+        "/favicon.ico",
+    ];
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nothing_answers_without_authentication() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        // MCP over HTTP is switched on, so that it is the authentication that is tested
+        assert_eq!(app.post("/admin/mcp", Some(&admin), "http_enabled=1").await.status, StatusCode::SEE_OTHER);
+        let token = tokens_of(&app.post("/settings/tokens", Some(&admin), "name=t&password=a-long-password").await.body).remove(0);
+
+        let routes = declared_routes();
+        assert!(routes.len() >= 120, "only {} routes found: the source is no longer read correctly", routes.len());
+        for expected in ["/cve", "/admin/users", "/api/cve", "/api/security-log", "/mcp", "/scim/v2/Users", "/setup"] {
+            assert!(routes.iter().any(|r| r == expected), "{expected} is not among the routes found");
+        }
+        for public in PUBLIC_ROUTES {
+            assert!(routes.iter().any(|r| r == public), "{public} is listed as public but is not a route");
+        }
+
+        // Who presents nothing, and who presents something that is not valid
+        let forged_session = format!("{SESSION_COOKIE}={}", "a".repeat(64));
+        let callers: [(&str, Option<(header::HeaderName, String)>); 5] = [
+            ("nothing", None),
+            ("a forged session", Some((header::COOKIE, forged_session))),
+            ("a forged token", Some((header::AUTHORIZATION, format!("Bearer {}", "b".repeat(64))))),
+            ("a truncated real token", Some((header::AUTHORIZATION, format!("Bearer {}", &token[..token.len() - 1])))),
+            ("basic credentials that are wrong", Some((header::AUTHORIZATION, "Basic cm9vdDp3cm9uZw==".to_string()))),
+        ];
+        let mut swept = 0;
+        let mut answered: Vec<String> = Vec::new();
+        for route in routes.iter().filter(|r| !PUBLIC_ROUTES.contains(&r.as_str())) {
+            let path: String = {
+                // Path parameters get a plausible value
+                let mut out = String::new();
+                let mut inside = false;
+                for c in route.chars() {
+                    match c {
+                        '{' => {
+                            inside = true;
+                            out.push('1');
+                        }
+                        '}' => inside = false,
+                        _ if !inside => out.push(c),
+                        _ => {}
+                    }
+                }
+                out
+            };
+            let json = route.starts_with("/api") || route.starts_with("/scim") || route == "/mcp";
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                for (who, credential) in &callers {
+                    let mut req = HttpRequest::builder()
+                        .method(method)
+                        .uri(&path)
+                        .header(header::HOST, "localhost")
+                        // Its own origin: what is tested is the authentication, not the origin check
+                        .header(header::ORIGIN, "http://localhost");
+                    if let Some((name, value)) = credential {
+                        req = req.header(name, value);
+                    }
+                    let body = if method == "GET" {
+                        Body::empty()
+                    } else if json {
+                        req = req.header(header::CONTENT_TYPE, "application/json");
+                        Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","schemas":[],"userName":"x"}"#)
+                    } else {
+                        req = req.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                        Body::from("name=x&username=x&password=a-long-password&status=accepted&required=1")
+                    };
+                    let reply = app.send(req.body(body).unwrap()).await;
+                    let is_refusal = |r: &Reply| match r.status {
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => true,
+                        // Too many wrong credentials from one address
+                        StatusCode::TOO_MANY_REQUESTS => true,
+                        StatusCode::SEE_OTHER => r.location.as_deref() == Some("/login"),
+                        _ => false,
+                    };
+                    let mut refused = is_refusal(&reply);
+                    // An old address may move to the new one before being refused there
+                    if !refused && reply.status == StatusCode::SEE_OTHER && reply.body.is_empty() {
+                        if let Some(next) = reply.location.as_deref().filter(|l| l.starts_with('/')) {
+                            let mut follow = HttpRequest::get(next).header(header::HOST, "localhost");
+                            if let Some((name, value)) = credential {
+                                follow = follow.header(name, value);
+                            }
+                            refused = is_refusal(&app.send(follow.body(Body::empty()).unwrap()).await);
+                        }
+                    }
+                    if !refused {
+                        answered.push(format!(
+                            "{method} {path} with {who}: {} {:?} — {}",
+                            reply.status,
+                            reply.location,
+                            reply.body.chars().take(120).collect::<String>()
+                        ));
+                    }
+                    // A refusal carries no session
+                    assert!(!reply.cookies.iter().any(|c| c.starts_with(&format!("{SESSION_COOKIE}=")) && c.len() > SESSION_COOKIE.len() + 1), "{method} {path}");
+                    swept += 1;
+                }
+            }
+        }
+        assert!(answered.is_empty(), "{} requests were answered without authentication:\n{}", answered.len(), answered.join("\n"));
+        assert!(swept > 2000, "{swept}");
+
+        // The same requests, signed, do answer: the sweep above did not pass by accident
+        assert_eq!(app.api("/api/cve", Some(&format!("Bearer {token}"))).await.status, StatusCode::OK);
+        assert_eq!(app.get("/cve", Some(&admin)).await.status, StatusCode::OK);
+        let mcp = |authorization: Option<String>| {
+            let app = &app;
+            async move {
+                let mut req = HttpRequest::post("/mcp").header(header::HOST, "127.0.0.1:8000").header(header::CONTENT_TYPE, "application/json");
+                if let Some(a) = authorization {
+                    req = req.header(header::AUTHORIZATION, a);
+                }
+                app.send(req.body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"database_status","arguments":{}}}"#)).unwrap()).await
+            }
+        };
+        let signed = mcp(Some(format!("Bearer {token}"))).await;
+        assert!(signed.status == StatusCode::OK && signed.body.contains("result"), "{}", signed.body);
+        for unsigned in [mcp(None).await, mcp(Some("Bearer nope".into())).await] {
+            assert_eq!(unsigned.status, StatusCode::UNAUTHORIZED);
+            assert!(!unsigned.body.contains("result") && !unsigned.body.contains("cves"));
+        }
+        // A token that was deleted, and the token of a disabled account, stop working at once
+        let other = app.register("bob").await;
+        let bob_token = tokens_of(&app.post("/settings/tokens", Some(&other), "name=t&password=a-long-password").await.body).remove(0);
+        assert_eq!(mcp(Some(format!("Bearer {bob_token}"))).await.status, StatusCode::OK);
+        let db = Database::connect(&app.db_path).unwrap();
+        db.set_disabled(db.get_credentials("bob").unwrap().unwrap().0.id, true).unwrap();
+        assert_eq!(mcp(Some(format!("Bearer {bob_token}"))).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.api("/api/cve", Some(&format!("Bearer {bob_token}"))).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.get("/cve", Some(&other)).await.location.as_deref(), Some("/login"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

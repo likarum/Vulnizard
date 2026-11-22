@@ -806,7 +806,7 @@ pub(super) fn auth_page(
                         autocomplete=(if register { "new-password" } else { "current-password" });
                 }
                 @if register {
-                    p.muted { "At least " (auth::MIN_PASSWORD_LEN) " characters." }
+                    p.muted { (auth::PASSWORD_RULES) }
                 }
                 button type="submit" { (title) }
             }
@@ -930,11 +930,8 @@ pub async fn register(State(st): St, Form(form): Form<RegisterForm>) -> ActionRe
         if !auth::valid_slug(username, 3, 32) {
             return fail("Username: 3 to 32 letters, digits, '-', '_' or '.'.");
         }
-        if form.password.chars().count() < auth::MIN_PASSWORD_LEN {
-            return fail("Password is too short.");
-        }
-        if form.password.len() > auth::MAX_PASSWORD_LEN {
-            return fail("Password is too long.");
+        if let Err(why) = auth::check_new_password(&form.password, username) {
+            return fail(&why);
         }
         let email = Some(form.email.trim()).filter(|e| !e.is_empty());
         if email.is_some_and(|e| e.parse::<lettre::Address>().is_err()) {
@@ -1020,6 +1017,7 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
             form.stack.card method="post" action="/settings/password" {
                 label { "Current password" input type="password" name="current" required autocomplete="current-password"; }
                 label { "New password" input type="password" name="new" required autocomplete="new-password"; }
+                p.muted { (auth::PASSWORD_RULES) }
                 p.muted { "Changing the password signs out every session and revokes every API token." }
                 button type="submit" { "Change password" }
             }
@@ -1078,9 +1076,7 @@ pub async fn password_change(State(st): St, User(user): User, Form(form): Form<P
         if check_credentials(&st, &db, &user.username, &form.current, &Attempt::Session(user.id))?.is_none() {
             return Err(AppError::Bad("Current password is incorrect.".into()));
         }
-        if form.new.chars().count() < auth::MIN_PASSWORD_LEN || form.new.len() > auth::MAX_PASSWORD_LEN {
-            return Err(AppError::Bad("New password is too short or too long.".into()));
-        }
+        auth::check_new_password(&form.new, &user.username).map_err(AppError::Bad)?;
         db.set_password(user.id, &hash_new_password(&st, &form.new)?)?;
         // Every session and API token was invalidated: open a fresh session
         start_session(&st, &db, user.id)

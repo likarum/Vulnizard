@@ -16,11 +16,13 @@ cargo build --release
 ## Synchronize CVE data
 
 ```bash
-# Sync all sources (NVD, CISA KEV, EPSS) with 2 years of history
+# Sync the enabled sources. The first run reads the whole history of the NVD
+# (about half an hour without an API key); later runs read what changed.
 vulnizard sync
 
-# Sync with custom history depth
-vulnizard sync --years 1
+# Read the NVD again from the start, or only the last 24 months
+vulnizard sync --full
+vulnizard sync --full --months 24
 
 # Sync only a specific source
 vulnizard sync --source nvd

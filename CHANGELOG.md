@@ -7,16 +7,39 @@ before 1.0, a minor version may change behaviour.
 
 ### Things to know before upgrading
 
-- The database moves to schema v22 at first start (the existing log entries are chained). Back
-  it up first; an older version does not open it afterwards.
+- The database moves to schema v24 at first start (the existing log entries are chained, version
+  ranges record whether their bounds are included). Back it up first; an older version does not
+  open it afterwards.
+- **The first synchronization after the upgrade reads the whole history of the NVD again**: about
+  half an hour without an NVD API key, a few minutes with one, during which the other sources
+  wait. It goes on where it stopped if it is interrupted. An instance installed with the former
+  default only knew the last six months of the NVD: expect many applications to get their first
+  matches, and notifications for them. `sync.history_months` limits the history again (0, the
+  new default, reads everything).
+- **An application now matches the product of its exact name** (case and separators aside), no
+  longer every product whose name contains it: `nginx` no longer matches `ingress-nginx` or
+  `nginxui`. When the vendor is given, the products of that vendor named after the application
+  count too (`nginx_open_source`, `nginx_plus` for `nginx` of `f5`): give the vendor, or declare
+  such a variant as an application of its own. The vendor is no longer a part of a name either:
+  give it as the CVE database writes it (`f5`, not `f5 networks`).
+- New passwords need 15 characters (10 before) and easy ones are refused. Existing passwords
+  keep working until they are changed.
 - With open registration, the first account is no longer the administrator for whoever registers
   first: it takes the setup code (see below) or the command line. Existing instances, which have
   accounts, are not affected.
 - The Nuclei templates source is not enabled on an existing instance: *Admin → Vulnerability
   sources*.
+- After the first synchronization, entries still to review that no longer match their
+  application are set aside as *not applicable* by the system (see *Fixed*): expect the list to
+  shrink. The audit records each of them.
+- What is changed through MCP over stdio is recorded under the name `mcp-stdio` (`mcp` before);
+  entries already written keep `mcp`.
 
 ### Added
 
+- **Password rules follow NIST SP 800-63B rev. 4**: at least 15 characters, no composition rule,
+  and a refusal of what is guessed first (repetitions, the alphabet or a keyboard row, very
+  common words, the username). Same rules wherever a password is chosen, command line included.
 - **First-run setup page.** While no account exists, the instance leads to `/setup`, which
   creates the administrator for whoever holds a one-time setup code. The code is written in the
   server log at start and printed by `vulnizard setup-code`: it proves access to the server, so
@@ -27,7 +50,7 @@ before 1.0, a minor version may change behaviour.
 - **Logs that show tampering.** The security log and the audit of decisions are chained, entry
   after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
   (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
-  export offline. MCP gains `get_security_log` for administrators. Schema v22.
+  export offline. MCP gains `get_security_log` for administrators.
 - **Nuclei templates** as a source (`nuclei`): a CVE page, `vulnizard info`, the API and MCP say
   when a ready-made detection template exists, with a link to it. A template is a check, not an
   exploit. Not enabled by default on an existing instance: *Admin → Vulnerability sources*.
@@ -35,6 +58,16 @@ before 1.0, a minor version may change behaviour.
   `?source=` in the API, `source` in MCP `search_cves`, `search --from-source` on the command
   line), and a CVE page names its sources. Which source wrote what is not recorded: it is told
   from the fields only that source fills.
+- **Applications unknown to the sources are told apart**: the list of applications, the API and
+  MCP (`known_cves`) say how many CVEs the sources hold under the name of an application at any
+  version. Zero means the name is unknown (wrong name, or software the NVD does not describe),
+  not that the version is safe. The web form now takes the package ecosystem, as MCP and the
+  command line did.
+- **Entries kept without a version are marked.** When no source gives the versions a CVE
+  affects (`*` or `-` in the NVD, an advisory without a range), the application is still matched
+  out of caution; the entry now says *version not given* in the lists to review, and
+  `version_unknown` in MCP `list_watchlist`: read the CVE before deciding. The mark goes when a
+  source gives the versions.
 - A page footer: links to the source, the disclaimer and the issue tracker; the version, for
   signed-in users only.
 - **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
@@ -45,6 +78,43 @@ before 1.0, a minor version may change behaviour.
 
 ### Fixed
 
+- **An application declared with an ecosystem (Go, npm, crates.io, PyPI, Maven) was matched
+  without its version**, and with every package whose name contained its own: n8n 3.1.0 got
+  168 CVEs, most of them fixed long before or belonging to other packages. The version is now
+  checked against the ranges of the advisory, the package must be the application itself (or the
+  last part of its path, `traefik` for `github.com/traefik/traefik/v3`), and a Go module of
+  another major version is left out. Ranges given as Git commits are no longer read as versions,
+  and the ranges of an advisory are updated when it is corrected (they were kept as first seen).
+- **Versions with a letter were compared without it**: OpenSSL 1.0.1f was not matched by a flaw
+  fixed in 1.0.1g. Pre-releases (`-rc1`, `b2`) now come before their release.
+- A product recorded as affected *from* a version, without an end, matched older versions too.
+- **The NVD was only read six months back by default**, so older CVEs existed only as records
+  left by CISA KEV or EPSS, without version ranges: such a record matched every version
+  (Heartbleed for OpenSSL 3.x), and most applications matched nothing. The whole history is now
+  read, once, without recording it as changes of the CVEs; requests respect the rate of the NVD
+  and a refusal is tried again instead of failing the run.
+- **"Up to 1.4 included" was read as "before 1.4"** (and "after 1.2" as "from 1.2"): the last
+  affected version of such a range was not matched. Each bound now records whether it is
+  included; the NVD is read again once to fill it in.
+- **Product names were matched as substrings**: `docker` matched `mailcow-dockerized`, `podman`
+  matched `podman_desktop`. The product is now the application itself, case and separators aside
+  (`home_assistant` now matches `home-assistant`, which it did not); with a vendor, the products
+  of that vendor named after it are kept (`nginx_open_source` for `nginx`). The vendor is
+  compared the same way: `openssl` is not `openssl.js_project`.
+- **A source that gives versions now wins over one that says "every version".** For one CVE, the
+  NVD and a package advisory often disagree: one gives a range, the other was left at "all
+  versions, no fix" or gives no version at all. The precise one decides; "every version" only
+  matches when no source says more. A Go module of an earlier major line that was fixed counts
+  as fixed for the lines that followed.
+- `search --version` compared versions as text (`3.7.16` before `3.7.3`, `10.0` before `9.0`); it
+  now uses the same comparison as tracked applications, and works without `--product`.
+- **Entries no longer matching stayed to review for ever.** After each synchronization (and with
+  `watch scan`), an entry still to review whose CVE no longer matches the application, because a
+  source corrected its data, is set aside as *not applicable* with a comment saying so, and
+  comes back if it matches again. Decisions taken by a person are never changed.
+- `/push/inbox` answered an empty list without a session; it now refuses. Found by a new test
+  that reads every route from the source and calls each one with five methods and five kinds
+  of missing or forged credentials: nothing but sign-in pages and static files may answer.
 - **Signed out, a page no longer shows the menus, the state of the last synchronization or the
   "Sync now" button.** The pages behind them already required a session; the header did not.
 - **Sources that skipped a cycle were never synchronized again.** A source that found itself up
