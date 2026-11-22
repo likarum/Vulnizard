@@ -154,6 +154,26 @@ impl Verdicts {
     }
 }
 
+/// The version a CPE names, with its *update* field: `sudo:1.9.17:p2` is
+/// 1.9.17p2, `linux_kernel:5.16:rc1` is 5.16-rc1, not 5.16. `version` is the
+/// version field alone, as stored; `*` and `-` in the update field add nothing.
+pub fn cpe_version(version: Option<&str>, cpe: Option<&str>) -> Option<String> {
+    let version = version?;
+    if version == "*" || version == "-" {
+        return Some(version.to_string());
+    }
+    let update = cpe
+        .filter(|cpe| cpe.starts_with("cpe:2.3:"))
+        .and_then(|cpe| cpe.split(':').nth(6))
+        .filter(|update| !matches!(*update, "" | "*" | "-"));
+    Some(match update {
+        // A number alone is a build or a revision: kept apart from the version
+        Some(update) if update.starts_with(|c: char| c.is_ascii_digit()) => format!("{version}-{update}"),
+        Some(update) => format!("{version}{update}"),
+        None => version.to_string(),
+    })
+}
+
 /// What a product entry of a CVE says of a version: an exact version
 /// (`version`), or a range whose bounds may each be included or not (NVD:
 /// `versionStartIncluding` / `versionStartExcluding`, `versionEndIncluding` /
@@ -175,7 +195,8 @@ pub fn product_verdict(
     let yes = |affected: bool| if affected { Verdict::Affected } else { Verdict::NotAffected };
     // An exact version, or a version of that line: 2.4 covers 2.4.1
     if version != "*" && version != "-" {
-        return yes(version == query || query.starts_with(&format!("{version}.")));
+        let same = version == query || (is_version(version) && is_version(query) && cmp(query, version) == std::cmp::Ordering::Equal);
+        return yes(same || query.starts_with(&format!("{version}.")));
     }
     if start.is_none() && end.is_none() {
         return Verdict::Unknown;
@@ -241,6 +262,29 @@ mod tests {
         assert!(!together(&[PastLastAffected]) && !together(&[PastLastAffected, Unknown]));
         assert!(together(&[PastLastAffected, NoFix]));
         assert!(!together(&[PastLastAffected, NoFix, NotAffected]));
+    }
+
+    #[test]
+    fn a_cpe_names_its_version_with_its_update() {
+        let full = |version: &str, cpe: &str| cpe_version(Some(version), Some(cpe)).unwrap();
+        assert_eq!(full("1.9.17", "cpe:2.3:a:sudo_project:sudo:1.9.17:p2:*:*:*:*:*:*"), "1.9.17p2");
+        assert_eq!(full("1.9.17", "cpe:2.3:a:sudo_project:sudo:1.9.17:-:*:*:*:*:*:*"), "1.9.17");
+        assert_eq!(full("1.9.17", "cpe:2.3:a:sudo_project:sudo:1.9.17:*:*:*:*:*:*:*"), "1.9.17");
+        assert_eq!(full("5.16", "cpe:2.3:o:linux:linux_kernel:5.16:rc1:*:*:*:*:*:*"), "5.16rc1");
+        assert_eq!(full("2.0", "cpe:2.3:a:acme:widget:2.0:3:*:*:*:*:*:*"), "2.0-3");
+        assert_eq!(full("*", "cpe:2.3:a:acme:widget:*:p2:*:*:*:*:*:*"), "*");
+        assert_eq!(full("1.0", "cpe"), "1.0");
+        assert_eq!(cpe_version(None, None), None);
+        // The patch level counts: 1.9.17p2 is the CPE 1.9.17:p2, not 1.9.17 nor 1.9.17:p1
+        let exact = |query: &str, version: &str| product_verdict(Some(query), Some(version), None, false, None, false);
+        assert_eq!(exact("1.9.17p2", "1.9.17p2"), Verdict::Affected);
+        assert_eq!(exact("1.9.17-p2", "1.9.17p2"), Verdict::Affected);
+        assert_eq!(exact("1.9.17p2", "1.9.17p1"), Verdict::NotAffected);
+        assert_eq!(exact("1.9.17p2", "1.9.17"), Verdict::NotAffected);
+        // A release candidate is not its release
+        assert_eq!(exact("5.16.9", "5.16rc1"), Verdict::NotAffected);
+        assert_eq!(exact("5.16-rc1", "5.16rc1"), Verdict::Affected);
+        assert_eq!(exact("5.16.9", "5.16"), Verdict::Affected);
     }
 
     #[test]

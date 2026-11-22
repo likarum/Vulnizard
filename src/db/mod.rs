@@ -202,18 +202,12 @@ fn restrict_to_owner(path: &Path) {
 /// SQL functions of the application, available on every connection
 fn register_functions(conn: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
-    // version_affects(asked, version, start, start_excluded, end, end_included)
-    conn.create_scalar_function("version_affects", 6, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+    // version_affects(asked, version, start, start_excluded, end, end_included, cpe)
+    conn.create_scalar_function("version_affects", 7, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
         let text = |i: usize| ctx.get::<Option<String>>(i);
         let flag = |i: usize| ctx.get::<Option<bool>>(i).map(|v| v.unwrap_or(false));
-        Ok(crate::versions::product_affects(
-            text(0)?.as_deref(),
-            text(1)?.as_deref(),
-            text(2)?.as_deref(),
-            flag(3)?,
-            text(4)?.as_deref(),
-            flag(5)?,
-        ))
+        let version = crate::versions::cpe_version(text(1)?.as_deref(), text(6)?.as_deref());
+        Ok(crate::versions::product_affects(text(0)?.as_deref(), version.as_deref(), text(2)?.as_deref(), flag(3)?, text(4)?.as_deref(), flag(5)?))
     })?;
     // name_variant(product, name): `versions::is_name_variant`
     conn.create_scalar_function("name_variant", 2, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
@@ -1091,7 +1085,7 @@ impl Database {
         if let Some(ref version) = query.version {
             // Same judgement as for tracked applications (`versions::product_affects`)
             sql.push_str(&format!(
-                " AND version_affects(?{idx}, ap.version, ap.version_start, ap.start_excluded, ap.version_end, ap.end_included)",
+                " AND version_affects(?{idx}, ap.version, ap.version_start, ap.start_excluded, ap.version_end, ap.end_included, ap.cpe)",
                 idx = param_idx
             ));
             params.push(Box::new(version.clone()));
