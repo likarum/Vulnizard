@@ -20,7 +20,8 @@ before 1.0, a minor version may change behaviour.
   longer every product whose name contains it: `nginx` no longer matches `ingress-nginx` or
   `nginxui`. When the vendor is given, the products of that vendor named after the application
   count too (`nginx_open_source`, `nginx_plus` for `nginx` of `f5`): give the vendor, or declare
-  such a variant as an application of its own.
+  such a variant as an application of its own. The vendor is no longer a part of a name either:
+  give it as the CVE database writes it (`f5`, not `f5 networks`).
 - New passwords need 15 characters (10 before) and easy ones are refused. Existing passwords
   keep working until they are changed.
 - With open registration, the first account is no longer the administrator for whoever registers
@@ -93,7 +94,13 @@ before 1.0, a minor version may change behaviour.
 - **Product names were matched as substrings**: `docker` matched `mailcow-dockerized`, `podman`
   matched `podman_desktop`. The product is now the application itself, case and separators aside
   (`home_assistant` now matches `home-assistant`, which it did not); with a vendor, the products
-  of that vendor named after it are kept (`nginx_open_source` for `nginx`).
+  of that vendor named after it are kept (`nginx_open_source` for `nginx`). The vendor is
+  compared the same way: `openssl` is not `openssl.js_project`.
+- **A source that gives versions now wins over one that says "every version".** For one CVE, the
+  NVD and a package advisory often disagree: one gives a range, the other was left at "all
+  versions, no fix" or gives no version at all. The precise one decides; "every version" only
+  matches when no source says more. A Go module of an earlier major line that was fixed counts
+  as fixed for the lines that followed.
 - `search --version` compared versions as text (`3.7.16` before `3.7.3`, `10.0` before `9.0`); it
   now uses the same comparison as tracked applications, and works without `--product`.
 - **Entries no longer matching stayed to review for ever.** After each synchronization (and with

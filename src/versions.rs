@@ -91,38 +91,72 @@ pub fn name_key(name: &str) -> String {
 
 /// Whether a product is a variant of another by its name: the same name
 /// followed by a separator and something else (`nginx_open_source`,
-/// `nginx-plus` for `nginx`; not `nginxui`).
+/// `nginx-plus` for `nginx`; not `nginxui`, nor `openssl.js` for `openssl`).
 pub fn is_name_variant(product: &str, name: &str) -> bool {
     let (product, name) = (product.to_lowercase(), name.to_lowercase());
-    product.strip_prefix(name.as_str()).is_some_and(|rest| rest.len() > 1 && rest.starts_with(['_', '-', '.', ' ']))
+    product.strip_prefix(name.as_str()).is_some_and(|rest| rest.len() > 1 && rest.starts_with(['_', '-', ' ']))
 }
 
-/// Whether a version is affected by a product entry of a CVE: an exact
-/// version (`version`), or a range whose bounds may each be included or not
-/// (NVD: `versionStartIncluding` / `versionStartExcluding`,
-/// `versionEndIncluding` / `versionEndExcluding`).
-///
-/// Without a version to judge, or without any version recorded for the
-/// product, the answer is yes: better a false alert than a missed one.
-pub fn product_affects(
+/// What a source says of a version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The version is in what the source gives as affected
+    Affected,
+    /// The source gives versions, and this one is not among them
+    NotAffected,
+    /// The source gives nothing to judge by: no version recorded, or none asked
+    Unknown,
+}
+
+/// For one CVE, what several sources (or several entries of one) say
+/// together: when at least one is precise, only the precise ones count;
+/// "every version" only decides when nothing says more. Better a false alert
+/// than a missed one, but not against a source that knows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Verdicts {
+    affected: bool,
+    precise: bool,
+}
+
+impl Verdicts {
+    pub fn add(&mut self, verdict: Verdict) {
+        match verdict {
+            Verdict::Affected => (self.affected, self.precise) = (true, true),
+            Verdict::NotAffected => self.precise = true,
+            Verdict::Unknown => {}
+        }
+    }
+
+    pub fn affected(&self) -> bool {
+        self.affected || !self.precise
+    }
+}
+
+/// What a product entry of a CVE says of a version: an exact version
+/// (`version`), or a range whose bounds may each be included or not (NVD:
+/// `versionStartIncluding` / `versionStartExcluding`, `versionEndIncluding` /
+/// `versionEndExcluding`). `*` and `-` (version not given) without a range
+/// say nothing.
+pub fn product_verdict(
     query: Option<&str>,
     version: Option<&str>,
     start: Option<&str>,
     start_excluded: bool,
     end: Option<&str>,
     end_included: bool,
-) -> bool {
+) -> Verdict {
     use std::cmp::Ordering::{Greater, Less};
     let Some(query) = query else {
-        return true;
+        return Verdict::Unknown;
     };
     let version = version.unwrap_or("*");
+    let yes = |affected: bool| if affected { Verdict::Affected } else { Verdict::NotAffected };
     // An exact version, or a version of that line: 2.4 covers 2.4.1
     if version != "*" && version != "-" {
-        return version == query || query.starts_with(&format!("{version}."));
+        return yes(version == query || query.starts_with(&format!("{version}.")));
     }
     if start.is_none() && end.is_none() {
-        return true;
+        return Verdict::Unknown;
     }
     let after_start = start.is_none_or(|start| match cmp(query, start) {
         Less => false,
@@ -134,7 +168,20 @@ pub fn product_affects(
         Greater => false,
         _ => end_included,
     });
-    after_start && before_end
+    yes(after_start && before_end)
+}
+
+/// Whether a version may be affected by a product entry: yes unless the
+/// entry gives versions and this one is not among them.
+pub fn product_affects(
+    query: Option<&str>,
+    version: Option<&str>,
+    start: Option<&str>,
+    start_excluded: bool,
+    end: Option<&str>,
+    end_included: bool,
+) -> bool {
+    product_verdict(query, version, start, start_excluded, end, end_included) != Verdict::NotAffected
 }
 
 #[cfg(test)]
@@ -149,6 +196,21 @@ mod tests {
         assert_ne!(name_key("podman"), name_key("podman_desktop"));
         assert!(is_name_variant("nginx_open_source", "nginx") && is_name_variant("NGINX-Plus", "nginx"));
         assert!(!is_name_variant("nginx", "nginx") && !is_name_variant("nginxui", "nginx") && !is_name_variant("ingress-nginx", "nginx"));
+        assert!(!is_name_variant("openssl.js", "openssl"));
+    }
+
+    #[test]
+    fn a_precise_source_decides_against_one_that_says_every_version() {
+        use Verdict::{Affected, NotAffected, Unknown};
+        let together = |verdicts: &[Verdict]| {
+            let mut all = Verdicts::default();
+            verdicts.iter().for_each(|v| all.add(*v));
+            all.affected()
+        };
+        assert!(together(&[Unknown]) && together(&[Unknown, Unknown]) && together(&[]));
+        assert!(!together(&[Unknown, NotAffected]) && !together(&[NotAffected, Unknown]));
+        assert!(together(&[NotAffected, Affected]) && together(&[Affected, Unknown]));
+        assert!(!together(&[NotAffected]));
     }
 
     #[test]
@@ -200,9 +262,14 @@ mod tests {
         // From a version, without an end
         assert!(affects("1.48.0", Some("1.30.0"), false, None, false));
         assert!(!affects("1.29.0", Some("1.30.0"), false, None, false));
-        // Nothing recorded, or nothing asked: affected
+        // Nothing recorded (`*` or `-`), or nothing asked: nothing to judge by
         assert!(affects("1.29.0", None, false, None, false));
         assert!(product_affects(None, Some("2.0"), None, false, None, false));
+        assert_eq!(product_verdict(Some("1.0"), Some("*"), None, false, None, false), Verdict::Unknown);
+        assert_eq!(product_verdict(Some("1.0"), Some("-"), None, false, None, false), Verdict::Unknown);
+        assert_eq!(product_verdict(None, Some("2.0"), None, false, None, false), Verdict::Unknown);
+        assert_eq!(product_verdict(Some("1.0"), Some("*"), None, false, Some("2.0"), false), Verdict::Affected);
+        assert_eq!(product_verdict(Some("3.0"), Some("*"), None, false, Some("2.0"), false), Verdict::NotAffected);
         // An exact version covers its line, not its neighbours
         assert!(product_affects(Some("2.4.1"), Some("2.4"), None, false, None, false));
         assert!(!product_affects(Some("2.41"), Some("2.4"), None, false, None, false));

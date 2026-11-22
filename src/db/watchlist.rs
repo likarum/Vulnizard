@@ -787,15 +787,14 @@ impl Database {
         if !is_matchable_name(&app.name) {
             return Ok(Vec::new());
         }
-        let mut ids = self.find_cves_by_product(app.vendor.as_deref(), &app.name, app.version.as_deref())?;
+        // Every source says its piece on each CVE, then they decide together
+        // (`versions::Verdicts`): a precise one wins over "every version"
+        let mut said = Said::default();
+        self.product_verdicts(app.vendor.as_deref(), &app.name, app.version.as_deref(), &mut said)?;
         if let Some(ref ecosystem) = app.ecosystem {
-            let mut seen: std::collections::HashSet<String> = ids.iter().cloned().collect();
-            for id in self.find_cves_by_package(ecosystem, &app.name, app.version.as_deref())? {
-                if seen.insert(id.clone()) {
-                    ids.push(id);
-                }
-            }
+            self.package_verdicts(ecosystem, &app.name, app.version.as_deref(), &mut said)?;
         }
+        let ids = said.affected();
         if ids.len() > MAX_APP_MATCHES {
             return Err(TooGeneric(ids.len()).into());
         }
@@ -890,17 +889,12 @@ impl Database {
     }
 
     /// Find CVEs by product name (from affected_products_normalized)
-    fn find_cves_by_product(
-        &self,
-        vendor: Option<&str>,
-        product: &str,
-        version: Option<&str>,
-    ) -> Result<Vec<String>> {
+    fn product_verdicts(&self, vendor: Option<&str>, product: &str, version: Option<&str>, said: &mut Said) -> Result<()> {
         // The product is the application itself, whatever the case and the
         // separators: `podman` is not `podman_desktop`. With a vendor, the
         // products of that vendor named after it count too: the NVD records
-        // nginx under `nginx` and `nginx_open_source` (vendors are renamed
-        // over the years: the vendor is contained, not equal).
+        // nginx under `nginx` and `nginx_open_source`. The vendor is compared
+        // like the product: `openssl` is not `openssl.js_project`.
         let mut sql = String::from(
             "SELECT DISTINCT cve_id, version, version_start, version_end, start_excluded, end_included
              FROM affected_products_normalized WHERE "
@@ -909,8 +903,8 @@ impl Database {
         params_vec.push(Box::new(versions::name_key(product)));
         match vendor {
             Some(v) => {
-                sql.push_str("LOWER(vendor) LIKE ?2 ESCAPE '\\' AND (name_key(product) = ?1 OR name_variant(product, ?3))");
-                params_vec.push(Box::new(like_contains(&v.to_lowercase())));
+                sql.push_str("name_key(vendor) = ?2 AND (name_key(product) = ?1 OR name_variant(product, ?3))");
+                params_vec.push(Box::new(versions::name_key(v)));
                 params_vec.push(Box::new(product.to_string()));
             }
             None => sql.push_str("name_key(product) = ?1"),
@@ -919,30 +913,23 @@ impl Database {
         let mut stmt = self.conn().prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
-        // Rows are read one by one and the reading stops as soon as the name
-        // proves too generic: nothing is accumulated for a catch-all name.
-        // Versions are compared here, in Rust, for proper semantic comparison.
-        let mut cves = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        // Rows are read one by one and the reading stops when the name proves
+        // far too generic: nothing is accumulated for a catch-all name
         let mut rows = stmt.query(params_refs.as_slice())?;
         while let Some(row) = rows.next()? {
             let cve_id: String = row.get(0)?;
-            if seen.contains(&cve_id) {
-                continue;
-            }
             let (db_version, version_start, version_end): (Option<String>, Option<String>, Option<String>) =
                 (row.get(1)?, row.get(2)?, row.get(3)?);
             let (start_excluded, end_included): (bool, bool) = (row.get(4)?, row.get(5)?);
-            if versions::product_affects(version, db_version.as_deref(), version_start.as_deref(), start_excluded, version_end.as_deref(), end_included) {
-                seen.insert(cve_id.clone());
-                cves.push(cve_id);
-                if cves.len() > MAX_APP_MATCHES {
-                    return Err(TooGeneric(cves.len()).into());
-                }
+            said.add(
+                cve_id,
+                versions::product_verdict(version, db_version.as_deref(), version_start.as_deref(), start_excluded, version_end.as_deref(), end_included),
+            );
+            if said.len() > MAX_APP_MATCHES * 10 {
+                return Err(TooGeneric(said.len()).into());
             }
         }
-
-        Ok(cves)
+        Ok(())
     }
 
     /// CVEs of the package advisories (`affected_packages`) for a package of
@@ -951,7 +938,7 @@ impl Database {
     /// The name is the package itself or the last part of its path
     /// (`traefik` for `github.com/traefik/traefik/v3`): `n8n` is not
     /// `n8n-nodes-base`.
-    fn find_cves_by_package(&self, ecosystem: &str, name: &str, version: Option<&str>) -> Result<Vec<String>> {
+    fn package_verdicts(&self, ecosystem: &str, name: &str, version: Option<&str>, said: &mut Said) -> Result<()> {
         let mut stmt = self.conn().prepare(
             "SELECT cve_id, name, vulnerable_range FROM affected_packages
              WHERE LOWER(ecosystem) = LOWER(?1) AND LOWER(name) LIKE ?2 ESCAPE '\\'"
@@ -975,28 +962,32 @@ impl Database {
             })
             .collect();
 
-        let mut cves = Vec::new();
-        let mut seen = std::collections::HashSet::new();
         for (cve_id, package, range) in &rows {
             let package = package.to_lowercase();
             let (path, module_major) = split_go_major(&package, go);
             if path != wanted && path.rsplit('/').next() != Some(wanted.as_str()) {
                 continue;
             }
+            let verdict = range_verdict(range.as_deref(), version);
             if let (true, Some(major)) = (go, major) {
-                let other_line = match module_major {
-                    Some(m) => m != major,
-                    None => major >= 2 && versioned.contains(path),
+                // The line of this module: its suffix, or 0.x and 1.x without one
+                let line = match module_major {
+                    Some(m) => Some(m),
+                    None if versioned.contains(path) => Some(1),
+                    None => None,
                 };
-                if other_line {
-                    continue;
+                match line {
+                    // A later line says nothing of this version
+                    Some(line) if line > major.max(1) => continue,
+                    // An earlier line only tells when it was fixed there: the
+                    // fix is in what followed. Still open, it says nothing.
+                    Some(line) if line < major.max(1) && verdict != Verdict::NotAffected => continue,
+                    _ => {}
                 }
             }
-            if range_affects(range.as_deref(), version) && seen.insert(cve_id.clone()) {
-                cves.push(cve_id.clone());
-            }
+            said.add(cve_id.clone(), verdict);
         }
-        Ok(cves)
+        Ok(())
     }
 
     /// Add watchlist entry if it doesn't exist, returns true if new
@@ -1185,7 +1176,7 @@ impl Database {
 }
 
 use rusqlite::OptionalExtension;
-use crate::versions;
+use crate::versions::{self, Verdict};
 
 // ==========================================
 // Version comparison helpers
@@ -1210,20 +1201,22 @@ fn major_of(version: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Whether a version falls in the ranges of a package advisory, written
-/// `>=1.0 <1.4 >=2.0 <=2.3` (each `>=` opens a range, the next `<` or `<=`
-/// closes it, a range left open has no fix).
+/// What the ranges of a package advisory say of a version. They are written
+/// `>=1.0 <1.4 >=2.0 <=2.3`: each `>=` opens a range, the next `<` or `<=`
+/// closes it, a range left open has no fix.
 ///
-/// What cannot be told counts as affected: no version, no range, or a bound
-/// that is not a version (a commit).
-fn range_affects(range: Option<&str>, version: Option<&str>) -> bool {
+/// Nothing can be told without a version, without a range, with a bound that
+/// is not a version (a commit), or from "every version, no fix" (`>=0`
+/// alone): advisories are often left that way long after the fix.
+fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
+    use std::cmp::Ordering::{Equal, Greater, Less};
     let (Some(range), Some(version)) = (range, version) else {
-        return true;
+        return Verdict::Unknown;
     };
     if !versions::is_version(version) {
-        return true;
+        return Verdict::Unknown;
     }
-    use std::cmp::Ordering::{Greater, Less};
+    let from_the_start = |start: &str| start == "0" || (versions::is_version(start) && versions::cmp(start, "0") == Equal);
     let mut from: Option<&str> = None;
     let mut open = false;
     for event in range.split_whitespace() {
@@ -1236,23 +1229,62 @@ fn range_affects(range: Option<&str>, version: Option<&str>) -> bool {
             Some(end) => (end, true),
             None => match event.strip_prefix('<') {
                 Some(end) => (end, false),
-                None => return true,
+                None => return Verdict::Unknown,
             },
         };
         let start = from.take().unwrap_or("0");
         open = false;
         if !versions::is_version(end) || (start != "0" && !versions::is_version(start)) {
-            return true;
+            return Verdict::Unknown;
         }
-        let after_start = start == "0" || versions::cmp(version, start) != Less;
+        let after_start = from_the_start(start) || versions::cmp(version, start) != Less;
         let order = versions::cmp(version, end);
         if after_start && (order == Less || (inclusive && order != Greater)) {
-            return true;
+            return Verdict::Affected;
         }
     }
     match from {
-        Some(start) if open => start == "0" || !versions::is_version(start) || versions::cmp(version, start) != Less,
-        _ => false,
+        Some(start) if open => {
+            if from_the_start(start) || !versions::is_version(start) {
+                Verdict::Unknown
+            } else if versions::cmp(version, start) != Less {
+                Verdict::Affected
+            } else {
+                Verdict::NotAffected
+            }
+        }
+        _ => Verdict::NotAffected,
+    }
+}
+
+/// What the sources said of each CVE, in the order the CVEs came
+#[derive(Default)]
+struct Said {
+    order: Vec<String>,
+    verdicts: std::collections::HashMap<String, versions::Verdicts>,
+}
+
+impl Said {
+    fn add(&mut self, cve_id: String, verdict: Verdict) {
+        match self.verdicts.get_mut(&cve_id) {
+            Some(known) => known.add(verdict),
+            None => {
+                let mut first = versions::Verdicts::default();
+                first.add(verdict);
+                self.order.push(cve_id.clone());
+                self.verdicts.insert(cve_id, first);
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// The CVEs that affect the application, all things said
+    fn affected(self) -> Vec<String> {
+        let Said { order, verdicts } = self;
+        order.into_iter().filter(|id| verdicts[id].affected()).collect()
     }
 }
 
@@ -1362,7 +1394,7 @@ mod tests {
 
     #[test]
     fn a_version_is_judged_against_the_ranges_of_the_advisory() {
-        let affects = |range: &str, version: &str| range_affects(Some(range), Some(version));
+        let affects = |range: &str, version: &str| range_verdict(Some(range), Some(version)) != Verdict::NotAffected;
         assert!(affects(">=0 <3.7.3", "3.7.2") && !affects(">=0 <3.7.3", "3.7.3") && !affects(">=0 <3.7.3", "3.7.16"));
         assert!(!affects(">=3.5.0 <3.6.3", "3.4.9") && affects(">=3.5.0 <3.6.3", "3.5.0"));
         // Several ranges: any of them
@@ -1371,8 +1403,12 @@ mod tests {
         // The last affected version is included, a range without fix has no end
         assert!(affects(">=1.0 <=1.4", "1.4") && !affects(">=1.0 <=1.4", "1.4.1"));
         assert!(affects(">=2.0", "9.9") && !affects(">=2.0", "1.9") && affects(">=0", "0.0.1"));
-        // What cannot be told counts as affected
-        assert!(range_affects(None, Some("1.0")) && range_affects(Some(">=0 <1.0"), None));
+        // What cannot be told
+        let unknown = |range: Option<&str>, version: Option<&str>| range_verdict(range, version) == Verdict::Unknown;
+        assert!(unknown(None, Some("1.0")) && unknown(Some(">=0 <1.0"), None));
+        assert!(unknown(Some(">=0"), Some("9.9")) && unknown(Some(">=0.0.0"), Some("9.9")));
+        assert_eq!(range_verdict(Some(">=2.0"), Some("9.9")), Verdict::Affected);
+        assert_eq!(range_verdict(Some(">=0 <1.0"), Some("0.5")), Verdict::Affected);
         assert!(affects(">=0 <0123456789abcdef0123456789abcdef01234567", "9.9"));
         assert!(affects(">=0 <1.0", "latest") && affects("garbage", "1.0"));
     }
@@ -1566,5 +1602,60 @@ mod tests {
         // With it: its variants too, not those of others nor names merely starting alike
         assert_eq!(matching(Some("f5")), "01 02 03");
         assert_eq!(matching(Some("nginxui")), "04");
+    }
+
+    #[test]
+    fn a_precise_source_wins_over_one_that_says_every_version() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db);
+        let product = |id: &str, vendor: &str, name: &str, version: &str, end: Option<&str>| {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some(vendor.into()),
+                product: Some(name.into()),
+                version: Some(version.into()),
+                version_end: end.map(String::from),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        };
+        let add_package = |id: &str, name: &str, range: &str| {
+            let known = crate::models::AffectedPackage { ecosystem: "Go".into(), name: name.into(), vulnerable_range: Some(range.into()), fixed_version: None };
+            db.batch_add_packages(&[(id.to_string(), vec![known])]).unwrap();
+        };
+        // The NVD gives an end, the package advisory was left at "every version"
+        product("CVE-2026-0001", "amirraminfar", "dozzle", "*", Some("10.5.2"));
+        add_package("CVE-2026-0001", "github.com/amir20/dozzle", ">=0");
+        // The NVD gives no version, the advisory a fix in the previous major line
+        product("CVE-2023-0002", "podman_project", "podman", "-", None);
+        add_package("CVE-2023-0002", "github.com/containers/podman/v4", ">=0 <4.4.2");
+        // Nobody says more than "every version"
+        product("CVE-2026-0003", "podman_project", "podman", "-", None);
+        product("CVE-2026-0004", "podman_project", "podman", "*", None);
+        // The previous line never fixed it: it says nothing of this one
+        product("CVE-2026-0005", "podman_project", "podman", "*", None);
+        add_package("CVE-2026-0005", "github.com/containers/podman/v4", ">=0");
+        // Another vendor, whose name merely contains this one
+        product("CVE-2017-0006", "openssl.js_project", "openssl.js", "*", None);
+        product("CVE-2017-0007", "openssl", "openssl", "*", None);
+
+        let matching = |name: &str, vendor: Option<&str>, ecosystem: Option<&str>, version: &str| {
+            let mut app = Application::new(project, name.into());
+            app.vendor = vendor.map(String::from);
+            app.ecosystem = ecosystem.map(String::from);
+            app.version = Some(version.into());
+            let mut ids = db.matching_cve_ids(&app).unwrap();
+            ids.sort();
+            ids.iter().map(|id| id[11..].to_string()).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(matching("dozzle", None, Some("Go"), "11.4.2"), "");
+        assert_eq!(matching("dozzle", None, Some("Go"), "10.5.1"), "01");
+        assert_eq!(matching("podman", None, Some("Go"), "5.8.9"), "03 04 05");
+        assert_eq!(matching("podman", None, Some("Go"), "4.4.1"), "02 03 04 05");
+        // Without the ecosystem, only the NVD speaks
+        assert_eq!(matching("podman", None, None, "5.8.9"), "02 03 04 05");
+        assert_eq!(matching("openssl", Some("openssl"), None, "3.6.5"), "07");
     }
 }
