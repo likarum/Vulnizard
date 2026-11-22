@@ -309,8 +309,8 @@ impl LoginGuard {
 
 /// Names shown as the author of automatic or non-interactive changes in the
 /// audit trail: no account may carry them.
-const RESERVED_USERNAMES: [&str; 8] =
-    ["system", "cli", "mcp", "unknown", "default", "config", "inventory", "scim"];
+const RESERVED_USERNAMES: [&str; 10] =
+    ["system", "cli", "mcp", "mcp-stdio", "rescan", "unknown", "default", "config", "inventory", "scim"];
 
 pub fn is_reserved_username(username: &str) -> bool {
     RESERVED_USERNAMES.iter().any(|r| r.eq_ignore_ascii_case(username.trim()))

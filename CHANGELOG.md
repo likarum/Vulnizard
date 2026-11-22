@@ -7,8 +7,19 @@ before 1.0, a minor version may change behaviour.
 
 ### Things to know before upgrading
 
-- The database moves to schema v22 at first start (the existing log entries are chained). Back
-  it up first; an older version does not open it afterwards.
+- The database moves to schema v23 at first start (the existing log entries are chained, version
+  ranges record whether their bounds are included). Back it up first; an older version does not
+  open it afterwards.
+- **The first synchronization after the upgrade reads the whole history of the NVD again**: about
+  half an hour without an NVD API key, a few minutes with one, during which the other sources
+  wait. It goes on where it stopped if it is interrupted. An instance installed with the former
+  default only knew the last six months of the NVD: expect many applications to get their first
+  matches, and notifications for them. `sync.history_months` limits the history again (0, the
+  new default, reads everything).
+- **An application now matches the product of its exact name** (case and separators aside), no
+  longer every product whose name contains it: `nginx` no longer matches `nginx_open_source`,
+  `nginx_plus` or `ingress-nginx`. Declare each product you run under its own name; *Vendors &
+  products* lists them.
 - New passwords need 15 characters (10 before) and easy ones are refused. Existing passwords
   keep working until they are changed.
 - With open registration, the first account is no longer the administrator for whoever registers
@@ -18,7 +29,9 @@ before 1.0, a minor version may change behaviour.
   sources*.
 - After the first synchronization, entries still to review that no longer match their
   application are set aside as *not applicable* by the system (see *Fixed*): expect the list to
-  shrink for applications declared with an ecosystem. The audit records each of them.
+  shrink. The audit records each of them.
+- What is changed through MCP over stdio is recorded under the name `mcp-stdio` (`mcp` before);
+  entries already written keep `mcp`.
 
 ### Added
 
@@ -35,7 +48,7 @@ before 1.0, a minor version may change behaviour.
 - **Logs that show tampering.** The security log and the audit of decisions are chained, entry
   after entry, and export as signed JSON (and CSV for reading) from their pages and from the API
   (`/api/security-log`, `/api/organizations/{org}/audit`). `vulnizard log verify <file>` checks an
-  export offline. MCP gains `get_security_log` for administrators. Schema v22.
+  export offline. MCP gains `get_security_log` for administrators.
 - **Nuclei templates** as a source (`nuclei`): a CVE page, `vulnizard info`, the API and MCP say
   when a ready-made detection template exists, with a link to it. A template is a check, not an
   exploit. Not enabled by default on an existing instance: *Admin → Vulnerability sources*.
@@ -43,6 +56,11 @@ before 1.0, a minor version may change behaviour.
   `?source=` in the API, `source` in MCP `search_cves`, `search --from-source` on the command
   line), and a CVE page names its sources. Which source wrote what is not recorded: it is told
   from the fields only that source fills.
+- **Applications unknown to the sources are told apart**: the list of applications, the API and
+  MCP (`known_cves`) say how many CVEs the sources hold under the name of an application at any
+  version. Zero means the name is unknown (wrong name, or software the NVD does not describe),
+  not that the version is safe. The web form now takes the package ecosystem, as MCP and the
+  command line did.
 - A page footer: links to the source, the disclaimer and the issue tracker; the version, for
   signed-in users only.
 - **A layout for phones**: below 760 px the navigation, forms and tables fit the screen.
@@ -63,6 +81,19 @@ before 1.0, a minor version may change behaviour.
 - **Versions with a letter were compared without it**: OpenSSL 1.0.1f was not matched by a flaw
   fixed in 1.0.1g. Pre-releases (`-rc1`, `b2`) now come before their release.
 - A product recorded as affected *from* a version, without an end, matched older versions too.
+- **The NVD was only read six months back by default**, so older CVEs existed only as records
+  left by CISA KEV or EPSS, without version ranges: such a record matched every version
+  (Heartbleed for OpenSSL 3.x), and most applications matched nothing. The whole history is now
+  read, once, without recording it as changes of the CVEs; requests respect the rate of the NVD
+  and a refusal is tried again instead of failing the run.
+- **"Up to 1.4 included" was read as "before 1.4"** (and "after 1.2" as "from 1.2"): the last
+  affected version of such a range was not matched. Each bound now records whether it is
+  included (schema v23); the NVD is read again once to fill it in.
+- **Product names were matched as substrings**: `docker` matched `mailcow-dockerized`, `podman`
+  matched `podman_desktop`. The product is now the application itself, case and separators aside
+  (`home_assistant` now matches `home-assistant`, which it did not).
+- `search --version` compared versions as text (`3.7.16` before `3.7.3`, `10.0` before `9.0`); it
+  now uses the same comparison as tracked applications, and works without `--product`.
 - **Entries no longer matching stayed to review for ever.** After each synchronization (and with
   `watch scan`), an entry still to review whose CVE no longer matches the application, because a
   source corrected its data, is set aside as *not applicable* with a comment saying so, and

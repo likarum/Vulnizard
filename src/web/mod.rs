@@ -1093,6 +1093,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
 

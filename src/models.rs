@@ -36,7 +36,7 @@ pub struct Cve {
     pub ssvc_technical_impact: Option<String>,  // "partial" | "total"
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AffectedProduct {
     pub vendor: Option<String>,
     pub product: Option<String>,
@@ -45,6 +45,12 @@ pub struct AffectedProduct {
     pub version_start: Option<String>,
     #[serde(default)]
     pub version_end: Option<String>,
+    /// The start of the range is itself not affected ("after 1.2")
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub version_start_excluded: bool,
+    /// The end of the range is itself affected ("up to 1.4 included")
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub version_end_included: bool,
     pub cpe: Option<String>,
 }
 
@@ -191,6 +197,10 @@ pub struct Application {
     /// Group of inventory sources it is tracked for; empty when added by hand
     #[serde(default)]
     pub group: String,
+    /// CVEs the sources hold under this name, whatever the version (as of the
+    /// last scan): 0 means the sources do not know this application
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_cves: Option<i64>,
 }
 
 impl Application {
@@ -207,6 +217,7 @@ impl Application {
             created_at: None,
             updated_at: None,
             group: String::new(),
+            known_cves: None,
         }
     }
 }

@@ -11,7 +11,7 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "gzip", "blocking"] }

@@ -191,6 +191,7 @@ dl.meta dd { margin: 0; overflow-wrap: anywhere; }
 .sev.none { background: var(--border); color: var(--muted); }
 .tag { background: var(--border); color: var(--text); }
 .tag.kev { background: #7b1e2b; color: #fff; }
+.tag.warn { background: #d98a10; color: #fff; }
 
 form.filters, form.row {
   display: flex;

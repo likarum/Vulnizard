@@ -146,7 +146,9 @@ fn default_smtp_port() -> u16 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
-    /// Nombre de mois d'historique à récupérer
+    /// How far back the NVD is read, in months; 0 (the default) reads the
+    /// whole history. A tracked application is only matched against the CVEs
+    /// the NVD was read for: a short history misses the older ones.
     #[serde(default = "default_history_months")]
     pub history_months: u32,
 
@@ -166,7 +168,7 @@ fn default_db_path() -> PathBuf {
 }
 
 fn default_history_months() -> u32 {
-    6
+    0
 }
 
 fn default_sources() -> Vec<String> {

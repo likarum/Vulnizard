@@ -121,7 +121,7 @@ impl Actor {
         }
     }
 
-    /// Non-interactive origin: "cli", "mcp", "system"
+    /// Non-interactive origin: "cli", "mcp-stdio", "rescan", "system"
     pub fn system(name: &str) -> Self {
         Self {
             user_id: None,
@@ -563,6 +563,7 @@ mod tests {
                 version_start: None,
                 version_end: Some(end.into()),
                 cpe: Some("cpe".into()),
+                ..Default::default()
             });
             db.upsert_cve(&cve).unwrap();
         }

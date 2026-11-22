@@ -100,6 +100,7 @@ impl CveSource for CisaKevSource {
                 version_start: None,
                 version_end: None,
                 cpe: None,
+                ..Default::default()
             });
 
             match db.upsert_cve(&cve) {

@@ -204,6 +204,7 @@ fn application_row(row: &rusqlite::Row) -> rusqlite::Result<Application> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         group: row.get(10)?,
+        known_cves: row.get(11)?,
     })
 }
 
@@ -244,12 +245,12 @@ impl Database {
     ) -> Result<Option<Application>> {
         let mut stmt = if version.is_some() {
             self.conn().prepare(
-                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp
+                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves
                  FROM applications WHERE project_id = ?1 AND name = ?2 AND version = ?3 AND grp = ''"
             )?
         } else {
             self.conn().prepare(
-                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp
+                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves
                  FROM applications WHERE project_id = ?1 AND name = ?2 AND version IS NULL AND grp = ''"
             )?
         };
@@ -278,7 +279,7 @@ impl Database {
         Ok(self
             .conn()
             .query_row(
-                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp
+                "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves
                  FROM applications WHERE project_id = ?1 AND grp = ?2 AND name = ?3 AND version IS ?4",
                 params![project_id, group, name, version],
                 application_row,
@@ -290,7 +291,7 @@ impl Database {
     #[allow(dead_code)]
     pub fn get_application(&self, id: i64) -> Result<Option<Application>> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp
+            "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves
              FROM applications WHERE id = ?1"
         )?;
 
@@ -304,7 +305,7 @@ impl Database {
     /// List applications for a project
     pub fn list_applications(&self, project_id: i64) -> Result<Vec<Application>> {
         let mut stmt = self.conn().prepare(
-            "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp
+            "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves
              FROM applications WHERE project_id = ?1 ORDER BY name, version"
         )?;
 
@@ -743,6 +744,9 @@ pub fn is_refusal(e: &anyhow::Error) -> bool {
     e.is::<TooGeneric>() || e.is::<UserFacing>()
 }
 
+/// Package ecosystems whose advisories are read (OSV)
+pub const PACKAGE_ECOSYSTEMS: [&str; 5] = ["Go", "npm", "PyPI", "crates.io", "Maven"];
+
 /// Comment of an entry set aside by the rescan: it no longer matches its
 /// application (the sources corrected their data, or the matching changed)
 pub const NO_LONGER_MATCHES: &str = "no longer matches this application at this version, according to the sources";
@@ -779,8 +783,7 @@ impl Database {
                 None => Ok(Vec::new()),
             };
         }
-        // Product and package names are matched as substrings: `%`, `_` or a
-        // single letter would match about everything
+        // `%`, `_` or a single letter is not a name
         if !is_matchable_name(&app.name) {
             return Ok(Vec::new());
         }
@@ -799,6 +802,25 @@ impl Database {
         Ok(ids)
     }
 
+    /// How many CVEs the sources hold for an application under its name,
+    /// whatever the version: 0 means the sources do not know it (which is not
+    /// "no flaw at this version"). `None` for a distribution package, judged
+    /// by the advisories of its distribution.
+    pub fn known_cve_count(&self, app: &Application) -> Result<Option<i64>> {
+        if app.ecosystem.as_deref().is_some_and(crate::db::is_distro_ecosystem) {
+            return Ok(None);
+        }
+        let mut any_version = app.clone();
+        any_version.version = None;
+        Ok(Some(match self.matching_cve_ids(&any_version) {
+            Ok(ids) => ids.len() as i64,
+            Err(e) => match e.downcast_ref::<TooGeneric>() {
+                Some(TooGeneric(count)) => *count as i64,
+                None => return Err(e),
+            },
+        }))
+    }
+
     /// Scan an application for matching CVEs and create watchlist entries
     /// Returns (new_entries, existing_entries).
     ///
@@ -810,7 +832,9 @@ impl Database {
     pub fn scan_app_for_cves(&self, app: &Application) -> Result<(i64, i64)> {
         let app_id = app.id.ok_or_else(|| anyhow!("Application must have an ID"))?;
         let ids = self.matching_cve_ids(app)?;
+        let known = self.known_cve_count(app)?;
         self.write_scope("scan_app", || {
+            self.conn().execute("UPDATE applications SET known_cves = ?1 WHERE id = ?2", params![known, app_id])?;
             let tracked: i64 = self.conn().query_row(
                 "SELECT COUNT(*) FROM watchlist_entries e JOIN applications a ON a.id = e.app_id WHERE a.project_id = ?1",
                 params![app.project_id],
@@ -872,23 +896,20 @@ impl Database {
         product: &str,
         version: Option<&str>,
     ) -> Result<Vec<String>> {
-        let product_lower = product.to_lowercase();
-
-        // Build query - fetch candidates, filter versions in Rust for proper semver comparison
+        // The product is the application itself, whatever the case and the
+        // separators: `podman` is not `podman_desktop`. The vendor, when
+        // given, narrows it (vendors are renamed over the years: contained).
         let mut sql = String::from(
-            "SELECT DISTINCT cve_id, version, version_start, version_end
-             FROM affected_products_normalized WHERE LOWER(product) LIKE ?1 ESCAPE '\\'"
+            "SELECT DISTINCT cve_id, version, version_start, version_end, start_excluded, end_included
+             FROM affected_products_normalized WHERE name_key(product) = ?1"
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        params_vec.push(Box::new(like_contains(&product_lower)));
-        let mut param_idx = 2;
+        params_vec.push(Box::new(versions::name_key(product)));
 
         if let Some(v) = vendor {
-            sql.push_str(&format!(" AND LOWER(vendor) LIKE ?{} ESCAPE '\\'", param_idx));
+            sql.push_str(" AND LOWER(vendor) LIKE ?2 ESCAPE '\\'");
             params_vec.push(Box::new(like_contains(&v.to_lowercase())));
-            #[allow(unused_assignments)]
-            { param_idx += 1; }
         }
 
         let mut stmt = self.conn().prepare(&sql)?;
@@ -907,7 +928,8 @@ impl Database {
             }
             let (db_version, version_start, version_end): (Option<String>, Option<String>, Option<String>) =
                 (row.get(1)?, row.get(2)?, row.get(3)?);
-            if is_version_affected(version, db_version.as_deref(), version_start.as_deref(), version_end.as_deref()) {
+            let (start_excluded, end_included): (bool, bool) = (row.get(4)?, row.get(5)?);
+            if versions::product_affects(version, db_version.as_deref(), version_start.as_deref(), start_excluded, version_end.as_deref(), end_included) {
                 seen.insert(cve_id.clone());
                 cves.push(cve_id);
                 if cves.len() > MAX_APP_MATCHES {
@@ -1159,57 +1181,11 @@ impl Database {
 }
 
 use rusqlite::OptionalExtension;
+use crate::versions;
 
 // ==========================================
 // Version comparison helpers
 // ==========================================
-
-/// Check if a given version is affected by a CVE entry
-fn is_version_affected(
-    query_version: Option<&str>,
-    db_version: Option<&str>,
-    version_start: Option<&str>,
-    version_end: Option<&str>,
-) -> bool {
-    // If no query version specified, include all CVEs for this product
-    let query_ver = match query_version {
-        Some(v) => v,
-        None => return true,
-    };
-
-    let db_ver = db_version.unwrap_or("*");
-
-    // Every version from a first one, or every version at all (unknown
-    // range: included for safety)
-    if db_ver == "*" && version_end.is_none() {
-        return version_start.is_none_or(|start| compare_versions(query_ver, start) >= 0);
-    }
-
-    // Exact version match
-    if db_ver != "*" && (db_ver == query_ver || query_ver.starts_with(&format!("{}.", db_ver))) {
-        return true;
-    }
-
-    // Version range check
-    if let Some(end) = version_end {
-        let in_range = match version_start {
-            Some(start) => {
-                compare_versions(query_ver, start) >= 0 && compare_versions(query_ver, end) < 0
-            }
-            None => compare_versions(query_ver, end) < 0,
-        };
-        if in_range {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Compares two versions: -1 if a < b, 0 if a == b, 1 if a > b
-fn compare_versions(a: &str, b: &str) -> i32 {
-    package_version_cmp(a, b) as i32
-}
 
 /// `github.com/acme/tool/v3` gives (`github.com/acme/tool`, 3) for a Go module
 fn split_go_major(package: &str, go: bool) -> (&str, Option<u64>) {
@@ -1240,7 +1216,7 @@ fn range_affects(range: Option<&str>, version: Option<&str>) -> bool {
     let (Some(range), Some(version)) = (range, version) else {
         return true;
     };
-    if !is_version(version) {
+    if !versions::is_version(version) {
         return true;
     }
     use std::cmp::Ordering::{Greater, Less};
@@ -1261,99 +1237,18 @@ fn range_affects(range: Option<&str>, version: Option<&str>) -> bool {
         };
         let start = from.take().unwrap_or("0");
         open = false;
-        if !is_version(end) || (start != "0" && !is_version(start)) {
+        if !versions::is_version(end) || (start != "0" && !versions::is_version(start)) {
             return true;
         }
-        let after_start = start == "0" || package_version_cmp(version, start) != Less;
-        let order = package_version_cmp(version, end);
+        let after_start = start == "0" || versions::cmp(version, start) != Less;
+        let order = versions::cmp(version, end);
         if after_start && (order == Less || (inclusive && order != Greater)) {
             return true;
         }
     }
     match from {
-        Some(start) if open => start == "0" || !is_version(start) || package_version_cmp(version, start) != Less,
+        Some(start) if open => start == "0" || !versions::is_version(start) || versions::cmp(version, start) != Less,
         _ => false,
-    }
-}
-
-/// A version starts with a number (after an optional `v`); a commit hash does not count
-fn is_version(text: &str) -> bool {
-    let text = text.trim_start_matches(['v', 'V']);
-    let hash = text.len() >= 20 && text.chars().all(|c| c.is_ascii_hexdigit());
-    !hash && text.chars().next().is_some_and(|c| c.is_ascii_digit())
-}
-
-/// Orders two versions (semantic versioning, and close enough for PyPI,
-/// Maven and what NVD records): numbers first, then a pre-release (`-rc1`,
-/// `b2`, `.dev3`) comes before its release, and anything else after it
-/// (`.post1`, `p2`, the `g` of OpenSSL 1.0.1g).
-fn package_version_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    fn split(version: &str) -> (Vec<u64>, String) {
-        let version = version.trim().trim_start_matches(['v', 'V']);
-        // Build metadata does not order versions
-        let version = version.split('+').next().unwrap_or(version);
-        let mut numbers = Vec::new();
-        let mut rest = version;
-        loop {
-            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-            if digits == 0 {
-                break;
-            }
-            numbers.push(rest[..digits].parse().unwrap_or(u64::MAX));
-            rest = &rest[digits..];
-            match rest.strip_prefix('.') {
-                Some(next) if next.starts_with(|c: char| c.is_ascii_digit()) => rest = next,
-                _ => break,
-            }
-        }
-        (numbers, rest.trim_start_matches(['-', '.', '_']).to_lowercase())
-    }
-    // 0 for a pre-release, 1 for the release itself, 2 for what follows it
-    fn rank(suffix: &str) -> u8 {
-        const PRE: [&str; 10] = ["alpha", "beta", "rc", "cr", "pre", "preview", "dev", "snapshot", "canary", "nightly"];
-        const FINAL: [&str; 3] = ["final", "release", "ga"];
-        let word: String = suffix.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-        // 1.0a1, 1.0b2, 1.0c1 and 2.0-M3 are pre-releases; a letter alone is
-        // a later patch (OpenSSL 1.0.1g)
-        let numbered = suffix[word.len()..].starts_with(|c: char| c.is_ascii_digit());
-        if suffix.is_empty() || FINAL.contains(&word.as_str()) {
-            1
-        } else if PRE.contains(&word.as_str()) || (numbered && ["a", "b", "c", "m"].contains(&word.as_str())) {
-            0
-        } else {
-            2
-        }
-    }
-    // Text and numbers of a suffix, numbers compared as numbers: rc10 after rc9
-    fn chunks(suffix: &str) -> Vec<(String, u64)> {
-        let mut out = Vec::new();
-        let mut chars = suffix.chars().peekable();
-        while chars.peek().is_some() {
-            let mut word = String::new();
-            while let Some(c) = chars.next_if(|c| !c.is_ascii_digit()) {
-                if c.is_ascii_alphabetic() {
-                    word.push(c);
-                }
-            }
-            let mut digits = String::new();
-            while let Some(c) = chars.next_if(|c| c.is_ascii_digit()) {
-                digits.push(c);
-            }
-            out.push((word, digits.parse().unwrap_or(0)));
-        }
-        out
-    }
-    let ((na, sa), (nb, sb)) = (split(a), split(b));
-    for i in 0..na.len().max(nb.len()) {
-        let order = na.get(i).copied().unwrap_or(0).cmp(&nb.get(i).copied().unwrap_or(0));
-        if order != Ordering::Equal {
-            return order;
-        }
-    }
-    match (rank(&sa), rank(&sb)) {
-        (1, 1) => Ordering::Equal,
-        (ra, rb) => ra.cmp(&rb).then_with(|| chunks(&sa).cmp(&chunks(&sb))),
     }
 }
 
@@ -1372,6 +1267,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
     }
@@ -1399,9 +1295,11 @@ mod tests {
         for name in ["%", "_", "%%", "__", "w", "wi%et", "g_dget", "%dget"] {
             assert_eq!(matches(name), 0, "{name}");
         }
-        // A name is a substring; its own % and _ are plain characters
+        // A name is the product itself, not a part of it; case and separators do not count
         assert_eq!(matches("widget"), 1);
-        assert_eq!(matches("dget"), 2);
+        assert_eq!(matches("Wid-Get"), 1);
+        assert_eq!(matches("dget"), 0);
+        assert_eq!(matches("widgets"), 0);
         assert_eq!(matches("50%_off"), 1);
         assert!(is_matchable_name("r2") && !is_matchable_name("%a_") && !is_matchable_name(" "));
     }
@@ -1451,39 +1349,11 @@ mod tests {
         // A version change that would be refused leaves the version as it was
         let actor = crate::db::Actor::system("test");
         let app_id = first.id.unwrap();
-        db.conn().execute("UPDATE applications SET name = 'dget' WHERE id = ?1", params![app_id]).unwrap();
+        seed(&db, "CVE-2021-0001", "gadget");
+        db.conn().execute("UPDATE applications SET name = 'gadget' WHERE id = ?1", params![app_id]).unwrap();
         let refused = db.change_application_version(app_id, "2.0", &actor).err().unwrap();
         assert!(refused.is::<TooGeneric>());
         assert_eq!(db.get_application(app_id).unwrap().unwrap().version, None);
-    }
-
-    #[test]
-    fn package_versions_are_ordered() {
-        use std::cmp::Ordering::{Equal, Greater, Less};
-        for (a, b, expected) in [
-            ("3.7.16", "3.7.3", Greater),
-            ("3.7.3", "3.7.16", Less),
-            ("v3.7.3", "3.7.3", Equal),
-            ("3.0", "3.0.0", Equal),
-            ("3.0.0", "3.0.0-beta5", Greater),
-            ("3.0.0-beta5", "3.0.0-rc1", Less),
-            ("3.0.0-rc9", "3.0.0-rc10", Less),
-            ("1.5.0-rc5", "1.5.0", Less),
-            ("2.0.0b1", "2.0.0", Less),
-            ("2.0.0.dev3", "2.0.0", Less),
-            ("2.0.0.post1", "2.0.0", Greater),
-            ("1.0.0+build7", "1.0.0", Equal),
-            ("1.2.3.Final", "1.2.3", Equal),
-            ("2.0.0-M3", "2.0.0", Less),
-            ("1.0.1g", "1.0.1f", Greater),
-            ("1.0.1a", "1.0.1", Greater),
-            ("1.9.5p2", "1.9.5p1", Greater),
-            ("1.9.17p2", "1.9.5p2", Greater),
-            ("1.2.3-4", "1.2.3", Greater),
-            ("2020-12-14", "2021-02-28", Less),
-        ] {
-            assert_eq!(package_version_cmp(a, b), expected, "{a} against {b}");
-        }
     }
 
     #[test]
@@ -1624,14 +1494,35 @@ mod tests {
     }
 
     #[test]
-    fn a_product_affected_from_a_version_does_not_match_older_ones() {
-        assert!(is_version_affected(Some("1.48.0"), Some("*"), Some("1.30.0"), None));
-        assert!(!is_version_affected(Some("1.29.0"), Some("*"), Some("1.30.0"), None));
-        assert!(is_version_affected(Some("1.29.0"), Some("*"), None, None));
-        assert!(is_version_affected(Some("1.0.1f"), Some("*"), Some("1.0.1"), Some("1.0.1g")));
-        assert!(!is_version_affected(Some("1.0.1g"), Some("*"), Some("1.0.1"), Some("1.0.1g")));
-        assert!(!is_version_affected(Some("3.6.5"), Some("*"), Some("1.0.1"), Some("1.0.1g")));
-        assert!(is_version_affected(Some("1.9.5p1"), Some("*"), Some("1.9.0"), Some("1.9.5p2")));
-        assert!(!is_version_affected(Some("1.9.17p2"), Some("*"), Some("1.9.0"), Some("1.9.5p2")));
+    fn an_application_unknown_to_the_sources_is_told_from_one_not_affected() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db);
+        let mut cve = Cve::new("CVE-2024-0001".into());
+        cve.description = Some("Flaw".into());
+        cve.affected_products.push(AffectedProduct {
+            vendor: Some("acme".into()),
+            product: Some("home-assistant".into()),
+            version: Some("*".into()),
+            version_end: Some("2024.1".into()),
+            cpe: Some("cpe".into()),
+            ..Default::default()
+        });
+        db.upsert_cve(&cve).unwrap();
+        package(&db, "CVE-2024-0002", "PyPI", "ha-mcp", Some(">=0 <2.0"));
+        let add = |name: &str, version: &str, ecosystem: Option<&str>| {
+            let mut app = Application::new(project, name.into());
+            app.version = Some(version.into());
+            app.ecosystem = ecosystem.map(String::from);
+            let matching = db.add_application_scanned(&mut app).unwrap();
+            (matching, db.get_application(app.id.unwrap()).unwrap().unwrap().known_cves)
+        };
+        // Known under another spelling, fixed since: nothing to review, one CVE known
+        assert_eq!(add("home_assistant", "2026.10.2", None), (0, Some(1)));
+        assert_eq!(add("Home Assistant", "2023.12", None), (1, Some(1)));
+        // No source knows it; with its ecosystem, its package advisories are found
+        assert_eq!(add("ha-mcp", "9.1.0", None), (0, Some(0)));
+        assert_eq!(add("ha-mcp", "1.9.0", Some("PyPI")), (1, Some(1)));
+        // A distribution package is not judged this way
+        assert_eq!(add("bash", "5.2.15-2", Some("Debian:12")), (0, None));
     }
 }

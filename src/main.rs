@@ -8,6 +8,7 @@ mod inventory;
 mod mfa;
 mod secrets;
 mod trail;
+mod versions;
 mod mcp;
 mod models;
 mod notify;
@@ -85,7 +86,7 @@ enum Commands {
     },
     /// Synchronize CVE data from all sources
     Sync {
-        /// Override history months from config (default: 6, for initial sync)
+        /// How far back the NVD is read, in months (0: the whole history; default: the configuration)
         #[arg(long)]
         months: Option<u32>,
 
@@ -546,7 +547,8 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
     println!("╔══════════════════════════════════════════════════════════╗");
     println!("║         VULNIZARD - Vulnerability Intelligence           ║");
     if force_full {
-        println!("║              FULL SYNC ({} months history)               ║", history_months);
+        let history = if history_months == 0 { "whole history".to_string() } else { format!("{history_months} months history") };
+        println!("║{:^58}║", format!("FULL SYNC ({history})"));
     } else {
         println!("║              INCREMENTAL SYNC                            ║");
     }
@@ -995,31 +997,19 @@ fn get_version_match_indicator(cve: &models::Cve, query_version: &str, product_f
             }
         }
 
-        // Check version match type
-        let version = ap.version.as_deref().unwrap_or("*");
-
-        // Case 1: Exact version match
-        if version != "*" && (version == query_version || query_version.starts_with(&format!("{}.", version))) {
+        // Nothing recorded about versions: unknown
+        if ap.version.as_deref().is_none_or(|v| v == "*" || v == "-") && ap.version_start.is_none() && ap.version_end.is_none() {
+            continue;
+        }
+        if versions::product_affects(
+            Some(query_version),
+            ap.version.as_deref(),
+            ap.version_start.as_deref(),
+            ap.version_start_excluded,
+            ap.version_end.as_deref(),
+            ap.version_end_included,
+        ) {
             return "✓";
-        }
-
-        // Case 2: Version range match
-        if let Some(ref version_end) = ap.version_end {
-            // Query version is within range
-            if query_version < version_end.as_str() {
-                if let Some(ref version_start) = ap.version_start {
-                    if query_version >= version_start.as_str() {
-                        return "✓";
-                    }
-                } else {
-                    return "✓";
-                }
-            }
-        }
-
-        // Case 3: Wildcard with no range = unknown
-        if version == "*" && ap.version_end.is_none() {
-            return "?";
         }
     }
 

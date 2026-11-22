@@ -237,7 +237,7 @@ fn sees_internals(&self) -> bool {
 /// Author recorded in the decision history
 fn actor(&self) -> Actor {
     match &self.caller {
-        Caller::Local => Actor::system("mcp"),
+        Caller::Local => Actor::system("mcp-stdio"),
         Caller::User(account) => Actor::user(account.id, &account.username),
     }
 }
@@ -301,7 +301,7 @@ fn write_tool_definitions() -> Vec<Value> {
                 "name": { "type": "string", "description": "Product name as in the catalog (see list_products), e.g. vaultwarden" },
                 "version": { "type": "string", "description": "Deployed version, e.g. 1.37.4" },
                 "vendor": { "type": "string", "description": "Vendor name as in the catalog, narrows the match" },
-                "ecosystem": { "type": "string", "description": "Package ecosystem (npm, PyPI, Go, crates.io…) to also match package advisories" },
+                "ecosystem": { "type": "string", "description": "Package ecosystem (Go, npm, PyPI, crates.io, Maven) to also match the advisories of the package of that name, at this version" },
             }),
             &["project", "name"],
         ),
@@ -822,7 +822,14 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                 return Err(anyhow!("the application name needs at least two letters or digits"));
             }
             let new_entries = db.add_application_scanned(&mut app)?;
-            json!({ "added": app.name, "version": app.version, "matching_cves": new_entries })
+            // 0 known: the sources hold no CVE under this name at any version,
+            // which is not the same as "no flaw at this version"
+            let known = app.id.and_then(|id| db.get_application(id).ok().flatten()).and_then(|a| a.known_cves);
+            let mut added = json!({ "added": app.name, "version": app.version, "matching_cves": new_entries, "known_cves": known });
+            if known == Some(0) {
+                added["note"] = json!("unknown to the sources: no CVE is recorded under this name at any version. Check the product name and vendor (list_products), or give the package ecosystem.");
+            }
+            added
         }
         "update_application_version" => {
             let target = self.target(args)?;
@@ -1057,6 +1064,7 @@ mod tests {
             version_start: None,
             version_end: Some("1.30.0".into()),
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
         db.rebuild_catalog().unwrap();
@@ -1120,6 +1128,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
 

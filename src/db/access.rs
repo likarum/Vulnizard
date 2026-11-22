@@ -108,6 +108,9 @@ pub struct ScopedApplication {
     pub group: String,
     /// Names of the sources reporting it
     pub sources: Vec<String>,
+    /// CVEs the sources hold under this name, whatever the version; 0: unknown to the sources
+    pub known_cves: Option<i64>,
+    pub ecosystem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -536,7 +539,8 @@ impl Database {
                     (SELECT COUNT(*) FROM watchlist_entries w WHERE w.app_id = a.id AND w.status = 'untreated'),
                     a.grp,
                     (SELECT GROUP_CONCAT(s.name, char(10)) FROM inventory_components c
-                     JOIN inventory_sources s ON s.id = c.source_id WHERE c.application_id = a.id)
+                     JOIN inventory_sources s ON s.id = c.source_id WHERE c.application_id = a.id),
+                    a.known_cves, a.ecosystem
              FROM applications a
              JOIN projects p ON p.id = a.project_id
              JOIN organizations o ON o.id = p.organization_id
@@ -559,6 +563,8 @@ impl Database {
                         .get::<_, Option<String>>(8)?
                         .map(|names| names.lines().map(String::from).collect())
                         .unwrap_or_default(),
+                    known_cves: r.get(9)?,
+                    ecosystem: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -865,6 +871,7 @@ mod tests {
             version_start: None,
             version_end: None,
             cpe: Some("cpe".into()),
+            ..Default::default()
         });
         db.upsert_cve(&cve).unwrap();
 

@@ -206,6 +206,8 @@ pub struct ApplicationForm {
     #[serde(default)]
     vendor: String,
     #[serde(default)]
+    ecosystem: String,
+    #[serde(default)]
     back: String,
 }
 
@@ -226,6 +228,10 @@ pub async fn application_add(
         let mut app = Application::new(project.id, name.to_string());
         app.version = Some(form.version.trim().to_string()).filter(|v| !v.is_empty());
         app.vendor = Some(form.vendor.trim().to_string()).filter(|v| !v.is_empty());
+        if !form.ecosystem.is_empty() && !crate::db::watchlist::PACKAGE_ECOSYSTEMS.contains(&form.ecosystem.as_str()) {
+            return Err(AppError::Bad("Unknown package ecosystem.".into()));
+        }
+        app.ecosystem = Some(form.ecosystem.clone()).filter(|e| !e.is_empty());
         if db
             .get_application_by_name(project.id, &app.name, app.version.as_deref())?
             .is_some()
