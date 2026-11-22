@@ -897,19 +897,23 @@ impl Database {
         version: Option<&str>,
     ) -> Result<Vec<String>> {
         // The product is the application itself, whatever the case and the
-        // separators: `podman` is not `podman_desktop`. The vendor, when
-        // given, narrows it (vendors are renamed over the years: contained).
+        // separators: `podman` is not `podman_desktop`. With a vendor, the
+        // products of that vendor named after it count too: the NVD records
+        // nginx under `nginx` and `nginx_open_source` (vendors are renamed
+        // over the years: the vendor is contained, not equal).
         let mut sql = String::from(
             "SELECT DISTINCT cve_id, version, version_start, version_end, start_excluded, end_included
-             FROM affected_products_normalized WHERE name_key(product) = ?1"
+             FROM affected_products_normalized WHERE "
         );
-
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         params_vec.push(Box::new(versions::name_key(product)));
-
-        if let Some(v) = vendor {
-            sql.push_str(" AND LOWER(vendor) LIKE ?2 ESCAPE '\\'");
-            params_vec.push(Box::new(like_contains(&v.to_lowercase())));
+        match vendor {
+            Some(v) => {
+                sql.push_str("LOWER(vendor) LIKE ?2 ESCAPE '\\' AND (name_key(product) = ?1 OR name_variant(product, ?3))");
+                params_vec.push(Box::new(like_contains(&v.to_lowercase())));
+                params_vec.push(Box::new(product.to_string()));
+            }
+            None => sql.push_str("name_key(product) = ?1"),
         }
 
         let mut stmt = self.conn().prepare(&sql)?;
@@ -1524,5 +1528,43 @@ mod tests {
         assert_eq!(add("ha-mcp", "1.9.0", Some("PyPI")), (1, Some(1)));
         // A distribution package is not judged this way
         assert_eq!(add("bash", "5.2.15-2", Some("Debian:12")), (0, None));
+    }
+
+    #[test]
+    fn with_a_vendor_its_products_named_after_the_application_count() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db);
+        let seed = |id: &str, vendor: &str, product: &str| {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some(vendor.into()),
+                product: Some(product.into()),
+                version: Some("*".into()),
+                version_end: Some("1.30.7".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        };
+        seed("CVE-2026-0001", "f5", "nginx");
+        seed("CVE-2026-0002", "f5", "nginx_open_source");
+        seed("CVE-2026-0003", "f5", "nginx_plus");
+        seed("CVE-2026-0004", "nginxui", "nginx_ui");
+        seed("CVE-2026-0005", "kubernetes", "ingress-nginx");
+        seed("CVE-2026-0006", "f5", "nginxui");
+        let matching = |vendor: Option<&str>| {
+            let mut app = Application::new(project, "nginx".into());
+            app.vendor = vendor.map(String::from);
+            app.version = Some("1.30.6".into());
+            let mut ids = db.matching_cve_ids(&app).unwrap();
+            ids.sort();
+            ids.iter().map(|id| id[11..].to_string()).collect::<Vec<_>>().join(" ")
+        };
+        // Without a vendor: the product of that exact name only
+        assert_eq!(matching(None), "01");
+        // With it: its variants too, not those of others nor names merely starting alike
+        assert_eq!(matching(Some("f5")), "01 02 03");
+        assert_eq!(matching(Some("nginxui")), "04");
     }
 }

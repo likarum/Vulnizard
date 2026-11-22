@@ -89,6 +89,14 @@ pub fn name_key(name: &str) -> String {
     name.chars().filter(|c| !matches!(c, '_' | '-' | '.' | ' ')).flat_map(char::to_lowercase).collect()
 }
 
+/// Whether a product is a variant of another by its name: the same name
+/// followed by a separator and something else (`nginx_open_source`,
+/// `nginx-plus` for `nginx`; not `nginxui`).
+pub fn is_name_variant(product: &str, name: &str) -> bool {
+    let (product, name) = (product.to_lowercase(), name.to_lowercase());
+    product.strip_prefix(name.as_str()).is_some_and(|rest| rest.len() > 1 && rest.starts_with(['_', '-', '.', ' ']))
+}
+
 /// Whether a version is affected by a product entry of a CVE: an exact
 /// version (`version`), or a range whose bounds may each be included or not
 /// (NVD: `versionStartIncluding` / `versionStartExcluding`,
@@ -139,6 +147,8 @@ mod tests {
         assert_eq!(name_key("adguard_home"), name_key("AdGuardHome"));
         assert_eq!(name_key("node.js"), "nodejs");
         assert_ne!(name_key("podman"), name_key("podman_desktop"));
+        assert!(is_name_variant("nginx_open_source", "nginx") && is_name_variant("NGINX-Plus", "nginx"));
+        assert!(!is_name_variant("nginx", "nginx") && !is_name_variant("nginxui", "nginx") && !is_name_variant("ingress-nginx", "nginx"));
     }
 
     #[test]

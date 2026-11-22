@@ -215,6 +215,13 @@ fn register_functions(conn: &Connection) -> Result<()> {
             flag(5)?,
         ))
     })?;
+    // name_variant(product, name): `versions::is_name_variant`
+    conn.create_scalar_function("name_variant", 2, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
+        Ok(match (ctx.get::<Option<String>>(0)?, ctx.get::<Option<String>>(1)?) {
+            (Some(product), Some(name)) => crate::versions::is_name_variant(&product, &name),
+            _ => false,
+        })
+    })?;
     // name_key(text): a product name as it is compared (`versions::name_key`)
     conn.create_scalar_function("name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |ctx| {
         Ok(ctx.get::<Option<String>>(0)?.map(|text| crate::versions::name_key(&text)))

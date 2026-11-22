@@ -17,9 +17,10 @@ before 1.0, a minor version may change behaviour.
   matches, and notifications for them. `sync.history_months` limits the history again (0, the
   new default, reads everything).
 - **An application now matches the product of its exact name** (case and separators aside), no
-  longer every product whose name contains it: `nginx` no longer matches `nginx_open_source`,
-  `nginx_plus` or `ingress-nginx`. Declare each product you run under its own name; *Vendors &
-  products* lists them.
+  longer every product whose name contains it: `nginx` no longer matches `ingress-nginx` or
+  `nginxui`. When the vendor is given, the products of that vendor named after the application
+  count too (`nginx_open_source`, `nginx_plus` for `nginx` of `f5`): give the vendor, or declare
+  such a variant as an application of its own.
 - New passwords need 15 characters (10 before) and easy ones are refused. Existing passwords
   keep working until they are changed.
 - With open registration, the first account is no longer the administrator for whoever registers
@@ -91,7 +92,8 @@ before 1.0, a minor version may change behaviour.
   included (schema v23); the NVD is read again once to fill it in.
 - **Product names were matched as substrings**: `docker` matched `mailcow-dockerized`, `podman`
   matched `podman_desktop`. The product is now the application itself, case and separators aside
-  (`home_assistant` now matches `home-assistant`, which it did not).
+  (`home_assistant` now matches `home-assistant`, which it did not); with a vendor, the products
+  of that vendor named after it are kept (`nginx_open_source` for `nginx`).
 - `search --version` compared versions as text (`3.7.16` before `3.7.3`, `10.0` before `9.0`); it
   now uses the same comparison as tracked applications, and works without `--product`.
 - **Entries no longer matching stayed to review for ever.** After each synchronization (and with
