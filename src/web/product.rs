@@ -586,7 +586,7 @@ fn applications(
             }
             p.muted {
                 "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
-                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
+                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it; " code { "sudo" } " also stands for " code { "sudo_project" } "), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
                 "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
                 "which is the only way to follow software the NVD does not describe. "
                 "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
