@@ -24,7 +24,8 @@ database was last synchronized (administrators can start a sync from there):
   - *To review*: CVEs affecting the deployed versions — **close** once fixed, **accept the risk**
     with a justification, or mark **not applicable**
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
-    version closes the CVEs it fixes), the **inventory sources** of the project and the checklist of
+    version closes the CVEs it fixes, and an entry still to review that no longer matches after a
+    source corrected its data is set aside as not applicable), the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)
   - *Subscriptions*: vendors or products whose every CVE change you follow
   - *Evolution*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the

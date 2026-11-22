@@ -16,6 +16,9 @@ before 1.0, a minor version may change behaviour.
   accounts, are not affected.
 - The Nuclei templates source is not enabled on an existing instance: *Admin → Vulnerability
   sources*.
+- After the first synchronization, entries still to review that no longer match their
+  application are set aside as *not applicable* by the system (see *Fixed*): expect the list to
+  shrink for applications declared with an ecosystem. The audit records each of them.
 
 ### Added
 
@@ -50,6 +53,20 @@ before 1.0, a minor version may change behaviour.
 
 ### Fixed
 
+- **An application declared with an ecosystem (Go, npm, crates.io, PyPI, Maven) was matched
+  without its version**, and with every package whose name contained its own: n8n 3.1.0 got
+  168 CVEs, most of them fixed long before or belonging to other packages. The version is now
+  checked against the ranges of the advisory, the package must be the application itself (or the
+  last part of its path, `traefik` for `github.com/traefik/traefik/v3`), and a Go module of
+  another major version is left out. Ranges given as Git commits are no longer read as versions,
+  and the ranges of an advisory are updated when it is corrected (they were kept as first seen).
+- **Versions with a letter were compared without it**: OpenSSL 1.0.1f was not matched by a flaw
+  fixed in 1.0.1g. Pre-releases (`-rc1`, `b2`) now come before their release.
+- A product recorded as affected *from* a version, without an end, matched older versions too.
+- **Entries no longer matching stayed to review for ever.** After each synchronization (and with
+  `watch scan`), an entry still to review whose CVE no longer matches the application, because a
+  source corrected its data, is set aside as *not applicable* with a comment saying so, and
+  comes back if it matches again. Decisions taken by a person are never changed.
 - `/push/inbox` answered an empty list without a session; it now refuses. Found by a new test
   that reads every route from the source and calls each one with five methods and five kinds
   of missing or forged credentials: nothing but sign-in pages and static files may answer.

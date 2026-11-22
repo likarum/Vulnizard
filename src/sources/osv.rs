@@ -92,43 +92,37 @@ impl OsvSource {
             for affected in &vuln.affected {
                 let pkg = &affected.package;
 
-                // Build version range string
-                let range_str = affected
-                    .ranges
-                    .iter()
-                    .flat_map(|r| &r.events)
-                    .map(|e| {
-                        if let Some(ref introduced) = e.introduced {
-                            format!(">={}", introduced)
-                        } else if let Some(ref fixed) = e.fixed {
-                            format!("<{}", fixed)
-                        } else {
-                            String::new()
-                        }
-                    })
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                // Find fixed version
+                let range_str = range_of(affected);
                 let fixed_version = affected
                     .ranges
                     .iter()
+                    .filter(|r| !r.kind.eq_ignore_ascii_case("GIT"))
                     .flat_map(|r| &r.events)
                     .find_map(|e| e.fixed.clone());
 
-                let package = AffectedPackage {
-                    ecosystem: ecosystem.to_string(),
-                    name: pkg.name.clone(),
-                    vulnerable_range: if range_str.is_empty() { None } else { Some(range_str) },
-                    fixed_version,
-                };
-
                 for cve_id in &cve_ids {
-                    cve_to_packages
-                        .entry(cve_id.clone())
-                        .or_default()
-                        .push(package.clone());
+                    let known = cve_to_packages.entry(cve_id.clone()).or_default();
+                    // Several advisories, or several entries of one advisory,
+                    // may name the same package: their ranges add up. An entry
+                    // without a range covers every version, and stays so.
+                    match known.iter_mut().find(|p| p.name == pkg.name) {
+                        Some(existing) => {
+                            existing.vulnerable_range = match (existing.vulnerable_range.take(), range_str.clone()) {
+                                (Some(a), Some(b)) if a == b => Some(a),
+                                (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                                _ => None,
+                            };
+                            if existing.fixed_version.is_none() {
+                                existing.fixed_version = fixed_version.clone();
+                            }
+                        }
+                        None => known.push(AffectedPackage {
+                            ecosystem: ecosystem.to_string(),
+                            name: pkg.name.clone(),
+                            vulnerable_range: range_str.clone(),
+                            fixed_version: fixed_version.clone(),
+                        }),
+                    }
                 }
             }
         }
@@ -241,6 +235,8 @@ struct OsvPackage {
 
 #[derive(Debug, Deserialize)]
 struct OsvRange {
+    #[serde(rename = "type", default)]
+    kind: String,
     #[serde(default)]
     events: Vec<OsvEvent>,
 }
@@ -249,4 +245,52 @@ struct OsvRange {
 struct OsvEvent {
     introduced: Option<String>,
     fixed: Option<String>,
+    last_affected: Option<String>,
+}
+
+/// The version ranges of an affected package, as `>=1.0 <1.4 >=2.0 <=2.3`:
+/// each `>=` opens a range that the next `<` or `<=` closes (a range left
+/// open has no fix). Ranges given as Git commits are left out: they are not
+/// versions. `None` when no version range is known.
+fn range_of(affected: &OsvAffected) -> Option<String> {
+    let events: Vec<String> = affected
+        .ranges
+        .iter()
+        .filter(|r| !r.kind.eq_ignore_ascii_case("GIT"))
+        .flat_map(|r| &r.events)
+        .filter_map(|e| {
+            if let Some(v) = &e.introduced {
+                Some(format!(">={v}"))
+            } else if let Some(v) = &e.fixed {
+                Some(format!("<{v}"))
+            } else {
+                e.last_affected.as_ref().map(|v| format!("<={v}"))
+            }
+        })
+        .collect();
+    (!events.is_empty()).then(|| events.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_ranges_are_kept_and_commit_ranges_left_out() {
+        let affected: OsvAffected = serde_json::from_str(
+            r#"{"package": {"name": "github.com/acme/tool/v3", "ecosystem": "Go"},
+                "ranges": [
+                  {"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "0123456789abcdef0123456789abcdef01234567"}]},
+                  {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "3.6.7"}, {"introduced": "3.7.0"}, {"last_affected": "3.7.2"}]}
+                ]}"#,
+        )
+        .unwrap();
+        assert_eq!(range_of(&affected).as_deref(), Some(">=0 <3.6.7 >=3.7.0 <=3.7.2"));
+
+        let commits_only: OsvAffected = serde_json::from_str(
+            r#"{"package": {"name": "tool"}, "ranges": [{"type": "GIT", "events": [{"introduced": "0"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(range_of(&commits_only), None);
+    }
 }

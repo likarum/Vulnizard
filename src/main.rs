@@ -1192,6 +1192,12 @@ fn cmd_watch(db: &Database, action: WatchAction) -> Result<()> {
                         } else {
                             println!("no CVEs found");
                         }
+                        // Entries to review that no longer match (sources corrected) are set aside
+                        match db.settle_stale_entries(&app) {
+                            Ok((0, 0)) => {}
+                            Ok((aside, back)) => println!("    {aside} entr(ies) no longer matching set aside, {back} brought back"),
+                            Err(e) => println!("    error: {e}"),
+                        }
                     }
                     Err(e) => println!("error: {}", e),
                 }

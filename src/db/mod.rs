@@ -1349,12 +1349,15 @@ impl Database {
                 continue;
             }
 
-            // Ajouter les packages (sans supprimer les existants)
+            // The ranges of a package already known are brought up to date:
+            // an advisory is corrected after its publication
             for pkg in pkgs {
                 self.conn.execute(
                     r#"
-                    INSERT OR IGNORE INTO affected_packages (cve_id, ecosystem, name, vulnerable_range, fixed_version)
+                    INSERT INTO affected_packages (cve_id, ecosystem, name, vulnerable_range, fixed_version)
                     VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(cve_id, ecosystem, name) DO UPDATE SET
+                        vulnerable_range = excluded.vulnerable_range, fixed_version = excluded.fixed_version
                     "#,
                     params![
                         cve_id,
