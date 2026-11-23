@@ -95,3 +95,44 @@ impl SyncResult {
         self.added + self.updated
     }
 }
+
+/// How each source is read: the hours a periodic run leaves between two
+/// downloads (0: at every cycle), and what one download fetches. One place
+/// for the sources, which obey it, and for the administration page, which
+/// shows it.
+pub const PACES: [(&str, i64, &str); 9] = [
+    ("nvd", 0, "only the CVEs changed since the last run"),
+    ("cisa_kev", 6, "the whole catalog, about 2 MB"),
+    ("epss", 12, "the whole file of scores, about 3 MB"),
+    ("vulnrichment", 24, "only the records changed since the last run; the whole archive the first time or after a long stop"),
+    ("osv", 12, "the whole archive of five ecosystems, about 290 MB"),
+    ("distros", 12, "the whole archive of Debian advisories, about 85 MB"),
+    ("exploitdb", 12, "the whole index, about 10 MB"),
+    ("metasploit", 24, "the whole index, about 11 MB"),
+    ("nuclei", 24, "the whole index, about 2 MB"),
+];
+
+/// Hours a periodic run leaves between two downloads of a source
+pub fn min_hours(source: &str) -> i64 {
+    PACES.iter().find(|(name, _, _)| *name == source).map_or(0, |(_, hours, _)| *hours)
+}
+
+/// What one download of a source fetches
+pub fn fetches(source: &str) -> &'static str {
+    PACES.iter().find(|(name, _, _)| *name == source).map_or("", |(_, _, what)| what)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_source_says_how_often_and_what_it_downloads() {
+        for (key, _, _) in crate::settings::SOURCES {
+            assert!(super::PACES.iter().any(|(name, _, what)| *name == key && !what.is_empty()), "{key}");
+        }
+        // Only the sources that read changes run at every cycle
+        assert_eq!(super::min_hours("nvd"), 0);
+        for whole in ["cisa_kev", "epss", "osv", "distros", "exploitdb", "metasploit", "nuclei"] {
+            assert!(super::min_hours(whole) >= 6, "{whole}");
+        }
+    }
+}

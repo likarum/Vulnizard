@@ -126,7 +126,7 @@ impl CveSource for DistrosSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours = (chrono::Utc::now() - last).num_hours();
-                if hours < 12 && db.has_distro_advisories()? {
+                if hours < super::min_hours("distros") && db.has_distro_advisories()? {
                     println!("━━━ Distributions: Skipped (last sync {hours}h ago) ━━━");
                     return Ok(SyncResult::skipped());
                 }

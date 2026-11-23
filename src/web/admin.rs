@@ -803,7 +803,12 @@ pub async fn sources(
                         span.muted { "This page refreshes by itself." }
                     }
                 }
-                p.muted { "Enabled sources are synchronized at every cycle. A disabled source can still be synchronized on demand." }
+                p.muted {
+                    "A cycle starts " @if config.web.sync_interval_minutes > 0 { "every " (config.web.sync_interval_minutes) " minutes" } @else { "only on demand (no periodic sync)" }
+                    ". A source that downloads a whole file does not do so at every cycle: it waits the time shown below, whatever the interval. "
+                    strong { "Sync now downloads at once, without waiting" } ": not to be used repeatedly on the sources that fetch a whole file. "
+                    "A disabled source can still be synchronized on demand."
+                }
                 table.list {
                     thead { tr { th { "Source" } th { "Provides" } th { "Periodic sync" } th { "Last run (UTC)" } th { "State" } th {} } }
                     tbody {
@@ -823,7 +828,14 @@ pub async fn sources(
                             tr {
                                 td.nowrap { strong { (label) } div.muted { code { (key) } } }
                                 td { (description) }
-                                td { @if enabled { "enabled" } @else { span.muted { "disabled" } } }
+                                td {
+                                    @if enabled { "enabled" } @else { span.muted { "disabled" } }
+                                    @let hours = crate::sources::min_hours(key);
+                                    div.muted {
+                                        @if hours == 0 { "at every cycle" } @else { "at most every " (hours) " h" }
+                                        ": " (crate::sources::fetches(key))
+                                    }
+                                }
                                 td.nowrap { @if let Some(r) = run { (r.started_at) } @else { span.muted { "never" } } }
                                 td {
                                     @if is_running {

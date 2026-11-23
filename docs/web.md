@@ -46,7 +46,11 @@ database was last synchronized (administrators can start a sync from there):
 - **CVE database** — reference information: CVEs (keyword, CVE-ID, vendor, product, CVSS, CWE,
   KEV, personal tags) with their change history, vendors & products, weaknesses
 - **Background scheduler**: periodic incremental sync, then reports, watchlist rescan and
-  notifications (`web.sync_interval_minutes`)
+  notifications (`web.sync_interval_minutes`). Only the NVD and Vulnrichment read what changed since
+  the last run. The other sources download a whole file and wait between two downloads, whatever
+  the interval: 6 h for the KEV catalog (2 MB), 12 h for EPSS (3 MB), OSV (290 MB), the Debian
+  advisories (85 MB) and Exploit-DB (10 MB), 24 h for Metasploit (11 MB) and Nuclei (2 MB).
+  *Admin → Sources* shows it per source; "Sync now" there downloads at once, without waiting
 - **Read-only REST API** under `/api` (`Authorization: Bearer <token>` created in *Settings*, or HTTP Basic):
   `/api/cve`, `/api/cve/{id}`, `/api/vendors`, `/api/vendors/{vendor}/products`, `/api/weaknesses`,
   `/api/organizations`, `/api/organizations/{org}/projects[/{project}[/reports[/{day}]]]`,

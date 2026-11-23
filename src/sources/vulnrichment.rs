@@ -311,7 +311,7 @@ impl CveSource for VulnrichmentSource {
             if let Ok(Some(last_sync_str)) = db.get_metadata(METADATA_KEY_LAST_SYNC) {
                 if let Ok(last_sync) = DateTime::parse_from_rfc3339(&last_sync_str) {
                     let hours_since = (Utc::now() - last_sync.with_timezone(&Utc)).num_hours();
-                    if hours_since < 24 {
+                    if hours_since < super::min_hours("vulnrichment") {
                         println!("━━━ Vulnrichment: Skipped (last sync {}h ago, updates daily) ━━━", hours_since);
                         return Ok(SyncResult::skipped());
                     }

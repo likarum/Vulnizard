@@ -84,7 +84,7 @@ impl CveSource for NucleiSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (chrono::Utc::now() - last).num_hours();
-                if hours_since < 24 {
+                if hours_since < super::min_hours("nuclei") {
                     println!("━━━ Nuclei: Skipped (last sync {hours_since}h ago) ━━━");
                     return Ok(SyncResult::skipped());
                 }

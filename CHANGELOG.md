@@ -3,6 +3,18 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.6
+
+### Changed
+
+- **The sources page says how often each source downloads, and what.** It said "enabled
+  sources are synchronized at every cycle", which is only true of the NVD. The NVD and
+  Vulnrichment read what changed since the last run; the other sources download a whole file
+  (from 2 MB for the KEV catalog to about 290 MB for OSV) and therefore wait 6 to 24 hours
+  between two downloads, whatever the interval between cycles. Each source now shows its
+  delay and what one download fetches, and the page warns that "Sync now" downloads at once.
+  Nothing changes in what is downloaded or when.
+
 ## 0.2.5
 
 ### Changed

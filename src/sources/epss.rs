@@ -95,7 +95,7 @@ impl CveSource for EpssSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
-                if hours_since < 12 {
+                if hours_since < super::min_hours("epss") {
                     println!("━━━ EPSS: Skipped (last sync {}h ago, updates daily) ━━━", hours_since);
                     return Ok(SyncResult::skipped());
                 }

@@ -152,7 +152,7 @@ impl CveSource for OsvSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
-                if hours_since < 12 {
+                if hours_since < super::min_hours("osv") {
                     println!("━━━ OSV: Skipped (last sync {}h ago) ━━━", hours_since);
                     return Ok(SyncResult::skipped());
                 }

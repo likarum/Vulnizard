@@ -63,7 +63,7 @@ impl CveSource for CisaKevSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
-                if hours_since < 6 {
+                if hours_since < super::min_hours("cisa_kev") {
                     println!("━━━ CISA KEV: Skipped (last sync {}h ago) ━━━", hours_since);
                     return Ok(SyncResult::skipped());
                 }

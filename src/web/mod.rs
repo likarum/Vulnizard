@@ -1702,6 +1702,11 @@ mod tests {
         // The source of the inventory is closed with it
         assert_eq!(app.post("/admin/sources/distros", Some(&admin), "action=sync").await.status, StatusCode::NOT_FOUND);
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("Not in this release"));
+        // The page says how often each source downloads and what, and that "Sync now" does not wait
+        let sources = app.get("/admin/sources", Some(&admin)).await.body;
+        for shown in ["at every cycle: only the CVEs changed", "at most every 12 h: the whole archive of five ecosystems", "at most every 6 h", "downloads at once, without waiting"] {
+            assert!(sources.contains(shown), "{shown}");
+        }
         let requested = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
         assert_eq!(requested.status, StatusCode::SEE_OTHER);
         let order = app.sync_rx.try_recv().unwrap();
