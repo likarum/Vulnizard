@@ -562,6 +562,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/watchlist/{entry_id}",
             post(projects::watchlist_status),
         )
+        .route("/applications", post(projects::application_add_any))
         .route("/orgs/{org}/projects/{project}/applications", post(projects::application_add))
         .route(
             "/orgs/{org}/projects/{project}/applications/{app_id}/version",
@@ -641,6 +642,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/settings/mfa/passkeys/{id}/delete", post(mfa::passkey_delete))
         .route("/static/mfa.js", get(mfa::script))
         .route("/static/filter.js", get(pages::filter_script))
+        .route("/static/theme.js", get(pages::theme_script))
         .route("/login/passkey/start", post(mfa::passwordless_start))
         .route("/login/passkey/finish", post(mfa::passwordless_finish))
         .route("/orgs/{org}/mfa", post(mfa::org_requirement))
@@ -818,6 +820,7 @@ mod tests {
         /// Every cookie set by the response (`name=value`)
         cookies: Vec<String>,
         cache: Option<String>,
+        csp: Option<String>,
         body: String,
     }
 
@@ -834,11 +837,12 @@ mod tests {
                 .filter_map(|v| v.to_str().ok())
                 .map(|c| c.split(';').next().unwrap_or("").to_string())
                 .collect();
-            let (status, location, cookie, cache) = (
+            let (status, location, cookie, cache, csp) = (
                 resp.status(),
                 header(header::LOCATION),
                 header(header::SET_COOKIE).map(|c| c.split(';').next().unwrap().to_string()),
                 header(header::CACHE_CONTROL),
+                header(header::CONTENT_SECURITY_POLICY),
             );
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             Reply {
@@ -847,6 +851,7 @@ mod tests {
                 cookie,
                 cookies,
                 cache,
+                csp,
                 body: String::from_utf8_lossy(&bytes).into_owned(),
             }
         }
@@ -1010,8 +1015,8 @@ mod tests {
         let project = app.post("/projects", Some(&alice), "org=acme&name=infra&description=Prod").await;
         assert_eq!(project.location.as_deref(), Some("/product/acme/infra?view=applications"));
         for scope in ["/product", "/product/acme/infra"] {
-            for view in ["", "?view=review", "?view=review&show=handled", "?view=applications", "?view=subscriptions",
-                         "?view=evolution", "?view=evolution&days=365&at=2026-01-01", "?view=evolution&at=garbage",
+            for view in ["", "?view=vulnerabilities", "?view=vulnerabilities&show=handled", "?view=applications", "?view=subscriptions",
+                         "?view=history", "?view=history&days=365&at=2026-01-01", "?view=history&at=garbage",
                          "?view=audit", "?view=audit&decision=all", "?view=settings", "?view=bogus"] {
                 let page = app.get(&format!("{scope}{view}"), Some(&alice)).await;
                 assert_eq!(page.status, StatusCode::OK, "{scope}{view}");
@@ -1112,7 +1117,7 @@ mod tests {
         let app_id = db.list_applications(project_id).unwrap()[0].id.unwrap();
 
         // Everyone sees the entry; the dashboard lists it with actions only for those who can triage
-        for page in ["/product/acme/infra", "/product", "/product?view=review"] {
+        for page in ["/product/acme/infra", "/product", "/product?view=vulnerabilities"] {
             let viewer_page = app.get(page, Some(&viewer)).await;
             assert!(viewer_page.body.contains("CVE-2024-4343"), "{page}");
             assert!(!viewer_page.body.contains(&format!("/watchlist/{entry}")), "{page}");
@@ -1121,8 +1126,11 @@ mod tests {
         // The overview draws its charts without any inline style or script
         let overview = app.get("/product", Some(&editor)).await.body;
         assert!(overview.contains("<svg") && overview.contains("stroke-p0"));
-        // No inline style or script: the only script is the external one of the live filters
-        assert!(!overview.contains("style=") && overview.replace("<script src=\"/static/filter.js\" defer></script>", "").matches("<script").count() == 0);
+        // No inline style or script: the only scripts are the external ones of the theme and of the live filters
+        let without_files = overview
+            .replace("<script src=\"/static/theme.js\"></script>", "")
+            .replace("<script src=\"/static/filter.js\" defer></script>", "");
+        assert!(!overview.contains("style=") && without_files.matches("<script").count() == 0);
 
         // Triage: viewer refused, editor allowed, entry scoped to its project
         let triage = format!("{base}/watchlist/{entry}");
@@ -1137,14 +1145,14 @@ mod tests {
         assert!(db.project_triage(project_id, false).unwrap().is_empty());
         let audit = app.get("/product/acme/infra?view=audit", Some(&viewer)).await.body;
         assert!(audit.contains("behind VPN") && audit.contains("<strong>editor</strong>"));
-        assert!(app.get("/product?view=evolution", Some(&viewer)).await.body.contains("behind VPN"));
+        assert!(app.get("/product?view=history", Some(&viewer)).await.body.contains("behind VPN"));
         // The return page is never an external URL
         let evil = app
             .post(&triage, Some(&editor), "status=untreated&back=https%3A%2F%2Fevil.example%2F")
             .await;
-        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=review"));
+        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=vulnerabilities"));
         let evil = app.post(&triage, Some(&editor), "status=treated&back=%2F%2Fevil.example").await;
-        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=review"));
+        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=vulnerabilities"));
         app.post("/projects", Some(&owner), "org=acme&name=other").await;
         let foreign = format!("/orgs/acme/projects/other/watchlist/{entry}");
         assert_eq!(app.post(&foreign, Some(&editor), "status=accepted&comment=x").await.status, StatusCode::NOT_FOUND);
@@ -2439,7 +2447,7 @@ mod tests {
         let apps = db.list_applications(project).unwrap();
         assert_eq!(apps.len(), 2);
         assert!(apps.iter().all(|a| a.group == "web"));
-        let review = app.get("/product/acme/infra?view=review", Some(&admin)).await.body;
+        let review = app.get("/product/acme/infra?view=vulnerabilities", Some(&admin)).await.body;
         assert_eq!(review.matches("CVE-2024-6387</a>").count(), 1);
         assert!(review.contains(">web</span>"));
         let page = app.get(view, Some(&admin)).await.body;
@@ -2893,7 +2901,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 18] = [
+    const PUBLIC_ROUTES: [&str; 19] = [
         "/login",
         "/register",
         "/setup",
@@ -2909,6 +2917,7 @@ mod tests {
         "/static/logo.svg",
         "/static/mfa.js",
         "/static/filter.js",
+        "/static/theme.js",
         "/static/push.js",
         "/sw.js",
         "/favicon.ico",
@@ -3488,5 +3497,221 @@ mod tests {
         assert_eq!(app.post(&path, Some(&session), "password=wrong-password").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&path, Some(&session), "password=a-long-password").await.status, StatusCode::SEE_OTHER);
         assert!(!db.has_second_factor(user_id).unwrap());
+    }
+
+    /// The entry of a view in the products menu, as the page writes it
+    fn menu_entry(scope: &str, key: &str, label: &str, active: bool) -> String {
+        let class = if active { " class=\"active\"" } else { "" };
+        format!("<a href=\"{scope}?view={key}\"{class}>{label}</a>")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_view_keeps_its_old_address() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        for scope in ["/product", "/product/acme/infra"] {
+            let page = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
+            assert!(page.contains("<title>Vulnerabilities · Vulnizard</title>"), "{scope}");
+            assert!(page.contains(&menu_entry(scope, "vulnerabilities", "Vulnerabilities", true)), "{scope}");
+            // The menu no longer names the view after its default filter, which is still the first one
+            assert!(!page.contains("view=review"), "{scope}");
+            assert!(page.contains(&format!("<a href=\"{scope}?view=vulnerabilities\" class=\"active\">To review</a>")), "{scope}");
+            assert!(page.contains("Nothing to review."), "{scope}");
+            // The address of before the renaming shows the same view, under its new name
+            for old in ["?view=review", "?view=review&show=handled"] {
+                let former = app.get(&format!("{scope}{old}"), Some(&alice)).await;
+                assert_eq!(former.status, StatusCode::OK, "{scope}{old}");
+                assert!(former.body.contains("<title>Vulnerabilities · Vulnizard</title>"), "{scope}{old}");
+                assert!(former.body.contains(&menu_entry(scope, "vulnerabilities", "Vulnerabilities", true)), "{scope}{old}");
+            }
+            let decided = app.get(&format!("{scope}?view=review&show=handled"), Some(&alice)).await.body;
+            assert!(decided.contains("No decision yet."), "{scope}");
+        }
+        // Other pages lead to the view under its new name
+        assert!(app.get("/product", Some(&alice)).await.body.contains(&menu_entry("/product", "vulnerabilities", "Vulnerabilities", false)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_history_view_says_which_day_it_shows() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let today = chrono::Utc::now().date_naive();
+        let day = |back: i64| (today - chrono::Duration::days(back)).to_string();
+        for scope in ["/product", "/product/acme/infra"] {
+            let now = app.get(&format!("{scope}?view=history"), Some(&alice)).await.body;
+            assert!(now.contains("<title>History · Vulnizard</title>"), "{scope}");
+            assert!(now.contains(&menu_entry(scope, "history", "History", true)) && !now.contains("Evolution"), "{scope}");
+            // Today: nothing calls it a past state, and there is nowhere to come back from
+            assert!(now.contains("You are looking at the current state.") && !now.contains("Past state"), "{scope}");
+            assert!(!now.contains("Back to today") && !now.contains("Next day"), "{scope}");
+            // A day is chosen in a chart, with the date field, or one step at a time
+            assert!(now.contains("Every day of a chart is a link"), "{scope}");
+            assert!(now.contains(&format!("<a href=\"{scope}?view=history&amp;days=30&amp;at={}\">", day(3))), "{scope}");
+            assert!(now.contains(&format!("<input type=\"date\" name=\"at\" value=\"{today}\" max=\"{today}\" required>")), "{scope}");
+            assert!(now.contains(&format!("href=\"{scope}?view=history&amp;days=30&amp;at={}\" title=\"State on {}\">← Previous day</a>", day(1), day(1))), "{scope}");
+
+            // A past day is announced as such, with the way back
+            let then = app.get(&format!("{scope}?view=history&days=90&at={}", day(10)), Some(&alice)).await.body;
+            assert!(then.contains(&format!("<span class=\"tag warn\">Past state</span> <strong>You are looking at {}.</strong>", day(10))), "{scope}");
+            assert!(!then.contains("You are looking at the current state."), "{scope}");
+            assert!(then.contains(&format!("<a class=\"button today\" href=\"{scope}?view=history&amp;days=90\">Back to today</a>")), "{scope}");
+            assert!(then.contains(&format!("at={}\" title=\"State on {}\">Next day →</a>", day(9), day(9))), "{scope}");
+            assert!(then.contains("Nothing was tracked at that date."), "{scope}");
+            // A day in the future is today
+            let future = app.get(&format!("{scope}?view=history&at=2999-01-01"), Some(&alice)).await.body;
+            assert!(future.contains("You are looking at the current state."), "{scope}");
+
+            // The address of before the renaming shows the same view, past day included
+            let former = app.get(&format!("{scope}?view=evolution&at={}", day(10)), Some(&alice)).await;
+            assert_eq!(former.status, StatusCode::OK, "{scope}");
+            assert!(former.body.contains("<title>History · Vulnizard</title>") && former.body.contains("Past state"), "{scope}");
+            assert!(former.body.contains(&menu_entry(scope, "history", "History", true)), "{scope}");
+        }
+        // The overview leads there, day by day
+        app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0").await;
+        let overview = app.get("/product", Some(&alice)).await.body;
+        assert!(overview.contains(&format!("<a href=\"/product?view=history&amp;at={}\">", day(2))));
+        assert!(overview.contains("<a href=\"/product?view=history\">History →</a>"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_add_button_offers_only_projects_one_may_manage() {
+        let app = app(open_registration());
+        let owner = app.register("owner").await;
+        let carol = app.register("carol").await;
+        let reader = app.register("reader").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        for project in ["infra", "shop", "vault"] {
+            app.post("/projects", Some(&owner), &format!("org=acme&name={project}")).await;
+        }
+        // Carol edits one project, reads another and does not know of the third; the reader only reads
+        for (project, user, role) in [("infra", "carol", "editor"), ("shop", "carol", "viewer"), ("shop", "reader", "viewer")] {
+            let given = app
+                .post(&format!("/orgs/acme/projects/{project}/members"), Some(&owner), &format!("username={user}&role={role}"))
+                .await;
+            assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let id = |project: &str| db.find_project("acme", project).unwrap().unwrap();
+        let (infra, shop, vault) = (id("infra"), id("shop"), id("vault"));
+        let option = |project_id: i64, name: &str| format!("<option value=\"{project_id}\">{name}</option>");
+
+        for view in ["applications", "subscriptions"] {
+            // With all projects shown, the form asks for the project instead of sending to the menu
+            let all = app.get(&format!("/product?view={view}"), Some(&carol)).await.body;
+            assert!(all.contains("<details class=\"add\"><summary><span class=\"plus\" aria-hidden=\"true\">+</span>Add a"), "{view}");
+            assert!(all.contains("<select name=\"project_id\" required>") && all.contains(&option(infra, "infra")), "{view}");
+            assert!(!all.contains(&option(shop, "shop")) && !all.contains(&option(vault, "vault")), "{view}");
+            assert!(!all.contains("Select a project in the menu to add") && !all.contains("Select a project in the menu to subscribe"), "{view}");
+            // The button comes before the list it adds to
+            assert!(all.find("<details class=\"add\">").unwrap() < all.find("class=\"card notice\"").or(all.find("<table")).unwrap(), "{view}");
+            // In a project the form needs no choice; without the right there is no form at all
+            let one = app.get(&format!("/product/acme/infra?view={view}"), Some(&carol)).await.body;
+            assert!(one.contains("<details class=\"add\">") && !one.contains("<select name=\"project_id\""), "{view}");
+            assert!(one.contains(&format!("<input type=\"hidden\" name=\"project_id\" value=\"{infra}\">")), "{view}");
+            for page in [format!("/product/acme/shop?view={view}"), format!("/product?view={view}")] {
+                let read_only = app.get(&page, Some(&reader)).await.body;
+                assert!(!read_only.contains("<details class=\"add\">") && !read_only.contains("name=\"project_id\""), "{page}");
+                assert!(read_only.contains("takes the owner or editor role"), "{page}");
+            }
+        }
+
+        // A forged form does not add to a project one only reads, nor to one that is not one's own
+        let application = |project_id: i64| format!("project_id={project_id}&name=widget&version=1.0&back=%2Fproduct%3Fview%3Dapplications");
+        let subscription = |project_id: i64| format!("project_id={project_id}&vendor=acme&product=&action=subscribe&back=all");
+        for target in [shop, vault, 999_999] {
+            assert_eq!(app.post("/applications", Some(&carol), &application(target)).await.status, StatusCode::FORBIDDEN, "{target}");
+            assert_eq!(app.post("/subscriptions", Some(&carol), &subscription(target)).await.status, StatusCode::FORBIDDEN, "{target}");
+        }
+        assert_eq!(app.post("/applications", Some(&reader), &application(shop)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.post("/applications", Some(&carol), "name=widget&version=1.0").await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(app.post("/applications", None, &application(infra)).await.location.as_deref(), Some("/login"));
+        for project in [shop, vault] {
+            assert!(db.list_applications(project).unwrap().is_empty() && db.list_subscriptions(project).unwrap().is_empty());
+        }
+
+        // Where she may, the addition is made and she comes back to the page she was on
+        let added = app.post("/applications", Some(&carol), &application(infra)).await;
+        assert_eq!(added.location.as_deref(), Some("/product?view=applications"), "{}", added.body);
+        assert_eq!(db.list_applications(infra).unwrap()[0].name, "widget");
+        assert_eq!(app.post("/applications", Some(&carol), &application(infra)).await.status, StatusCode::BAD_REQUEST);
+        let subscribed = app.post("/subscriptions", Some(&carol), &subscription(infra)).await;
+        assert_eq!(subscribed.location.as_deref(), Some("/product?view=subscriptions"), "{}", subscribed.body);
+        assert_eq!(db.list_subscriptions(infra).unwrap()[0].vendor, "acme");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_subscription_list_says_what_a_subscription_is() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let project_id = Database::connect(&app.db_path).unwrap().find_project("acme", "infra").unwrap().unwrap();
+        for scope in ["/product", "/product/acme/infra"] {
+            let empty = app.get(&format!("{scope}?view=subscriptions"), Some(&alice)).await.body;
+            assert!(empty.contains("No subscription yet."), "{scope}");
+            // What it follows, what it feeds, and how a tracked application differs
+            assert!(empty.contains("follows a vendor, or one product of a vendor, <strong>without a version</strong>"), "{scope}");
+            assert!(empty.contains("daily report of the project and is sent to its notifications"), "{scope}");
+            assert!(empty.contains("It is not a tracked application."), "{scope}");
+            assert!(empty.contains(&format!("<a href=\"{scope}?view=applications\">applications</a>")), "{scope}");
+            assert!(empty.contains(&format!("<a href=\"{scope}?view=vulnerabilities\">vulnerabilities</a>")), "{scope}");
+            // An empty table under the explanation would say it twice
+            assert!(!empty.contains("<table"), "{scope}");
+        }
+        let sub = format!("project_id={project_id}&vendor=acme&product=&action=subscribe&back=project");
+        assert_eq!(app.post("/subscriptions", Some(&alice), &sub).await.location.as_deref(), Some("/product/acme/infra?view=subscriptions"));
+        for scope in ["/product", "/product/acme/infra"] {
+            let listed = app.get(&format!("{scope}?view=subscriptions"), Some(&alice)).await.body;
+            assert!(listed.contains("<table") && !listed.contains("It is not a tracked application."), "{scope}");
+            // A filter that matches nothing is not an empty list
+            let filtered = app.get(&format!("{scope}?view=subscriptions&q=zzz"), Some(&alice)).await.body;
+            assert!(filtered.contains("No subscription matches.") && !filtered.contains("No subscription yet."), "{scope}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_page_offers_the_themes_without_loosening_the_policy() {
+        let app = app(open_registration());
+        let login = app.get("/setup", None).await;
+        let alice = app.register("alice").await;
+        let home = app.get("/product", Some(&alice)).await;
+        for page in [&login, &home] {
+            // The script that applies the choice comes before the body, and is a file
+            let head = page.body.split("</head>").next().unwrap();
+            assert!(head.contains("<script src=\"/static/theme.js\"></script>"));
+            // The menu lists every theme, and the button says both ways
+            assert!(page.body.contains("<select data-theme-choice aria-label=\"Color theme\""));
+            for (key, label) in views::THEMES {
+                assert!(page.body.contains(&format!("<option value=\"{key}\">{label}</option>")), "{key}");
+            }
+            assert!(page.body.contains("<button class=\"secondary\" type=\"button\" data-mode-toggle"));
+            assert!(page.body.contains("☾ Night") && page.body.contains("☀ Day"));
+            // Nothing inline: no script body, no handler, no style attribute
+            assert_eq!(page.body.matches("<script").count(), 2);
+            assert_eq!(page.body.matches("<script src=\"/static/").count(), 2);
+            for inline in [" onclick=", " onchange=", " onload=", " style=", "<style", "javascript:"] {
+                assert!(!page.body.contains(inline), "{inline}");
+            }
+            // The policy is the one of before the themes, word for word
+            assert_eq!(
+                page.csp.as_deref(),
+                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            );
+        }
+        // The script is served like the others, and holds what the page relies on
+        let script = app.get("/static/theme.js", None).await;
+        assert_eq!(script.status, StatusCode::OK);
+        assert!(script.cache.unwrap().contains("max-age"));
+        assert!(script.body.contains("prefers-color-scheme: dark") && script.body.contains("localStorage"));
+        assert!(script.body.contains("data-theme-choice") && script.body.contains("data-mode-toggle"));
+        // Without the script the controls are hidden, and the system setting still picks day or night
+        let css = app.get("/static/app.css", None).await.body;
+        assert!(css.contains(".theme { display: none;") && css.contains(".js .theme { display: flex; }"));
+        assert!(css.contains("@media (prefers-color-scheme: dark) {\n  :root:not([data-mode=\"light\"]) {"));
     }
 }

@@ -554,7 +554,8 @@ pub struct SubscriptionForm {
     #[serde(default)]
     product: String,
     action: String,
-    /// "project" to return to the project page instead of the vendor page
+    /// "project" to return to the subscriptions of the project, "all" to
+    /// those of all projects, instead of the vendor page
     #[serde(default)]
     back: String,
 }
@@ -580,6 +581,9 @@ pub async fn subscription_update(
             "subscribe" => db.subscribe(form.project_id, &vendor, &product)?,
             "unsubscribe" => db.unsubscribe(form.project_id, &form.vendor, &form.product)?,
             _ => return Err(AppError::Bad("Invalid action".into())),
+        }
+        if form.back == "all" {
+            return Ok(redirect(views::product_url(None, "subscriptions")));
         }
         if form.back == "project" {
             if let Some(p) = db
@@ -836,6 +840,16 @@ pub async fn filter_script() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         include_str!("filter.js"),
+    )
+}
+
+pub async fn theme_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        include_str!("theme.js"),
     )
 }
 

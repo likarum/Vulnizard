@@ -19,11 +19,11 @@ use crate::rbac::{Permission, Role};
 #[derive(Deserialize, Default)]
 pub struct ProductQuery {
     view: Option<String>,
-    /// Review: "handled" lists the decided entries
+    /// Vulnerabilities: "handled" lists the decided entries
     show: Option<String>,
-    /// Evolution: day whose state is shown (YYYY-MM-DD)
+    /// History: day whose state is shown (YYYY-MM-DD)
     at: Option<String>,
-    /// Evolution: length of the window in days
+    /// History: length of the window in days
     days: Option<String>,
     /// Audit: decision filter
     decision: Option<String>,
@@ -68,6 +68,16 @@ impl Scope {
             .is_some_and(|r| r.allows(permission))
     }
 
+    /// Projects an addition made from this page may go to: the selected one,
+    /// or at the `*` scope every project the user may manage
+    fn manageable(&self) -> Vec<&ProjectSummary> {
+        self.summaries
+            .iter()
+            .filter(|p| self.project_id().is_none_or(|id| p.id == id))
+            .filter(|p| Role::parse(&p.role).is_some_and(|r| r.allows(Permission::ManageProjects)))
+            .collect()
+    }
+
     /// Color slot of each project: by creation order, so a project keeps its
     /// color whatever the filter or the ranking.
     fn slots(&self) -> HashMap<i64, usize> {
@@ -110,11 +120,12 @@ fn render(
         summaries: db.project_summaries(user.id)?,
     };
     let view = nonempty(&q.view).unwrap_or_else(|| "overview".into());
-    let (title, body) = match view.as_str() {
-        "review" => ("To review", review(db, user, &scope, q)?),
+    let view = views::canonical_view(&view);
+    let (title, body) = match view {
+        "vulnerabilities" => ("Vulnerabilities", vulnerabilities(db, user, &scope, q)?),
         "applications" => ("Applications", applications(db, st, user, &scope, q)?),
         "subscriptions" => ("Subscriptions", subscriptions(db, user, &scope)?),
-        "evolution" => ("Evolution", evolution(db, user, &scope, q)?),
+        "history" => ("History", history(db, user, &scope, q)?),
         "audit" => ("Audit", audit(db, user, &scope, q)?),
         "settings" if !scope.all() => ("Settings", settings(db, config, &scope, q.new.as_deref())?),
         _ => ("Overview", overview(db, user, &scope)?),
@@ -126,7 +137,7 @@ fn render(
     Ok(layout(
         Nav::Product {
             scope: scope.names(),
-            view: &view,
+            view,
         },
         title,
         Some(user),
@@ -255,7 +266,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
     let today = Utc::now().date_naive();
     let events = db.lifecycle_events(user.id, scope.project_id())?;
     let month = timeline(&events, today - Duration::days(29), today);
-    let evolution_link = |day: &str| format!("{}&at={day}", scope.url("evolution"));
+    let history_link = |day: &str| format!("{}&at={day}", scope.url("history"));
 
     let charts = if scope.all() {
         overview_charts_all(scope, &breakdown)
@@ -273,12 +284,12 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
         (charts)
         div.card {
             h3 { "CVEs to review over the last 30 days " small { "— click a day to see the state at that date" } }
-            (charts::stock_chart(&month, None, &evolution_link))
+            (charts::stock_chart(&month, None, &history_link))
         }
 
         div.head {
             h2 { "To review first" }
-            a href=(scope.url("review")) { "All " (untreated) " →" }
+            a href=(scope.url("vulnerabilities")) { "All " (untreated) " →" }
         }
         (views::triage_table(&open[..open.len().min(8)], scope.all(), None, |item| {
             if scope.can_in(&item.org, &item.project, Permission::Triage) { triage_actions(item) } else { html! {} }
@@ -286,7 +297,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
 
         div.head {
             h2 { "Latest changes on subscribed products" }
-            a href=(scope.url("evolution")) { "Evolution →" }
+            a href=(scope.url("history")) { "History →" }
         }
         (views::project_changes(&changes, scope.all()))
     })
@@ -414,17 +425,17 @@ fn overview_charts_project(
 }
 
 // ==========================================
-// To review
+// Vulnerabilities: to review by default, decided on request
 // ==========================================
 
-fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
+fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
     let handled = nonempty(&q.show).as_deref() == Some("handled");
     let mut items = db.scoped_triage(user.id, scope.project_id(), handled, 2000)?;
     let total = items.len();
     // Default order: most urgent first (known exploited, then CVSS)
     let listing = Listing::from_page("urgency", true);
     listing.apply(&mut items, views::triage_text, views::triage_key);
-    let base = scope.url("review");
+    let base = scope.url("vulnerabilities");
     Ok(html! {
         div.chips {
             a href=(base) class=[(!handled).then_some("active")] { "To review" }
@@ -450,7 +461,7 @@ fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Res
                             }
                             td.nowrap { (views::cvss_badge(item.cvss)) }
                             td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
-                            @if scope.all() { td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "review")) { (item.project) } } }
+                            @if scope.all() { td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "vulnerabilities")) { (item.project) } } }
                             td { (status_badge(&item.status)) }
                             td.right.nowrap {
                                 @if scope.can_in(&item.org, &item.project, Permission::Triage) { (triage_actions(item)) }
@@ -476,6 +487,53 @@ fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Res
 // ==========================================
 // Applications & subscriptions
 // ==========================================
+
+/// "+" button at the top of a view, opening the form that adds to it. A
+/// `details` element: it opens without JavaScript.
+fn add_button(label: &str, form: Markup) -> Markup {
+    html! {
+        details.add {
+            summary { span.plus aria-hidden="true" { "+" } (label) }
+            (form)
+        }
+    }
+}
+
+/// Project an addition goes to: the selected one, or at the `*` scope a
+/// choice among those the user may manage. The server checks the right again
+/// on the project it receives.
+fn project_field(scope: &Scope, projects: &[&ProjectSummary]) -> Markup {
+    let several_orgs = projects.iter().any(|p| Some(&p.org) != projects.first().map(|first| &first.org));
+    html! {
+        @if let Some(id) = scope.project_id() {
+            input type="hidden" name="project_id" value=(id);
+        } @else {
+            label {
+                "Project"
+                select name="project_id" required {
+                    @for p in projects {
+                        option value=(p.id) { (p.name) @if several_orgs { " · " (p.org) } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Said in place of the "+" button to who cannot add anything
+fn cannot_add(scope: &Scope, what: &str) -> Markup {
+    html! {
+        p.muted {
+            @if scope.summaries.is_empty() {
+                a href="/projects" { "Create a project" } " to add " (what) "."
+            } @else if scope.all() {
+                "Adding " (what) " takes the owner or editor role, which you hold in none of your projects."
+            } @else {
+                "Adding " (what) " takes the owner or editor role in this project."
+            }
+        }
+    }
+}
 
 fn applications(
     db: &Database,
@@ -508,8 +566,35 @@ fn applications(
     );
     let manage = scope.can(Permission::ManageProjects);
     let back = current_path();
+    let targets = scope.manageable();
     Ok(html! {
         p.muted { "Applications you run, with the deployed version. They are rescanned after every sync; changing the version closes the CVEs it fixes." }
+        @if targets.is_empty() { (cannot_add(scope, "applications")) } @else {
+            (add_button("Add an application", html! {
+                form.stack method="post" action="/applications" {
+                    input type="hidden" name="back" value=(back);
+                    (project_field(scope, &targets))
+                    label { "Product" input type="text" name="name" placeholder="e.g. vaultwarden" maxlength="100" required; }
+                    label { "Version" input type="text" name="version" placeholder="e.g. 1.37.4" maxlength="64"; }
+                    label { "Vendor (optional)" input type="text" name="vendor" placeholder="e.g. openbsd" maxlength="100"; }
+                    label {
+                        "Package ecosystem (optional)"
+                        select name="ecosystem" title="Package ecosystem, to also match the advisories of its package" {
+                            option value="" { "no package ecosystem" }
+                            @for ecosystem in crate::db::watchlist::PACKAGE_ECOSYSTEMS { option value=(ecosystem) { (ecosystem) } }
+                        }
+                    }
+                    button type="submit" { "Add and scan" }
+                }
+                p.muted {
+                    "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
+                    " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it; " code { "sudo" } " also stands for " code { "sudo_project" } "), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
+                    "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
+                    "which is the only way to follow software the NVD does not describe. "
+                    "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
+                }
+            }))
+        }
         (listing.filter_box("Filter: application, version, group, source…", apps.len(), total))
         @if !show_quiet {
             p.muted {
@@ -571,28 +656,8 @@ fn applications(
                 @if apps.is_empty() { tr { td colspan="7" .muted { "No application tracked yet." } } }
             }
         }
-        @if let (true, Some((org, project))) = (manage, scope.names()) {
-            h2 { "Add an application" }
-            form.row method="post" action={ "/orgs/" (enc(org)) "/projects/" (enc(project)) "/applications" } {
-                input type="hidden" name="back" value=(back);
-                input type="text" name="name" placeholder="product, e.g. vaultwarden" maxlength="100" required;
-                input type="text" name="version" placeholder="version, e.g. 1.37.4" maxlength="64";
-                input type="text" name="vendor" placeholder="vendor (optional)" maxlength="100";
-                select name="ecosystem" title="Package ecosystem, to also match the advisories of its package" {
-                    option value="" { "no package ecosystem" }
-                    @for ecosystem in crate::db::watchlist::PACKAGE_ECOSYSTEMS { option value=(ecosystem) { (ecosystem) } }
-                }
-                button type="submit" { "Add and scan" }
-            }
-            p.muted {
-                "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
-                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it; " code { "sudo" } " also stands for " code { "sudo_project" } "), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
-                "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
-                "which is the only way to follow software the NVD does not describe. "
-                "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
-            }
-        } @else if scope.all() {
-            p.muted { "Select a project in the menu to add, update or remove applications, and to connect an inventory source." }
+        @if scope.all() {
+            p.muted { "Select a project in the menu to update or remove applications, and to connect an inventory source." }
         }
         @if let Some((org, project)) = &scope.project {
             (super::inventory::project_section(db, st, org, project, q.show.as_deref(), q.new.as_deref())?)
@@ -615,8 +680,44 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
         },
     );
     let manage = scope.can(Permission::ManageProjects);
+    let targets = scope.manageable();
     Ok(html! {
         p.muted { "Every change on a CVE of these vendors or products is recorded in the project's history and sent to its notifications." }
+        @if targets.is_empty() { (cannot_add(scope, "subscriptions")) } @else {
+            (add_button("Add a subscription", html! {
+                form.stack method="post" action="/subscriptions" {
+                    input type="hidden" name="action" value="subscribe";
+                    // Back to the page the form is on, at the scope it was opened from
+                    input type="hidden" name="back" value=(if scope.all() { "all" } else { "project" });
+                    (project_field(scope, &targets))
+                    label { "Vendor" input type="text" name="vendor" placeholder="e.g. openbsd" maxlength="200" required; }
+                    label { "Product (empty: every product of the vendor)" input type="text" name="product" placeholder="e.g. openssh" maxlength="200"; }
+                    button type="submit" { "Subscribe" }
+                }
+                p.muted {
+                    "Names must match the CVE database exactly. Easier: "
+                    a href={ "/vendors" @if let Some(id) = scope.project_id() { "?project=" (id) } } { "browse vendors and products" }
+                    " and subscribe from there."
+                }
+            }))
+        }
+        @if total == 0 {
+            // An empty list read as a failure: say what belongs here, and what does not
+            div.card.notice {
+                p { strong { "No subscription yet." } }
+                p {
+                    "A subscription follows a vendor, or one product of a vendor, " strong { "without a version" }
+                    ": every change on one of its CVEs goes into the daily report of the project and is sent to its notifications."
+                }
+                p {
+                    "It is not a tracked application. An " a href=(scope.url("applications")) { "application" }
+                    " has a name and a " strong { "version" } ": it is matched against the CVEs affecting that version, and feeds the list of "
+                    a href=(scope.url("vulnerabilities")) { "vulnerabilities" } " to decide on. To know what affects what you run, add it to the "
+                    a href=(scope.url("applications")) { "applications" } "; subscribe to be told of everything published about a vendor or a product."
+                }
+                @if !targets.is_empty() { p.muted { "Use the “+ Add a subscription” button above to subscribe." } }
+            }
+        } @else {
         (listing.filter_box("Filter: vendor, product…", subs.len(), total))
         table.list {
             thead {
@@ -650,34 +751,21 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
                         }
                     }
                 }
-                @if subs.is_empty() { tr { td colspan="4" .muted { "No subscription yet." } } }
+                @if subs.is_empty() { tr { td colspan="4" .muted { "No subscription matches." } } }
             }
         }
-        @if let (true, Some(id)) = (manage, scope.project_id()) {
-            h2 { "Subscribe" }
-            form.row method="post" action="/subscriptions" {
-                input type="hidden" name="project_id" value=(id);
-                input type="hidden" name="action" value="subscribe";
-                input type="hidden" name="back" value="project";
-                input type="text" name="vendor" placeholder="vendor, e.g. openbsd" maxlength="200" required;
-                input type="text" name="product" placeholder="product (empty = all)" maxlength="200";
-                button type="submit" { "Subscribe" }
-            }
-            p.muted {
-                "Names must match the CVE database exactly. Easier: "
-                a href={ "/vendors?project=" (id) } { "browse vendors and products" } " and subscribe from there."
-            }
-        } @else if scope.all() {
-            p.muted { "Select a project in the menu to subscribe or unsubscribe." }
+        }
+        @if scope.all() && total > 0 {
+            p.muted { "Select a project in the menu to unsubscribe." }
         }
     })
 }
 
 // ==========================================
-// Evolution over time, and state at a date
+// History: evolution over time, and state at a date
 // ==========================================
 
-fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
+fn history(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
     let today = Utc::now().date_naive();
     let days = match nonempty(&q.days).as_deref() {
         Some("90") => 90,
@@ -727,8 +815,11 @@ fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> 
         },
     );
     let at_s = at.to_string();
-    let base = scope.url("evolution");
+    let base = scope.url("history");
     let link = |day: &str| format!("{base}&days={days}&at={day}");
+    let past = at < today;
+    let previous = (at - Duration::days(1)).to_string();
+    let next = (at + Duration::days(1)).to_string();
     let changes = db.recent_project_changes(user.id, scope.project_id(), 30)?;
     let reports = match scope.project_id() {
         Some(id) => db.list_reports(id, 30)?,
@@ -736,29 +827,53 @@ fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> 
     };
 
     Ok(html! {
+        p.muted {
+            "How the tracked CVEs evolved, and what they looked like on any past day. "
+            strong { "Every day of a chart is a link" }
+            ": point at it for its figures, click it to go back to that day. The date field does the same."
+        }
+        // Going back in time is the point of the view: the day shown is said first, with the ways to change it
+        div.card.timetravel class=[past.then_some("past")] {
+            div.when {
+                @if past {
+                    span.tag.warn { "Past state" }
+                    " " strong { "You are looking at " (at_s) "." }
+                    " The counters and the list below are those of the end of that day, not today's."
+                } @else {
+                    span.tag { "Today" }
+                    " " strong { "You are looking at the current state." }
+                    " Pick a day to see the state at the end of that day."
+                }
+            }
+            form.row method="get" action=(scope.url("")) {
+                input type="hidden" name="view" value="history";
+                input type="hidden" name="days" value=(days);
+                a.button href=(link(&previous)) title={ "State on " (previous) } { "← Previous day" }
+                label { "Go to " input type="date" name="at" value=(at_s) max=(today.to_string()) required; }
+                button type="submit" { "Show that day" }
+                @if past {
+                    a.button href=(link(&next)) title={ "State on " (next) } { "Next day →" }
+                    a.button.today href={ (base) "&days=" (days) } { "Back to today" }
+                }
+            }
+        }
         div.chips {
             @for (n, label) in [(30, "30 days"), (90, "90 days"), (365, "1 year")] {
                 a href={ (base) "&days=" (n) "&at=" (at_s) } class=[(days == n).then_some("active")] { (label) }
             }
         }
-        div.card {
-            h3 { "Stock: CVEs to review and accepted risks " small { "— " (from) " to " (to) } }
+        div.card.days {
+            h3 { "Stock: CVEs to review and accepted risks " small { "— " (from) " to " (to) " · click a day" } }
             (charts::stock_chart(&stats, Some(&at_s), &link))
         }
-        div.card {
-            h3 { "Activity per day: new entries and decisions" }
+        div.card.days {
+            h3 { "Activity per day: new entries and decisions " small { "— click a day" } }
             (charts::activity_chart(&stats, Some(&at_s), &link))
         }
-        p.muted { "Click a day in a chart to review the state at the end of that day." }
 
         div.head {
-            h2 { "State on " (at_s) @if at == today { " (today)" } }
-            form.row method="get" action=(scope.url("")) {
-                input type="hidden" name="view" value="evolution";
-                input type="hidden" name="days" value=(days);
-                input type="date" name="at" value=(at_s) max=(today.to_string());
-                button.secondary type="submit" { "Show" }
-            }
+            h2 { "State on " (at_s) @if past { " " span.tag.warn { "past" } } @else { " (today)" } }
+            @if past { a href={ (base) "&days=" (days) } { "Back to today →" } }
         }
         div.tiles {
             (views::tile(in_status("untreated"), "to review", false))

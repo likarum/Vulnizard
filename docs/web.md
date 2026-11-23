@@ -21,8 +21,9 @@ database was last synchronized (administrators can start a sync from there):
   filters every view:
   - *Overview*: counters and charts. With all projects, each project has its own color and each
     severity level its own bar; for a single project, severity levels are told apart by color
-  - *To review*: CVEs affecting the deployed versions — **close** once fixed, **accept the risk**
-    with a justification, or mark **not applicable**
+  - *Vulnerabilities*: CVEs affecting the deployed versions. Those still to review are listed
+    first (the default filter); the other filter lists those already decided. **Close** once
+    fixed, **accept the risk** with a justification, or mark **not applicable**
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
     version closes the CVEs it fixes, and an entry still to review that no longer matches after a
     source corrected its data is set aside as not applicable). The name is the product name of
@@ -36,9 +37,14 @@ database was last synchronized (administrators can start a sync from there):
     An application marked *unknown to the sources* has no CVE recorded under its name at any
     version, which is not the same as having none at its version. Then the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)
-  - *Subscriptions*: vendors or products whose every CVE change you follow
-  - *Evolution*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
-    state of every tracked CVE **at any past date**
+  - *Subscriptions*: vendors or products whose every CVE change you follow, without a version:
+    the changes go into the daily reports and the notifications. An application, with its
+    version, feeds the list of vulnerabilities instead
+  - Applications and subscriptions are added with the **+** button at the top of their view. With
+    all projects shown, the form asks for the project, among those you may manage
+  - *History*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
+    state of every tracked CVE **at any past date**: click a day in a chart, or pick it in the
+    date field. A past state is marked as such, with a link back to today
   - *Audit*: who decided what, when and why — accepted risks first
   - *Settings* (per project): the project's own notification **destinations** (email with its own
     SMTP server, ntfy, Slack, webhook, browser) and the **rules** saying which destination is told
@@ -58,9 +64,16 @@ database was last synchronized (administrators can start a sync from there):
   `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
 Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin
-files: browser notifications (Web Push), passkeys, and filters that apply while typing. Every list
-can be sorted (click a column header, click again to reverse) and filtered with its search box;
-everything works without JavaScript except notifications and passkeys.
+files: browser notifications (Web Push), passkeys, filters that apply while typing, and the
+color theme. Every list can be sorted (click a column header, click again to reverse) and
+filtered with its search box; everything works without JavaScript except notifications, passkeys
+and the choice of a theme.
+
+The header has a menu of **color themes** (Classic, Forest, Plum, Sand, High contrast) and a
+**day / night** button. The choice is kept in the browser, not in the account: another browser
+starts from the default. Until the button is used, day or night follows the system setting, and
+keeps following it; without JavaScript the page is Classic and follows the system setting too.
+Severity badges and marks keep the same colors in every theme.
 
 ---
 [← Back to the README](../README.md)
