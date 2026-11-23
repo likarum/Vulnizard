@@ -13,6 +13,13 @@ before 1.0, a minor version may change behaviour.
   the list to review puts the score beside the CVE. Without JavaScript the cards are shown
   without the column names. The desktop layout is unchanged.
 
+### Fixed
+
+- On a phone, the notification settings of a project were wider than the screen: a list of
+  destinations with a long name, and the group of event checkboxes, made the form as wide as
+  their content. A field no longer widens its form, and each checkbox sits on one line with
+  its text (on a desktop too).
+
 ## 0.2.3
 
 ### Fixed
