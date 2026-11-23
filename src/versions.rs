@@ -5,7 +5,18 @@
 pub fn is_version(text: &str) -> bool {
     let text = text.trim_start_matches(['v', 'V']);
     let hash = text.len() >= 20 && text.chars().all(|c| c.is_ascii_hexdigit());
-    !hash && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+    !hash && !is_go_pseudo_version(text) && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// A Go pseudo-version names a commit, not a release
+/// (`1.0.1-20260311144920-9eb2d33064b7`, `0.0.0-0.20240102030405-abcdef012345`):
+/// it says nothing of where the releases of the project stand.
+pub fn is_go_pseudo_version(text: &str) -> bool {
+    let Some((rest, hash)) = text.rsplit_once('-') else {
+        return false;
+    };
+    let date = rest.rsplit(['-', '.']).next().unwrap_or("");
+    hash.len() == 12 && hash.chars().all(|c| c.is_ascii_hexdigit()) && date.len() == 14 && date.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Orders two versions (semantic versioning, and close enough for PyPI,
@@ -285,6 +296,16 @@ mod tests {
         assert_eq!(exact("5.16.9", "5.16rc1"), Verdict::NotAffected);
         assert_eq!(exact("5.16-rc1", "5.16rc1"), Verdict::Affected);
         assert_eq!(exact("5.16.9", "5.16"), Verdict::Affected);
+    }
+
+    #[test]
+    fn a_go_pseudo_version_is_not_a_version() {
+        for pseudo in ["1.0.1-20260311144920-9eb2d33064b7", "v0.0.0-20240102030405-abcdef012345", "2.3.1-0.20240102030405-abcdef012345", "1.2.0-rc1.0.20240102030405-abcdef012345"] {
+            assert!(is_go_pseudo_version(pseudo.trim_start_matches('v')) && !is_version(pseudo), "{pseudo}");
+        }
+        for version in ["1.0.1", "3.0.0-beta5", "2020-12-14", "1.2.3-4", "1.0.1-20260311"] {
+            assert!(is_version(version), "{version}");
+        }
     }
 
     #[test]

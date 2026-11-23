@@ -3,6 +3,26 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.3
+
+### Things to know before upgrading
+
+- Expect a few more entries marked *version not given* for applications declared with the Go
+  ecosystem: CVEs whose only fix is named as a commit (see below) are now kept, where they were
+  dropped whenever the version number happened to be higher than the one in the commit name.
+
+### Fixed
+
+- **An advisory that names a fix was read as "no fix".** When several entries of an advisory
+  name the same package, their ranges are put one after the other (`>=0 <X >=0`); the last one
+  made the whole advisory say "affected, no fix", which since 0.2.1 wins over "up to 5.0.2
+  included" of the NVD. CVEs fixed long before came back to review.
+- **Go pseudo-versions are no longer compared with versions.** A fix given as
+  `1.0.1-20260311144920-9eb2d33064b7` names a commit and says nothing of where the releases
+  stand: 5.2.0 was "after" it, 0.9 "before" it, both by accident. Such an advisory now decides
+  nothing by itself: the other sources do, and when there is none the CVE is kept, marked
+  *version not given*.
+
 ## 0.2.2
 
 ### Fixed
