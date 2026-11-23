@@ -1019,7 +1019,7 @@ impl Database {
                     Some(line) if line > major.max(1) => continue,
                     // An earlier line only tells when it was fixed there: the
                     // fix is in what followed. Still open, it says nothing.
-                    Some(line) if line < major.max(1) && verdict != Verdict::NotAffected => continue,
+                    Some(line) if line < major.max(1) && !matches!(verdict, Verdict::NotAffected | Verdict::FixedInCommit) => continue,
                     _ => {}
                 }
             }
@@ -1260,6 +1260,11 @@ fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
     let mut open = false;
     // Past an included end ("last affected"), which names no fix
     let mut past_last = false;
+    // A fix is named ("before X"): the advisory does not say "no fix", even
+    // if another of its entries, put after this one, leaves every version open
+    let mut fix_named = false;
+    // That fix is a commit (a Go pseudo-version): not comparable with a version
+    let mut commit_fix = false;
     for event in range.split_whitespace() {
         if let Some(start) = event.strip_prefix(">=") {
             from = Some(start);
@@ -1275,6 +1280,11 @@ fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
         };
         let start = from.take().unwrap_or("0");
         open = false;
+        fix_named |= !inclusive;
+        if !inclusive && versions::is_go_pseudo_version(end.trim_start_matches(['v', 'V'])) && (start == "0" || versions::is_version(start)) {
+            commit_fix = true;
+            continue;
+        }
         if !versions::is_version(end) || (start != "0" && !versions::is_version(start)) {
             return Verdict::Unknown;
         }
@@ -1289,14 +1299,19 @@ fn range_verdict(range: Option<&str>, version: Option<&str>) -> Verdict {
         Some(start) if open => {
             if !versions::is_version(start) && start != "0" {
                 Verdict::Unknown
+            } else if from_the_start(start) && fix_named {
+                if commit_fix { Verdict::FixedInCommit } else { Verdict::NotAffected }
             } else if from_the_start(start) {
                 Verdict::NoFix
             } else if versions::cmp(version, start) != Less {
                 Verdict::Affected
+            } else if commit_fix {
+                Verdict::FixedInCommit
             } else {
                 Verdict::NotAffected
             }
         }
+        _ if commit_fix => Verdict::FixedInCommit,
         _ if past_last => Verdict::PastLastAffected,
         _ => Verdict::NotAffected,
     }
@@ -1460,6 +1475,15 @@ mod tests {
         assert!(unknown(None, Some("1.0")) && unknown(Some(">=0 <1.0"), None));
         assert_eq!(range_verdict(Some(">=0"), Some("9.9")), Verdict::NoFix);
         assert_eq!(range_verdict(Some(">=0.0.0"), Some("9.9")), Verdict::NoFix);
+        // An advisory that names a fix does not say "no fix", whatever another entry adds
+        assert_eq!(range_verdict(Some(">=0 <1.4 >=0"), Some("2.0")), Verdict::NotAffected);
+        assert_eq!(range_verdict(Some(">=0 <1.4 >=0"), Some("1.0")), Verdict::Affected);
+        assert_eq!(range_verdict(Some(">=0 <1.4 >=2.0"), Some("2.1")), Verdict::Affected);
+        // A Go pseudo-version is a commit: a fix is named, whatever the version asked
+        assert_eq!(range_verdict(Some(">=0 <1.0.1-20260311144920-9eb2d33064b7 >=0"), Some("5.2.0")), Verdict::FixedInCommit);
+        assert_eq!(range_verdict(Some(">=0 <1.0.1-20260311144920-9eb2d33064b7"), Some("0.5.0")), Verdict::FixedInCommit);
+        assert_eq!(range_verdict(Some(">=0 <1.2 >=2.0 <2.0.1-0.20260311144920-9eb2d33064b7"), Some("1.1")), Verdict::Affected);
+        assert_eq!(range_verdict(Some(">=0 <=1.0.1-20260311144920-9eb2d33064b7"), Some("5.2.0")), Verdict::Unknown);
         assert_eq!(range_verdict(Some(">=1.0 <=1.4"), Some("1.5")), Verdict::PastLastAffected);
         assert_eq!(range_verdict(Some(">=1.0 <=1.4"), Some("0.9")), Verdict::NotAffected);
         assert_eq!(range_verdict(Some(">=1.0 <1.4"), Some("1.5")), Verdict::NotAffected);
@@ -1708,6 +1732,26 @@ mod tests {
         db.upsert_cve(&last).unwrap();
         add_package("CVE-2024-0008", "github.com/containers/podman/v5", ">=0");
         add_package("CVE-2024-0008", "github.com/containers/podman/v4", ">=0");
+        // The NVD names the last version affected; the advisory names a fix, as a commit,
+        // and another of its entries leaves every version open
+        let mut fixed = Cve::new("CVE-2026-0009".into());
+        fixed.description = Some("Flaw".into());
+        fixed.affected_products.push(AffectedProduct {
+            vendor: Some("tinyauth".into()),
+            product: Some("tinyauth".into()),
+            version: Some("*".into()),
+            version_end: Some("5.0.2".into()),
+            version_end_included: true,
+            cpe: Some("cpe".into()),
+            ..Default::default()
+        });
+        db.upsert_cve(&fixed).unwrap();
+        add_package("CVE-2026-0009", "github.com/steveiliop56/tinyauth", ">=0 <1.0.1-20260311144920-9eb2d33064b7 >=0");
+        // Known through the advisory only, fixed in a commit: taken as fixed
+        let mut commit = Cve::new("CVE-2026-0010".into());
+        commit.description = Some("Flaw".into());
+        db.upsert_cve(&commit).unwrap();
+        add_package("CVE-2026-0010", "github.com/tinyauthapp/tinyauth", ">=0 <1.0.1-0.20260720133915-80bc87188ec3");
         // Another vendor, whose name merely contains this one
         product("CVE-2017-0006", "openssl.js_project", "openssl.js", "*", None);
         product("CVE-2017-0007", "openssl", "openssl", "*", None);
@@ -1731,6 +1775,8 @@ mod tests {
         assert_eq!(matching("podman", Some("podman"), None, "5.1.0"), "02 08 03 04 05");
         assert_eq!(matching("podman", Some("pod"), None, "5.1.0"), "");
         assert_eq!(matching("openssl", Some("openssl"), None, "3.6.5"), "07");
+        assert_eq!(matching("tinyauth", Some("tinyauth"), Some("Go"), "5.2.0"), "");
+        assert_eq!(matching("tinyauth", Some("tinyauth"), Some("Go"), "5.0.2"), "09");
     }
 
     #[test]
