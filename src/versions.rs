@@ -120,6 +120,10 @@ pub enum Verdict {
     /// 5.2 included"). That names the last version known to be affected, not
     /// a fix: sources often write the latest release of the day there.
     PastLastAffected,
+    /// The source names a fix, but as a commit (a Go pseudo-version), which
+    /// cannot be compared with the version of a release. Taken as fixed
+    /// unless another source places the version in an affected range.
+    FixedInCommit,
     /// The source says every version is affected and that no fix exists
     NoFix,
     /// The source gives nothing to judge by: no version recorded, or none asked
@@ -132,6 +136,8 @@ pub enum Verdict {
 /// - a version inside an affected range is affected;
 /// - else a source naming the fix, or a first affected version, decides
 ///   against those that say "every version";
+/// - else a fix named as a commit counts as a fix: a source that names one
+///   does not leave the flaw open;
 /// - else "past the last version known to be affected" is enough when nothing
 ///   else is said, but not against a source saying no fix exists;
 /// - and when no source gives any version, the application is kept.
@@ -140,6 +146,7 @@ pub struct Verdicts {
     affected: bool,
     not_affected: bool,
     past_last: bool,
+    fixed_in_commit: bool,
     no_fix: bool,
 }
 
@@ -149,13 +156,14 @@ impl Verdicts {
             Verdict::Affected => self.affected = true,
             Verdict::NotAffected => self.not_affected = true,
             Verdict::PastLastAffected => self.past_last = true,
+            Verdict::FixedInCommit => self.fixed_in_commit = true,
             Verdict::NoFix => self.no_fix = true,
             Verdict::Unknown => {}
         }
     }
 
     pub fn affected(&self) -> bool {
-        self.affected || (!self.not_affected && (self.no_fix || !self.past_last))
+        self.affected || (!self.not_affected && !self.fixed_in_commit && (self.no_fix || !self.past_last))
     }
 
     /// Whether a source places the version inside an affected range (as
@@ -258,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_precise_source_decides_against_one_that_says_every_version() {
-        use Verdict::{Affected, NoFix, NotAffected, PastLastAffected, Unknown};
+        use Verdict::{Affected, FixedInCommit, NoFix, NotAffected, PastLastAffected, Unknown};
         let together = |verdicts: &[Verdict]| {
             let mut all = Verdicts::default();
             verdicts.iter().for_each(|v| all.add(*v));
@@ -273,6 +281,9 @@ mod tests {
         assert!(!together(&[PastLastAffected]) && !together(&[PastLastAffected, Unknown]));
         assert!(together(&[PastLastAffected, NoFix]));
         assert!(!together(&[PastLastAffected, NoFix, NotAffected]));
+        // A fix named as a commit: taken as fixed, unless a source places the version in a range
+        assert!(!together(&[FixedInCommit]) && !together(&[FixedInCommit, NoFix]) && !together(&[FixedInCommit, PastLastAffected, Unknown]));
+        assert!(together(&[FixedInCommit, Affected]));
     }
 
     #[test]

@@ -5,12 +5,6 @@ before 1.0, a minor version may change behaviour.
 
 ## 0.2.3
 
-### Things to know before upgrading
-
-- Expect a few more entries marked *version not given* for applications declared with the Go
-  ecosystem: CVEs whose only fix is named as a commit (see below) are now kept, where they were
-  dropped whenever the version number happened to be higher than the one in the commit name.
-
 ### Fixed
 
 - **An advisory that names a fix was read as "no fix".** When several entries of an advisory
@@ -19,9 +13,10 @@ before 1.0, a minor version may change behaviour.
   included" of the NVD. CVEs fixed long before came back to review.
 - **Go pseudo-versions are no longer compared with versions.** A fix given as
   `1.0.1-20260311144920-9eb2d33064b7` names a commit and says nothing of where the releases
-  stand: 5.2.0 was "after" it, 0.9 "before" it, both by accident. Such an advisory now decides
-  nothing by itself: the other sources do, and when there is none the CVE is kept, marked
-  *version not given*.
+  stand: 5.2.0 was "after" it and 0.9 "before" it, both by accident. A fix named this way now
+  counts as a fix whatever the version: the application is not matched, unless another source
+  places its version in an affected range. An application older than that commit is therefore
+  not alerted by such an advisory alone.
 
 ## 0.2.2
 
