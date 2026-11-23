@@ -1011,7 +1011,7 @@ mod tests {
         assert_eq!(project.location.as_deref(), Some("/product/acme/infra?view=applications"));
         for scope in ["/product", "/product/acme/infra"] {
             for view in ["", "?view=vulnerabilities", "?view=vulnerabilities&show=handled", "?view=applications", "?view=subscriptions",
-                         "?view=evolution", "?view=evolution&days=365&at=2026-01-01", "?view=evolution&at=garbage",
+                         "?view=history", "?view=history&days=365&at=2026-01-01", "?view=history&at=garbage",
                          "?view=audit", "?view=audit&decision=all", "?view=settings", "?view=bogus"] {
                 let page = app.get(&format!("{scope}{view}"), Some(&alice)).await;
                 assert_eq!(page.status, StatusCode::OK, "{scope}{view}");
@@ -1137,7 +1137,7 @@ mod tests {
         assert!(db.project_triage(project_id, false).unwrap().is_empty());
         let audit = app.get("/product/acme/infra?view=audit", Some(&viewer)).await.body;
         assert!(audit.contains("behind VPN") && audit.contains("<strong>editor</strong>"));
-        assert!(app.get("/product?view=evolution", Some(&viewer)).await.body.contains("behind VPN"));
+        assert!(app.get("/product?view=history", Some(&viewer)).await.body.contains("behind VPN"));
         // The return page is never an external URL
         let evil = app
             .post(&triage, Some(&editor), "status=untreated&back=https%3A%2F%2Fevil.example%2F")
@@ -3522,5 +3522,50 @@ mod tests {
         }
         // Other pages lead to the view under its new name
         assert!(app.get("/product", Some(&alice)).await.body.contains(&menu_entry("/product", "vulnerabilities", "Vulnerabilities", false)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_history_view_says_which_day_it_shows() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let today = chrono::Utc::now().date_naive();
+        let day = |back: i64| (today - chrono::Duration::days(back)).to_string();
+        for scope in ["/product", "/product/acme/infra"] {
+            let now = app.get(&format!("{scope}?view=history"), Some(&alice)).await.body;
+            assert!(now.contains("<title>History · Vulnizard</title>"), "{scope}");
+            assert!(now.contains(&menu_entry(scope, "history", "History", true)) && !now.contains("Evolution"), "{scope}");
+            // Today: nothing calls it a past state, and there is nowhere to come back from
+            assert!(now.contains("You are looking at the current state.") && !now.contains("Past state"), "{scope}");
+            assert!(!now.contains("Back to today") && !now.contains("Next day"), "{scope}");
+            // A day is chosen in a chart, with the date field, or one step at a time
+            assert!(now.contains("Every day of a chart is a link"), "{scope}");
+            assert!(now.contains(&format!("<a href=\"{scope}?view=history&amp;days=30&amp;at={}\">", day(3))), "{scope}");
+            assert!(now.contains(&format!("<input type=\"date\" name=\"at\" value=\"{today}\" max=\"{today}\" required>")), "{scope}");
+            assert!(now.contains(&format!("href=\"{scope}?view=history&amp;days=30&amp;at={}\" title=\"State on {}\">← Previous day</a>", day(1), day(1))), "{scope}");
+
+            // A past day is announced as such, with the way back
+            let then = app.get(&format!("{scope}?view=history&days=90&at={}", day(10)), Some(&alice)).await.body;
+            assert!(then.contains(&format!("<span class=\"tag warn\">Past state</span> <strong>You are looking at {}.</strong>", day(10))), "{scope}");
+            assert!(!then.contains("You are looking at the current state."), "{scope}");
+            assert!(then.contains(&format!("<a class=\"button today\" href=\"{scope}?view=history&amp;days=90\">Back to today</a>")), "{scope}");
+            assert!(then.contains(&format!("at={}\" title=\"State on {}\">Next day →</a>", day(9), day(9))), "{scope}");
+            assert!(then.contains("Nothing was tracked at that date."), "{scope}");
+            // A day in the future is today
+            let future = app.get(&format!("{scope}?view=history&at=2999-01-01"), Some(&alice)).await.body;
+            assert!(future.contains("You are looking at the current state."), "{scope}");
+
+            // The address of before the renaming shows the same view, past day included
+            let former = app.get(&format!("{scope}?view=evolution&at={}", day(10)), Some(&alice)).await;
+            assert_eq!(former.status, StatusCode::OK, "{scope}");
+            assert!(former.body.contains("<title>History · Vulnizard</title>") && former.body.contains("Past state"), "{scope}");
+            assert!(former.body.contains(&menu_entry(scope, "history", "History", true)), "{scope}");
+        }
+        // The overview leads there, day by day
+        app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0").await;
+        let overview = app.get("/product", Some(&alice)).await.body;
+        assert!(overview.contains(&format!("<a href=\"/product?view=history&amp;at={}\">", day(2))));
+        assert!(overview.contains("<a href=\"/product?view=history\">History →</a>"));
     }
 }

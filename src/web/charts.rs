@@ -396,7 +396,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        let link = |day: &str| format!("/product?view=evolution&at={day}");
+        let link = |day: &str| format!("/product?view=history&at={day}");
         let stock = stock_chart(&days, Some("2026-01-02"), &link).into_string();
         assert_eq!(stock.matches("<a href=").count(), 3);
         assert_eq!(stock.matches("class=\"selected\"").count(), 1);

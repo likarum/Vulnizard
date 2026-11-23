@@ -346,11 +346,11 @@ pub async fn report_detail(
         let changes = db.get_report(project.id, &day)?.ok_or(AppError::NotFound)?;
         let scope = Some((org.name.as_str(), project.name.as_str()));
         Ok(layout(
-            Nav::Product { scope, view: "evolution" },
+            Nav::Product { scope, view: "history" },
             &format!("Report {day}"),
             Some(&user),
             html! {
-                p { a href=(product_url(scope, "evolution")) { "← " (project.name) " evolution" } }
+                p { a href=(product_url(scope, "history")) { "← " (project.name) " history" } }
                 h1 { "Report of " (day) }
                 p.muted { (changes.len()) " change(s) on subscribed CVEs" }
                 (views::report_changes(&changes))

@@ -38,8 +38,9 @@ database was last synchronized (administrators can start a sync from there):
     version, which is not the same as having none at its version. Then the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)
   - *Subscriptions*: vendors or products whose every CVE change you follow
-  - *Evolution*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
-    state of every tracked CVE **at any past date**
+  - *History*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
+    state of every tracked CVE **at any past date**: click a day in a chart, or pick it in the
+    date field. A past state is marked as such, with a link back to today
   - *Audit*: who decided what, when and why — accepted risks first
   - *Settings* (per project): the project's own notification **destinations** (email with its own
     SMTP server, ntfy, Slack, webhook, browser) and the **rules** saying which destination is told

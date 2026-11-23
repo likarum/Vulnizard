@@ -21,9 +21,9 @@ pub struct ProductQuery {
     view: Option<String>,
     /// Vulnerabilities: "handled" lists the decided entries
     show: Option<String>,
-    /// Evolution: day whose state is shown (YYYY-MM-DD)
+    /// History: day whose state is shown (YYYY-MM-DD)
     at: Option<String>,
-    /// Evolution: length of the window in days
+    /// History: length of the window in days
     days: Option<String>,
     /// Audit: decision filter
     decision: Option<String>,
@@ -115,7 +115,7 @@ fn render(
         "vulnerabilities" => ("Vulnerabilities", vulnerabilities(db, user, &scope, q)?),
         "applications" => ("Applications", applications(db, st, user, &scope, q)?),
         "subscriptions" => ("Subscriptions", subscriptions(db, user, &scope)?),
-        "evolution" => ("Evolution", evolution(db, user, &scope, q)?),
+        "history" => ("History", history(db, user, &scope, q)?),
         "audit" => ("Audit", audit(db, user, &scope, q)?),
         "settings" if !scope.all() => ("Settings", settings(db, config, &scope, q.new.as_deref())?),
         _ => ("Overview", overview(db, user, &scope)?),
@@ -256,7 +256,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
     let today = Utc::now().date_naive();
     let events = db.lifecycle_events(user.id, scope.project_id())?;
     let month = timeline(&events, today - Duration::days(29), today);
-    let evolution_link = |day: &str| format!("{}&at={day}", scope.url("evolution"));
+    let history_link = |day: &str| format!("{}&at={day}", scope.url("history"));
 
     let charts = if scope.all() {
         overview_charts_all(scope, &breakdown)
@@ -274,7 +274,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
         (charts)
         div.card {
             h3 { "CVEs to review over the last 30 days " small { "— click a day to see the state at that date" } }
-            (charts::stock_chart(&month, None, &evolution_link))
+            (charts::stock_chart(&month, None, &history_link))
         }
 
         div.head {
@@ -287,7 +287,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
 
         div.head {
             h2 { "Latest changes on subscribed products" }
-            a href=(scope.url("evolution")) { "Evolution →" }
+            a href=(scope.url("history")) { "History →" }
         }
         (views::project_changes(&changes, scope.all()))
     })
@@ -675,10 +675,10 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
 }
 
 // ==========================================
-// Evolution over time, and state at a date
+// History: evolution over time, and state at a date
 // ==========================================
 
-fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
+fn history(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
     let today = Utc::now().date_naive();
     let days = match nonempty(&q.days).as_deref() {
         Some("90") => 90,
@@ -728,8 +728,11 @@ fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> 
         },
     );
     let at_s = at.to_string();
-    let base = scope.url("evolution");
+    let base = scope.url("history");
     let link = |day: &str| format!("{base}&days={days}&at={day}");
+    let past = at < today;
+    let previous = (at - Duration::days(1)).to_string();
+    let next = (at + Duration::days(1)).to_string();
     let changes = db.recent_project_changes(user.id, scope.project_id(), 30)?;
     let reports = match scope.project_id() {
         Some(id) => db.list_reports(id, 30)?,
@@ -737,29 +740,53 @@ fn evolution(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> 
     };
 
     Ok(html! {
+        p.muted {
+            "How the tracked CVEs evolved, and what they looked like on any past day. "
+            strong { "Every day of a chart is a link" }
+            ": point at it for its figures, click it to go back to that day. The date field does the same."
+        }
+        // Going back in time is the point of the view: the day shown is said first, with the ways to change it
+        div.card.timetravel class=[past.then_some("past")] {
+            div.when {
+                @if past {
+                    span.tag.warn { "Past state" }
+                    " " strong { "You are looking at " (at_s) "." }
+                    " The counters and the list below are those of the end of that day, not today's."
+                } @else {
+                    span.tag { "Today" }
+                    " " strong { "You are looking at the current state." }
+                    " Pick a day to see the state at the end of that day."
+                }
+            }
+            form.row method="get" action=(scope.url("")) {
+                input type="hidden" name="view" value="history";
+                input type="hidden" name="days" value=(days);
+                a.button href=(link(&previous)) title={ "State on " (previous) } { "← Previous day" }
+                label { "Go to " input type="date" name="at" value=(at_s) max=(today.to_string()) required; }
+                button type="submit" { "Show that day" }
+                @if past {
+                    a.button href=(link(&next)) title={ "State on " (next) } { "Next day →" }
+                    a.button.today href={ (base) "&days=" (days) } { "Back to today" }
+                }
+            }
+        }
         div.chips {
             @for (n, label) in [(30, "30 days"), (90, "90 days"), (365, "1 year")] {
                 a href={ (base) "&days=" (n) "&at=" (at_s) } class=[(days == n).then_some("active")] { (label) }
             }
         }
-        div.card {
-            h3 { "Stock: CVEs to review and accepted risks " small { "— " (from) " to " (to) } }
+        div.card.days {
+            h3 { "Stock: CVEs to review and accepted risks " small { "— " (from) " to " (to) " · click a day" } }
             (charts::stock_chart(&stats, Some(&at_s), &link))
         }
-        div.card {
-            h3 { "Activity per day: new entries and decisions" }
+        div.card.days {
+            h3 { "Activity per day: new entries and decisions " small { "— click a day" } }
             (charts::activity_chart(&stats, Some(&at_s), &link))
         }
-        p.muted { "Click a day in a chart to review the state at the end of that day." }
 
         div.head {
-            h2 { "State on " (at_s) @if at == today { " (today)" } }
-            form.row method="get" action=(scope.url("")) {
-                input type="hidden" name="view" value="evolution";
-                input type="hidden" name="days" value=(days);
-                input type="date" name="at" value=(at_s) max=(today.to_string());
-                button.secondary type="submit" { "Show" }
-            }
+            h2 { "State on " (at_s) @if past { " " span.tag.warn { "past" } } @else { " (today)" } }
+            @if past { a href={ (base) "&days=" (days) } { "Back to today →" } }
         }
         div.tiles {
             (views::tile(in_status("untreated"), "to review", false))

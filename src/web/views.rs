@@ -17,7 +17,7 @@ pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
     ("vulnerabilities", "Vulnerabilities"),
     ("applications", "Applications"),
     ("subscriptions", "Subscriptions"),
-    ("evolution", "Evolution"),
+    ("history", "History"),
     ("audit", "Audit"),
 ];
 
@@ -72,6 +72,7 @@ tokio::task_local! {
 pub fn canonical_view(view: &str) -> &str {
     match view {
         "review" => "vulnerabilities",
+        "evolution" => "history",
         other => other,
     }
 }
