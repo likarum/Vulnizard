@@ -1003,7 +1003,7 @@ fn get_version_match_indicator(cve: &models::Cve, query_version: &str, product_f
         }
         if versions::product_affects(
             Some(query_version),
-            ap.version.as_deref(),
+            versions::cpe_version(ap.version.as_deref(), ap.cpe.as_deref()).as_deref(),
             ap.version_start.as_deref(),
             ap.version_start_excluded,
             ap.version_end.as_deref(),

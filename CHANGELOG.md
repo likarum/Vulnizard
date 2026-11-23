@@ -3,6 +3,18 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.2
+
+### Fixed
+
+- **The *update* field of a CPE was ignored**: the NVD writes sudo 1.9.17p2 as `sudo:1.9.17:p2`,
+  and only `1.9.17` was compared. An application on 1.9.17p2 did not match a CVE listing that
+  exact CPE (missed alert), and an application on 5.16.9 matched a flaw of `5.16:rc1` only
+  (false alert). The whole version is now compared. No new import is needed.
+- **The priority of an entry now follows the score of its CVE.** It was computed once, when the
+  entry was created: an entry created before the CVE had a CVSS score stayed "low". It is
+  recomputed at every scan.
+
 ## 0.2.1
 
 ### Fixed

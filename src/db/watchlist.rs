@@ -852,6 +852,22 @@ impl Database {
                 |r| r.get(0),
             )?;
             let (mut new_entries, mut existing_entries) = (0i64, 0i64);
+            // The score of a CVE often comes after the CVE: the priority follows it
+            self.conn().execute(
+                "UPDATE watchlist_entries SET priority = COALESCE((
+                     SELECT CASE WHEN COALESCE(c.kev_known_exploited, 0) != 0 OR c.cvss_v3_score >= 9.0 THEN 'critical'
+                                 WHEN c.cvss_v3_score >= 7.0 THEN 'high'
+                                 WHEN c.cvss_v3_score >= 4.0 THEN 'medium'
+                                 ELSE 'low' END
+                     FROM cves c WHERE c.cve_id = watchlist_entries.cve_id), 'medium')
+                 WHERE app_id = ?1 AND priority IS NOT COALESCE((
+                     SELECT CASE WHEN COALESCE(c.kev_known_exploited, 0) != 0 OR c.cvss_v3_score >= 9.0 THEN 'critical'
+                                 WHEN c.cvss_v3_score >= 7.0 THEN 'high'
+                                 WHEN c.cvss_v3_score >= 4.0 THEN 'medium'
+                                 ELSE 'low' END
+                     FROM cves c WHERE c.cve_id = watchlist_entries.cve_id), 'medium')",
+                params![app_id],
+            )?;
             for (cve_id, version_unknown) in &matches {
                 let added = self.add_watchlist_entry_if_new(app_id, cve_id)?;
                 // The sources are corrected over time: the mark follows them
@@ -914,7 +930,7 @@ impl Database {
         // nginx under `nginx` and `nginx_open_source`. The vendor is compared
         // like the product: `openssl` is not `openssl.js_project`.
         let mut sql = String::from(
-            "SELECT DISTINCT cve_id, version, version_start, version_end, start_excluded, end_included
+            "SELECT DISTINCT cve_id, version, version_start, version_end, start_excluded, end_included, cpe
              FROM affected_products_normalized WHERE "
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -940,6 +956,9 @@ impl Database {
             let (db_version, version_start, version_end): (Option<String>, Option<String>, Option<String>) =
                 (row.get(1)?, row.get(2)?, row.get(3)?);
             let (start_excluded, end_included): (bool, bool) = (row.get(4)?, row.get(5)?);
+            // The version a CPE names includes its update field (1.9.17:p2)
+            let cpe: Option<String> = row.get(6)?;
+            let db_version = versions::cpe_version(db_version.as_deref(), cpe.as_deref());
             said.add(
                 cve_id,
                 versions::product_verdict(version, db_version.as_deref(), version_start.as_deref(), start_excluded, version_end.as_deref(), end_included),
@@ -1749,5 +1768,49 @@ mod tests {
         any.vendor = Some("jellyfin".into());
         product("CVE-2026-0003", "-", None);
         assert!(db.matching_cves(&any).unwrap().iter().all(|(_, unknown)| !unknown));
+    }
+
+    #[test]
+    fn the_patch_level_of_a_cpe_counts_and_the_priority_follows_the_score() {
+        let db = Database::open_in_memory().unwrap();
+        let project = project(&db);
+        let cve = |score: Option<f64>| {
+            let mut cve = Cve::new("CVE-2026-35535".into());
+            cve.description = Some("Flaw through 1.9.17p2".into());
+            cve.cvss_v3_score = score;
+            let entry = |version: &str, end: Option<&str>, cpe: &str| AffectedProduct {
+                vendor: Some("sudo_project".into()),
+                product: Some("sudo".into()),
+                version: Some(version.into()),
+                version_end: end.map(String::from),
+                cpe: Some(cpe.into()),
+                ..Default::default()
+            };
+            cve.affected_products = vec![
+                entry("*", Some("1.9.17"), "cpe:2.3:a:sudo_project:sudo:*:*:*:*:*:*:*:*"),
+                entry("1.9.17", None, "cpe:2.3:a:sudo_project:sudo:1.9.17:-:*:*:*:*:*:*"),
+                entry("1.9.17", None, "cpe:2.3:a:sudo_project:sudo:1.9.17:p1:*:*:*:*:*:*"),
+                entry("1.9.17", None, "cpe:2.3:a:sudo_project:sudo:1.9.17:p2:*:*:*:*:*:*"),
+            ];
+            db.upsert_cve(&cve).unwrap();
+        };
+        cve(None);
+        let matches = |version: &str| {
+            let mut app = Application::new(project, "sudo".into());
+            app.vendor = Some("sudo".into());
+            app.version = Some(version.into());
+            db.matching_cve_ids(&app).unwrap().len()
+        };
+        assert_eq!((matches("1.9.16"), matches("1.9.17"), matches("1.9.17p1"), matches("1.9.17p2"), matches("1.9.17p3"), matches("1.9.18")), (1, 1, 1, 1, 0, 0));
+
+        // Created before the score: low; the score comes, the priority follows at the next scan
+        let mut app = Application::new(project, "sudo".into());
+        app.version = Some("1.9.17p2".into());
+        assert_eq!(db.add_application_scanned(&mut app).unwrap(), 1);
+        let priority = || -> String { db.conn().query_row("SELECT priority FROM watchlist_entries", [], |r| r.get(0)).unwrap() };
+        assert_eq!(priority(), "low");
+        cve(Some(7.7));
+        db.rescan_all_applications().unwrap();
+        assert_eq!(priority(), "high");
     }
 }
