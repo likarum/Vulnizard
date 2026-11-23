@@ -516,12 +516,13 @@ impl Database {
                 w.created_at, w.updated_at, w.treated_at,
                 a.name as app_name, a.version as app_version,
                 p.name as project_name,
-                u.username,
+                COALESCE(o.name, ''),
                 c.cvss_v3_score, c.description, c.kev_known_exploited, w.version_unknown
                FROM watchlist_entries w
                JOIN applications a ON w.app_id = a.id
                JOIN projects p ON a.project_id = p.id
                JOIN users u ON p.user_id = u.id
+               LEFT JOIN organizations o ON o.id = p.organization_id
                LEFT JOIN cves c ON w.cve_id = c.cve_id
                WHERE 1=1"#
         );
@@ -580,7 +581,7 @@ impl Database {
                 app_name: row.get(10)?,
                 app_version: row.get(11)?,
                 project_name: row.get(12)?,
-                username: row.get(13)?,
+                organization: row.get(13)?,
                 cve_cvss: row.get(14)?,
                 cve_description: row.get(15)?,
                 version_unknown: row.get(17)?,

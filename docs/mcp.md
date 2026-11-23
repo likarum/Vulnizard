@@ -25,6 +25,14 @@ Read tools: `search_cves`, `get_cve`, `list_vendors`, `list_products`, `list_wea
 `get_state_at`, `get_audit_log`, `list_inventory`, `list_notifications`, `get_security_log` (administrators),
 `database_status`.
 
+`list_watchlist` and `get_audit_log` answer one page at a time: `{ total, offset, limit, entries }`
+(`events` for the audit log), 50 entries or 100 events by default and 500 at most; pass `offset` for
+the next page. In the list, a CVE description is cut after 200 characters (`get_cve` gives it whole).
+`get_audit_log` lists decisions by default; `event: detected`, `removed` or `all` adds the entries a
+scan brought in and those that left with their application. `database_status` gives the version of
+the software and of the database schema. In `list_applications`, `source` is `manual` for an
+application added by hand and `inventory` for one brought by an inventory source.
+
 Write tools (off by default: *Admin → MCP* for HTTP, `--allow-write` for stdio): `create_project`,
 `subscribe`, `unsubscribe`, `add_application`, `update_application_version`, `choose_components`
 (monitor or ignore discovered components), `request_sync` (administrators, HTTP only) and

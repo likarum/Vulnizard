@@ -426,16 +426,19 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_applications",
-            "List the applications tracked in a project of the `default` organization, with their recorded version.",
+            "List the applications tracked in a project of the `default` organization, with their recorded version, the number of CVEs the sources hold under their name (`known_cves`) and where they come from (`source`: `manual` when added by hand, `inventory` when an inventory source brought them, `group` then names the group of sources).",
             json!({ "project": { "type": "string", "description": "Project name" } }),
             &["project"],
         ),
         tool(
             "list_watchlist",
-            "List watchlist entries: CVEs tracked per application, with treatment status and priority.",
+            "List watchlist entries: CVEs tracked per application, with treatment status and priority, and the start of the CVE description (`get_cve` gives it whole). Answers one page (`entries`) with the `total`; ask for the next with `offset`.",
             json!({
                 "project": { "type": "string", "description": "Only this project (name)" },
+                "application": { "type": "string", "description": "Only this application (exact name)" },
                 "status": { "type": "string", "enum": ["untreated", "accepted", "treated", "not_applicable"] },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Entries returned (default 50)" },
+                "offset": { "type": "integer", "minimum": 0, "description": "Entries skipped (default 0)" },
             }),
             &[],
         ),
@@ -455,9 +458,12 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_audit_log",
-            "Decisions taken on tracked CVEs, most recent first: who accepted a risk, closed or reopened a CVE, when and with which justification.",
+            "Decisions taken on tracked CVEs, most recent first: who accepted a risk, closed or reopened a CVE, when, on which version of the application and with which justification. With `event`, also the entries a scan added (`detected`) or that left with their application (`removed`). Answers one page (`events`) with the `total`; ask for the next with `offset`.",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
-                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default: accepted risks)" } }),
+                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default: accepted risks)" },
+                    "event": { "type": "string", "enum": ["status", "detected", "removed", "all"], "description": "Kind of event (default `status`: decisions only). `decision` only filters the decisions" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Events returned (default 100)" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Events skipped (default 0)" } }),
             &[],
         ),
         tool(
@@ -480,11 +486,21 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "database_status",
-            "Database statistics and the most recent synchronization runs per source.",
+            "Version of the software and of the database schema, database statistics and the most recent synchronization runs per source.",
             json!({}),
             &[],
         ),
     ]
+}
+
+/// Characters of a CVE description kept in a list
+const DESCRIPTION_CHARS: usize = 200;
+
+/// Page asked for: `limit` (500 at most) and `offset`
+fn page_of(args: &Value, default: u64) -> (usize, usize) {
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(default).clamp(1, 500) as usize;
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    (limit, offset)
 }
 
 /// Same limits as the web forms
@@ -585,9 +601,24 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
             };
             let mut entries = Vec::new();
             for id in ids {
-                entries.extend(db.list_watchlist_entries(None, Some(id), None, status)?);
+                entries.extend(db.list_watchlist_entries(None, Some(id), opt_str(args, "application"), status)?);
             }
-            json!(entries)
+            let (limit, offset) = page_of(args, 50);
+            let total = entries.len();
+            // The start of each description is enough to recognise a CVE in a list; `get_cve` has the rest
+            let entries: Vec<_> = entries
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|mut e| {
+                    e.cve_description = e.cve_description.map(|d| match d.char_indices().nth(DESCRIPTION_CHARS) {
+                        Some((cut, _)) => format!("{}…", &d[..cut]),
+                        None => d,
+                    });
+                    e
+                })
+                .collect();
+            json!({ "total": total, "offset": offset, "limit": limit, "entries": entries })
         }
         "get_evolution" | "get_state_at" | "get_audit_log" => {
             // One project, or everything the caller can read
@@ -624,20 +655,30 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                 }
                 _ => {
                     let wanted = opt_str(args, "decision").unwrap_or("accepted");
-                    let decisions: Vec<Value> = events
+                    let kind = opt_str(args, "event").unwrap_or("status");
+                    if !["status", "detected", "removed", "all"].contains(&kind) {
+                        return Err(anyhow!("invalid event '{kind}'"));
+                    }
+                    let (limit, offset) = page_of(args, 100);
+                    let kept: Vec<_> = events
                         .iter()
                         .rev()
-                        .filter(|e| e.kind == "status" && (wanted == "all" || e.status.as_deref() == Some(wanted)))
-                        .take(500)
+                        .filter(|e| kind == "all" || e.kind == kind)
+                        .filter(|e| e.kind != "status" || wanted == "all" || e.status.as_deref() == Some(wanted))
+                        .collect();
+                    let page: Vec<Value> = kept
+                        .iter()
+                        .skip(offset)
+                        .take(limit)
                         .map(|e| {
                             json!({
-                                "at": e.at, "by": e.actor, "automatic": e.automatic, "from": e.previous, "to": e.status,
-                                "cve_id": e.cve_id, "application": e.app_name, "project": e.project,
+                                "at": e.at, "event": e.kind, "by": e.actor, "automatic": e.automatic, "from": e.previous, "to": e.status,
+                                "cve_id": e.cve_id, "application": e.app_name, "version": e.app_version, "project": e.project,
                                 "project_deleted": e.project_deleted, "justification": e.comment,
                             })
                         })
                         .collect();
-                    json!(decisions)
+                    json!({ "total": kept.len(), "offset": offset, "limit": limit, "events": page })
                 }
             }
         }
@@ -719,6 +760,8 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         "database_status" => {
             let stats = db.stats()?;
             json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "schema_version": db.schema_version()?,
                 "total_cves": stats.total_cves,
                 "with_cvss": stats.with_cvss,
                 "with_epss": stats.with_epss,
@@ -737,7 +780,19 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                     .collect::<Vec<_>>(),
             })
         }
-        "list_applications" => json!(db.list_applications(self.target(args)?.id)?),
+        "list_applications" => {
+            let apps: Vec<Value> = db
+                .list_applications(self.target(args)?.id)?
+                .into_iter()
+                .map(|app| {
+                    let source = if app.group.is_empty() { "manual" } else { "inventory" };
+                    let mut value = json!(app);
+                    value["source"] = json!(source);
+                    value
+                })
+                .collect();
+            json!(apps)
+        }
         "create_project" => {
             let name = req_str(args, "project")?;
             let org = opt_str(args, "org").unwrap_or("default");
@@ -1168,12 +1223,38 @@ mod tests {
         let carol = db.create_account("carol", None, "h", false).unwrap();
         let carol_mcp = as_user(carol, "carol");
         assert!(run(&carol_mcp, "list_watchlist", scope.clone()).is_err());
-        assert_eq!(run(&carol_mcp, "list_watchlist", json!({})).unwrap(), json!([]));
+        assert_eq!(run(&carol_mcp, "list_watchlist", json!({})).unwrap()["total"], 0);
         assert_eq!(run(&carol_mcp, "list_projects", json!({})).unwrap(), json!([]));
 
         // The decision shows in the audit log and in the state of the day, for those who can read the project
         let audit = run(&alice_mcp, "get_audit_log", scope.clone()).unwrap();
+        let audit = &audit["events"];
         assert_eq!((audit[0]["by"].as_str(), audit[0]["justification"].as_str()), (Some("alice"), Some("isolated network")));
+        // Each event carries the version it was decided on; entries a scan added are asked for by name
+        assert!(audit[0].get("version").is_some() && audit[0]["event"] == "status");
+        let detected = run(&alice_mcp, "get_audit_log", with(json!({ "event": "detected" }))).unwrap();
+        assert!(detected["total"].as_u64().unwrap() >= 1 && detected["events"][0]["event"] == "detected");
+        let everything = run(&alice_mcp, "get_audit_log", with(json!({ "event": "all", "decision": "all" }))).unwrap();
+        let total = everything["total"].as_u64().unwrap();
+        assert!(total >= 2);
+        // One page at a time, the total telling what is left
+        let second = run(&alice_mcp, "get_audit_log", with(json!({ "event": "all", "decision": "all", "limit": 1, "offset": 1 }))).unwrap();
+        assert_eq!((second["total"].as_u64(), second["events"].as_array().unwrap().len()), (Some(total), 1));
+        assert_eq!(second["events"][0], everything["events"][1]);
+        assert!(run(&alice_mcp, "get_audit_log", with(json!({ "event": "bogus" }))).is_err());
+        let listed = run(&alice_mcp, "list_watchlist", scope.clone()).unwrap();
+        assert_eq!((listed["total"].as_u64(), listed["entries"].as_array().unwrap().len()), (Some(1), 1));
+        // The owner of a project is an organization, and is named as one
+        assert!(listed["entries"][0]["organization"] == "acme" && listed["entries"][0].get("username").is_none());
+        assert_eq!(listed["entries"][0]["cve_description"], "Flaw in widget");
+        let past = run(&alice_mcp, "list_watchlist", with(json!({ "offset": 1 }))).unwrap();
+        assert_eq!((past["total"].as_u64(), past["entries"].as_array().unwrap().len()), (Some(1), 0));
+        assert_eq!(run(&alice_mcp, "list_watchlist", with(json!({ "application": "nothing" }))).unwrap()["total"], 0);
+        let apps = run(&alice_mcp, "list_applications", scope.clone()).unwrap();
+        assert_eq!(apps[0]["source"], "manual");
+        let status = run(&alice_mcp, "database_status", json!({})).unwrap();
+        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
+        assert!(status["schema_version"].as_i64().unwrap() >= 24);
         let today = chrono::Utc::now().date_naive().to_string();
         let state = run(&as_user(bob, "bob"), "get_state_at", with(json!({ "date": today }))).unwrap();
         assert_eq!(state["entries"][0]["status"], "accepted");
@@ -1223,7 +1304,7 @@ mod tests {
         assert_eq!(log["events"][0]["event"], "totp_enabled");
         assert_eq!(log["signing_key"].as_str().unwrap().len(), 16);
         assert!(run(&carol_mcp, "get_audit_log", scope.clone()).is_err());
-        assert_eq!(run(&carol_mcp, "get_audit_log", json!({ "decision": "all" })).unwrap(), json!([]));
+        assert_eq!(run(&carol_mcp, "get_audit_log", json!({ "decision": "all", "event": "all" })).unwrap()["total"], 0);
         assert!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap().as_array().unwrap().is_empty());
 
         // Same length limits as the web forms
