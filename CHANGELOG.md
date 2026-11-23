@@ -3,6 +3,21 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.3
+
+### Fixed
+
+- **An advisory that names a fix was read as "no fix".** When several entries of an advisory
+  name the same package, their ranges are put one after the other (`>=0 <X >=0`); the last one
+  made the whole advisory say "affected, no fix", which since 0.2.1 wins over "up to 5.0.2
+  included" of the NVD. CVEs fixed long before came back to review.
+- **Go pseudo-versions are no longer compared with versions.** A fix given as
+  `1.0.1-20260311144920-9eb2d33064b7` names a commit and says nothing of where the releases
+  stand: 5.2.0 was "after" it and 0.9 "before" it, both by accident. A fix named this way now
+  counts as a fix whatever the version: the application is not matched, unless another source
+  places its version in an affected range. An application older than that commit is therefore
+  not alerted by such an advisory alone.
+
 ## 0.2.2
 
 ### Fixed

@@ -5,7 +5,18 @@
 pub fn is_version(text: &str) -> bool {
     let text = text.trim_start_matches(['v', 'V']);
     let hash = text.len() >= 20 && text.chars().all(|c| c.is_ascii_hexdigit());
-    !hash && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+    !hash && !is_go_pseudo_version(text) && text.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// A Go pseudo-version names a commit, not a release
+/// (`1.0.1-20260311144920-9eb2d33064b7`, `0.0.0-0.20240102030405-abcdef012345`):
+/// it says nothing of where the releases of the project stand.
+pub fn is_go_pseudo_version(text: &str) -> bool {
+    let Some((rest, hash)) = text.rsplit_once('-') else {
+        return false;
+    };
+    let date = rest.rsplit(['-', '.']).next().unwrap_or("");
+    hash.len() == 12 && hash.chars().all(|c| c.is_ascii_hexdigit()) && date.len() == 14 && date.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Orders two versions (semantic versioning, and close enough for PyPI,
@@ -109,6 +120,10 @@ pub enum Verdict {
     /// 5.2 included"). That names the last version known to be affected, not
     /// a fix: sources often write the latest release of the day there.
     PastLastAffected,
+    /// The source names a fix, but as a commit (a Go pseudo-version), which
+    /// cannot be compared with the version of a release. Taken as fixed
+    /// unless another source places the version in an affected range.
+    FixedInCommit,
     /// The source says every version is affected and that no fix exists
     NoFix,
     /// The source gives nothing to judge by: no version recorded, or none asked
@@ -121,6 +136,8 @@ pub enum Verdict {
 /// - a version inside an affected range is affected;
 /// - else a source naming the fix, or a first affected version, decides
 ///   against those that say "every version";
+/// - else a fix named as a commit counts as a fix: a source that names one
+///   does not leave the flaw open;
 /// - else "past the last version known to be affected" is enough when nothing
 ///   else is said, but not against a source saying no fix exists;
 /// - and when no source gives any version, the application is kept.
@@ -129,6 +146,7 @@ pub struct Verdicts {
     affected: bool,
     not_affected: bool,
     past_last: bool,
+    fixed_in_commit: bool,
     no_fix: bool,
 }
 
@@ -138,13 +156,14 @@ impl Verdicts {
             Verdict::Affected => self.affected = true,
             Verdict::NotAffected => self.not_affected = true,
             Verdict::PastLastAffected => self.past_last = true,
+            Verdict::FixedInCommit => self.fixed_in_commit = true,
             Verdict::NoFix => self.no_fix = true,
             Verdict::Unknown => {}
         }
     }
 
     pub fn affected(&self) -> bool {
-        self.affected || (!self.not_affected && (self.no_fix || !self.past_last))
+        self.affected || (!self.not_affected && !self.fixed_in_commit && (self.no_fix || !self.past_last))
     }
 
     /// Whether a source places the version inside an affected range (as
@@ -247,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_precise_source_decides_against_one_that_says_every_version() {
-        use Verdict::{Affected, NoFix, NotAffected, PastLastAffected, Unknown};
+        use Verdict::{Affected, FixedInCommit, NoFix, NotAffected, PastLastAffected, Unknown};
         let together = |verdicts: &[Verdict]| {
             let mut all = Verdicts::default();
             verdicts.iter().for_each(|v| all.add(*v));
@@ -262,6 +281,9 @@ mod tests {
         assert!(!together(&[PastLastAffected]) && !together(&[PastLastAffected, Unknown]));
         assert!(together(&[PastLastAffected, NoFix]));
         assert!(!together(&[PastLastAffected, NoFix, NotAffected]));
+        // A fix named as a commit: taken as fixed, unless a source places the version in a range
+        assert!(!together(&[FixedInCommit]) && !together(&[FixedInCommit, NoFix]) && !together(&[FixedInCommit, PastLastAffected, Unknown]));
+        assert!(together(&[FixedInCommit, Affected]));
     }
 
     #[test]
@@ -285,6 +307,16 @@ mod tests {
         assert_eq!(exact("5.16.9", "5.16rc1"), Verdict::NotAffected);
         assert_eq!(exact("5.16-rc1", "5.16rc1"), Verdict::Affected);
         assert_eq!(exact("5.16.9", "5.16"), Verdict::Affected);
+    }
+
+    #[test]
+    fn a_go_pseudo_version_is_not_a_version() {
+        for pseudo in ["1.0.1-20260311144920-9eb2d33064b7", "v0.0.0-20240102030405-abcdef012345", "2.3.1-0.20240102030405-abcdef012345", "1.2.0-rc1.0.20240102030405-abcdef012345"] {
+            assert!(is_go_pseudo_version(pseudo.trim_start_matches('v')) && !is_version(pseudo), "{pseudo}");
+        }
+        for version in ["1.0.1", "3.0.0-beta5", "2020-12-14", "1.2.3-4", "1.0.1-20260311"] {
+            assert!(is_version(version), "{version}");
+        }
     }
 
     #[test]
