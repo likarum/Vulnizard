@@ -385,8 +385,7 @@ footer.bottom a:hover { color: var(--accent); }
 
 /* ---------- Narrow screens (phones) ----------
    The layout is the desktop one made to fit: navigation on single scrolling
-   lines, forms in one column, and tables that scroll sideways inside their
-   own box instead of widening the page. */
+   lines, forms in one column, and tables shown as one card per row. */
 @media (max-width: 760px) {
   main { padding: 14px 12px 48px; }
   footer.bottom { padding: 14px 12px 24px; }
@@ -423,47 +422,55 @@ footer.bottom a:hover { color: var(--accent); }
   dl.meta { grid-template-columns: 1fr; gap: 0; }
   dl.meta dt { margin-top: 8px; font-size: 13px; }
 
-  /* A table scrolls inside its box; cells keep a readable width */
-  table.list {
-    display: block;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    max-width: 100%;
-  }
-  table.list th, table.list td { padding: 7px 9px; }
-  table.list td { min-width: 5.5em; }
-  table.list td.right, table.list td.nowrap { min-width: 0; }
-
-  /* The triage table becomes one card per CVE: a description squeezed into a
-     narrow column made each row several screens tall */
-  table.triage, table.triage tbody { display: block; overflow: visible; }
-  table.triage thead { display: block; border-bottom: 1px solid var(--border); }
-  table.triage thead tr { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 4px 10px; }
-  table.triage th { border: none; padding: 4px 0; }
-  table.triage th.plain { display: none; }
-  table.triage tbody tr {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 4px 10px;
+  /* A table becomes one card per row: scrolling sideways hid most columns and
+     squeezed long texts into rows several screens tall. Short cells share a
+     line, each one named after its column (data-label, set by filter.js);
+     the header only keeps its sort links. */
+  table.list, table.list tbody { display: block; }
+  table.list thead { display: none; }
+  table.list thead:has(a.sort) { display: block; border-bottom: 1px solid var(--border); }
+  table.list thead tr { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 4px 10px; }
+  table.list th { border: none; padding: 4px 0; }
+  table.list th:not(:has(a.sort)) { display: none; }
+  table.list tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 14px;
     padding: 10px;
     border-bottom: 1px solid var(--border);
   }
-  table.triage tbody tr:last-child { border-bottom: none; }
-  table.triage td, table.triage td.nowrap, table.triage td.right {
+  table.list tbody tr:last-child { border-bottom: none; }
+  table.list td, table.list td.nowrap, table.list td.right {
     display: block;
     min-width: 0;
+    max-width: 100%;
     padding: 0;
     border: none;
     text-align: left;
     white-space: normal;
     overflow-wrap: anywhere;
-    grid-column: 1 / -1;
   }
-  table.triage td.cve { grid-column: 1; font-weight: 600; }
+  table.list td:empty { display: none; }
+  /* The first cell names the row; a cell without a column name (actions) gets its own line */
+  table.list td:first-child { flex-basis: 100%; }
+  table.list td:first-child:not([colspan]) { font-weight: 600; }
+  table.list td:not([data-label]) { flex-basis: 100%; }
+  table.list td[data-label]:not(:first-child)::before {
+    content: attr(data-label) " ";
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
+  }
+
+  /* Triage: the score sits beside the CVE, everything else on its own line */
+  table.triage tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
+  table.triage td { grid-column: 1 / -1; }
+  table.triage td.cve { grid-column: 1; }
   table.triage td.cvss { grid-column: 2; text-align: right; }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
-  table.triage td:empty { display: none; }
   table.triage td.actions { margin-top: 4px; }
+  table.list.triage td[data-label]::before { content: none; }
 
   form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
   form.filters > *, form.row > * { width: 100%; }

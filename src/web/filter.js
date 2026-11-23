@@ -76,8 +76,24 @@
     });
   }
 
+  // On a phone a table is shown as one card per row (app.css): each cell is
+  // given the name of its column, which the header no longer shows there.
+  function label(table) {
+    var names = Array.prototype.map.call(table.querySelectorAll("thead th"), function (th) {
+      return th.textContent.replace(/[\u25B2\u25BC]/g, "").trim();
+    });
+    Array.prototype.forEach.call(table.querySelectorAll("tbody tr"), function (row) {
+      // A row spanning columns (an empty list) has no column to be named after
+      if (row.cells.length !== names.length) return;
+      Array.prototype.forEach.call(row.cells, function (cell, index) {
+        if (names[index]) cell.setAttribute("data-label", names[index]);
+      });
+    });
+  }
+
   function bind() {
     Array.prototype.forEach.call(document.querySelectorAll("main form.filters"), watch);
+    Array.prototype.forEach.call(document.querySelectorAll("main table.list"), label);
   }
 
   bind();

@@ -655,7 +655,7 @@ pub fn triage_table(
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
                     @if show_project { (th(listing, "project", "Project")) }
-                    th.plain { "Description" } th.plain {}
+                    th { "Description" } th {}
                 }
             }
             tbody {
