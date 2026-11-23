@@ -372,6 +372,35 @@ th a.sort .arrow { color: var(--accent); }
 
 div.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
 
+/* "+" button opening an add form. A details element: it opens without
+   JavaScript. Open, it becomes the card holding the form. */
+details.add { margin-bottom: 16px; }
+details.add summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 14px 6px 10px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+details.add summary::-webkit-details-marker { display: none; }
+details.add .plus { font-size: 20px; font-weight: 700; line-height: 1; }
+/* The same sign closes the form: a plus turned into a cross */
+details.add[open] .plus { transform: rotate(45deg); }
+details.add[open] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+details.add[open] summary { margin-bottom: 14px; }
+details.add form.stack { margin-bottom: 12px; }
+details.add p:last-child { margin-bottom: 0; }
+
 /* History: which day is shown, and the ways to change it */
 .timetravel { border-left: 3px solid var(--accent); }
 .timetravel.past { border-left-color: #d98a10; }
@@ -498,7 +527,7 @@ footer.bottom a:hover { color: var(--accent); }
   fieldset label { display: flex; margin: 4px 0; }
   td form.inline { display: inline-flex; flex-wrap: wrap; gap: 4px; }
   input, select, textarea { max-width: 100%; }
-  input, select, button, a.button { min-height: 36px; }
+  input, select, button, a.button, details.add summary { min-height: 36px; }
   button.small { min-height: 30px; }
   .pager { justify-content: space-between; }
   .head { align-items: flex-start; }

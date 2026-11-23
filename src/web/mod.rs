@@ -562,6 +562,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/watchlist/{entry_id}",
             post(projects::watchlist_status),
         )
+        .route("/applications", post(projects::application_add_any))
         .route("/orgs/{org}/projects/{project}/applications", post(projects::application_add))
         .route(
             "/orgs/{org}/projects/{project}/applications/{app_id}/version",
@@ -3567,5 +3568,101 @@ mod tests {
         let overview = app.get("/product", Some(&alice)).await.body;
         assert!(overview.contains(&format!("<a href=\"/product?view=history&amp;at={}\">", day(2))));
         assert!(overview.contains("<a href=\"/product?view=history\">History →</a>"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_add_button_offers_only_projects_one_may_manage() {
+        let app = app(open_registration());
+        let owner = app.register("owner").await;
+        let carol = app.register("carol").await;
+        let reader = app.register("reader").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        for project in ["infra", "shop", "vault"] {
+            app.post("/projects", Some(&owner), &format!("org=acme&name={project}")).await;
+        }
+        // Carol edits one project, reads another and does not know of the third; the reader only reads
+        for (project, user, role) in [("infra", "carol", "editor"), ("shop", "carol", "viewer"), ("shop", "reader", "viewer")] {
+            let given = app
+                .post(&format!("/orgs/acme/projects/{project}/members"), Some(&owner), &format!("username={user}&role={role}"))
+                .await;
+            assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let id = |project: &str| db.find_project("acme", project).unwrap().unwrap();
+        let (infra, shop, vault) = (id("infra"), id("shop"), id("vault"));
+        let option = |project_id: i64, name: &str| format!("<option value=\"{project_id}\">{name}</option>");
+
+        for view in ["applications", "subscriptions"] {
+            // With all projects shown, the form asks for the project instead of sending to the menu
+            let all = app.get(&format!("/product?view={view}"), Some(&carol)).await.body;
+            assert!(all.contains("<details class=\"add\"><summary><span class=\"plus\" aria-hidden=\"true\">+</span>Add a"), "{view}");
+            assert!(all.contains("<select name=\"project_id\" required>") && all.contains(&option(infra, "infra")), "{view}");
+            assert!(!all.contains(&option(shop, "shop")) && !all.contains(&option(vault, "vault")), "{view}");
+            assert!(!all.contains("Select a project in the menu to add") && !all.contains("Select a project in the menu to subscribe"), "{view}");
+            // The button comes before the list it adds to
+            assert!(all.find("<details class=\"add\">").unwrap() < all.find("class=\"card notice\"").or(all.find("<table")).unwrap(), "{view}");
+            // In a project the form needs no choice; without the right there is no form at all
+            let one = app.get(&format!("/product/acme/infra?view={view}"), Some(&carol)).await.body;
+            assert!(one.contains("<details class=\"add\">") && !one.contains("<select name=\"project_id\""), "{view}");
+            assert!(one.contains(&format!("<input type=\"hidden\" name=\"project_id\" value=\"{infra}\">")), "{view}");
+            for page in [format!("/product/acme/shop?view={view}"), format!("/product?view={view}")] {
+                let read_only = app.get(&page, Some(&reader)).await.body;
+                assert!(!read_only.contains("<details class=\"add\">") && !read_only.contains("name=\"project_id\""), "{page}");
+                assert!(read_only.contains("takes the owner or editor role"), "{page}");
+            }
+        }
+
+        // A forged form does not add to a project one only reads, nor to one that is not one's own
+        let application = |project_id: i64| format!("project_id={project_id}&name=widget&version=1.0&back=%2Fproduct%3Fview%3Dapplications");
+        let subscription = |project_id: i64| format!("project_id={project_id}&vendor=acme&product=&action=subscribe&back=all");
+        for target in [shop, vault, 999_999] {
+            assert_eq!(app.post("/applications", Some(&carol), &application(target)).await.status, StatusCode::FORBIDDEN, "{target}");
+            assert_eq!(app.post("/subscriptions", Some(&carol), &subscription(target)).await.status, StatusCode::FORBIDDEN, "{target}");
+        }
+        assert_eq!(app.post("/applications", Some(&reader), &application(shop)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.post("/applications", Some(&carol), "name=widget&version=1.0").await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(app.post("/applications", None, &application(infra)).await.location.as_deref(), Some("/login"));
+        for project in [shop, vault] {
+            assert!(db.list_applications(project).unwrap().is_empty() && db.list_subscriptions(project).unwrap().is_empty());
+        }
+
+        // Where she may, the addition is made and she comes back to the page she was on
+        let added = app.post("/applications", Some(&carol), &application(infra)).await;
+        assert_eq!(added.location.as_deref(), Some("/product?view=applications"), "{}", added.body);
+        assert_eq!(db.list_applications(infra).unwrap()[0].name, "widget");
+        assert_eq!(app.post("/applications", Some(&carol), &application(infra)).await.status, StatusCode::BAD_REQUEST);
+        let subscribed = app.post("/subscriptions", Some(&carol), &subscription(infra)).await;
+        assert_eq!(subscribed.location.as_deref(), Some("/product?view=subscriptions"), "{}", subscribed.body);
+        assert_eq!(db.list_subscriptions(infra).unwrap()[0].vendor, "acme");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_subscription_list_says_what_a_subscription_is() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let project_id = Database::connect(&app.db_path).unwrap().find_project("acme", "infra").unwrap().unwrap();
+        for scope in ["/product", "/product/acme/infra"] {
+            let empty = app.get(&format!("{scope}?view=subscriptions"), Some(&alice)).await.body;
+            assert!(empty.contains("No subscription yet."), "{scope}");
+            // What it follows, what it feeds, and how a tracked application differs
+            assert!(empty.contains("follows a vendor, or one product of a vendor, <strong>without a version</strong>"), "{scope}");
+            assert!(empty.contains("daily report of the project and is sent to its notifications"), "{scope}");
+            assert!(empty.contains("It is not a tracked application."), "{scope}");
+            assert!(empty.contains(&format!("<a href=\"{scope}?view=applications\">applications</a>")), "{scope}");
+            assert!(empty.contains(&format!("<a href=\"{scope}?view=vulnerabilities\">vulnerabilities</a>")), "{scope}");
+            // An empty table under the explanation would say it twice
+            assert!(!empty.contains("<table"), "{scope}");
+        }
+        let sub = format!("project_id={project_id}&vendor=acme&product=&action=subscribe&back=project");
+        assert_eq!(app.post("/subscriptions", Some(&alice), &sub).await.location.as_deref(), Some("/product/acme/infra?view=subscriptions"));
+        for scope in ["/product", "/product/acme/infra"] {
+            let listed = app.get(&format!("{scope}?view=subscriptions"), Some(&alice)).await.body;
+            assert!(listed.contains("<table") && !listed.contains("It is not a tracked application."), "{scope}");
+            // A filter that matches nothing is not an empty list
+            let filtered = app.get(&format!("{scope}?view=subscriptions&q=zzz"), Some(&alice)).await.body;
+            assert!(filtered.contains("No subscription matches.") && !filtered.contains("No subscription yet."), "{scope}");
+        }
     }
 }

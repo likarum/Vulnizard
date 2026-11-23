@@ -68,6 +68,16 @@ impl Scope {
             .is_some_and(|r| r.allows(permission))
     }
 
+    /// Projects an addition made from this page may go to: the selected one,
+    /// or at the `*` scope every project the user may manage
+    fn manageable(&self) -> Vec<&ProjectSummary> {
+        self.summaries
+            .iter()
+            .filter(|p| self.project_id().is_none_or(|id| p.id == id))
+            .filter(|p| Role::parse(&p.role).is_some_and(|r| r.allows(Permission::ManageProjects)))
+            .collect()
+    }
+
     /// Color slot of each project: by creation order, so a project keeps its
     /// color whatever the filter or the ranking.
     fn slots(&self) -> HashMap<i64, usize> {
@@ -478,6 +488,53 @@ fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuer
 // Applications & subscriptions
 // ==========================================
 
+/// "+" button at the top of a view, opening the form that adds to it. A
+/// `details` element: it opens without JavaScript.
+fn add_button(label: &str, form: Markup) -> Markup {
+    html! {
+        details.add {
+            summary { span.plus aria-hidden="true" { "+" } (label) }
+            (form)
+        }
+    }
+}
+
+/// Project an addition goes to: the selected one, or at the `*` scope a
+/// choice among those the user may manage. The server checks the right again
+/// on the project it receives.
+fn project_field(scope: &Scope, projects: &[&ProjectSummary]) -> Markup {
+    let several_orgs = projects.iter().any(|p| Some(&p.org) != projects.first().map(|first| &first.org));
+    html! {
+        @if let Some(id) = scope.project_id() {
+            input type="hidden" name="project_id" value=(id);
+        } @else {
+            label {
+                "Project"
+                select name="project_id" required {
+                    @for p in projects {
+                        option value=(p.id) { (p.name) @if several_orgs { " · " (p.org) } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Said in place of the "+" button to who cannot add anything
+fn cannot_add(scope: &Scope, what: &str) -> Markup {
+    html! {
+        p.muted {
+            @if scope.summaries.is_empty() {
+                a href="/projects" { "Create a project" } " to add " (what) "."
+            } @else if scope.all() {
+                "Adding " (what) " takes the owner or editor role, which you hold in none of your projects."
+            } @else {
+                "Adding " (what) " takes the owner or editor role in this project."
+            }
+        }
+    }
+}
+
 fn applications(
     db: &Database,
     st: &super::AppState,
@@ -509,8 +566,35 @@ fn applications(
     );
     let manage = scope.can(Permission::ManageProjects);
     let back = current_path();
+    let targets = scope.manageable();
     Ok(html! {
         p.muted { "Applications you run, with the deployed version. They are rescanned after every sync; changing the version closes the CVEs it fixes." }
+        @if targets.is_empty() { (cannot_add(scope, "applications")) } @else {
+            (add_button("Add an application", html! {
+                form.stack method="post" action="/applications" {
+                    input type="hidden" name="back" value=(back);
+                    (project_field(scope, &targets))
+                    label { "Product" input type="text" name="name" placeholder="e.g. vaultwarden" maxlength="100" required; }
+                    label { "Version" input type="text" name="version" placeholder="e.g. 1.37.4" maxlength="64"; }
+                    label { "Vendor (optional)" input type="text" name="vendor" placeholder="e.g. openbsd" maxlength="100"; }
+                    label {
+                        "Package ecosystem (optional)"
+                        select name="ecosystem" title="Package ecosystem, to also match the advisories of its package" {
+                            option value="" { "no package ecosystem" }
+                            @for ecosystem in crate::db::watchlist::PACKAGE_ECOSYSTEMS { option value=(ecosystem) { (ecosystem) } }
+                        }
+                    }
+                    button type="submit" { "Add and scan" }
+                }
+                p.muted {
+                    "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
+                    " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it; " code { "sudo" } " also stands for " code { "sudo_project" } "), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
+                    "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
+                    "which is the only way to follow software the NVD does not describe. "
+                    "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
+                }
+            }))
+        }
         (listing.filter_box("Filter: application, version, group, source…", apps.len(), total))
         @if !show_quiet {
             p.muted {
@@ -572,28 +656,8 @@ fn applications(
                 @if apps.is_empty() { tr { td colspan="7" .muted { "No application tracked yet." } } }
             }
         }
-        @if let (true, Some((org, project))) = (manage, scope.names()) {
-            h2 { "Add an application" }
-            form.row method="post" action={ "/orgs/" (enc(org)) "/projects/" (enc(project)) "/applications" } {
-                input type="hidden" name="back" value=(back);
-                input type="text" name="name" placeholder="product, e.g. vaultwarden" maxlength="100" required;
-                input type="text" name="version" placeholder="version, e.g. 1.37.4" maxlength="64";
-                input type="text" name="vendor" placeholder="vendor (optional)" maxlength="100";
-                select name="ecosystem" title="Package ecosystem, to also match the advisories of its package" {
-                    option value="" { "no package ecosystem" }
-                    @for ecosystem in crate::db::watchlist::PACKAGE_ECOSYSTEMS { option value=(ecosystem) { (ecosystem) } }
-                }
-                button type="submit" { "Add and scan" }
-            }
-            p.muted {
-                "Use the product and vendor names of the " a href="/vendors" { "CVE database" }
-                " (e.g. product " code { "openssh" } ", vendor " code { "openbsd" } "): the product is matched exactly, case and separators aside. With a vendor (written as the CVE database writes it; " code { "sudo" } " also stands for " code { "sudo_project" } "), only its products are matched, including those named after the application (" code { "nginx_open_source" } " for " code { "nginx" } "). "
-                "A package ecosystem also matches the advisories published for the package of that name (Go module, npm or PyPI package, crate, Maven artifact), "
-                "which is the only way to follow software the NVD does not describe. "
-                "An application marked " em { "unknown to the sources" } " has no CVE recorded under its name at any version."
-            }
-        } @else if scope.all() {
-            p.muted { "Select a project in the menu to add, update or remove applications, and to connect an inventory source." }
+        @if scope.all() {
+            p.muted { "Select a project in the menu to update or remove applications, and to connect an inventory source." }
         }
         @if let Some((org, project)) = &scope.project {
             (super::inventory::project_section(db, st, org, project, q.show.as_deref(), q.new.as_deref())?)
@@ -616,8 +680,44 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
         },
     );
     let manage = scope.can(Permission::ManageProjects);
+    let targets = scope.manageable();
     Ok(html! {
         p.muted { "Every change on a CVE of these vendors or products is recorded in the project's history and sent to its notifications." }
+        @if targets.is_empty() { (cannot_add(scope, "subscriptions")) } @else {
+            (add_button("Add a subscription", html! {
+                form.stack method="post" action="/subscriptions" {
+                    input type="hidden" name="action" value="subscribe";
+                    // Back to the page the form is on, at the scope it was opened from
+                    input type="hidden" name="back" value=(if scope.all() { "all" } else { "project" });
+                    (project_field(scope, &targets))
+                    label { "Vendor" input type="text" name="vendor" placeholder="e.g. openbsd" maxlength="200" required; }
+                    label { "Product (empty: every product of the vendor)" input type="text" name="product" placeholder="e.g. openssh" maxlength="200"; }
+                    button type="submit" { "Subscribe" }
+                }
+                p.muted {
+                    "Names must match the CVE database exactly. Easier: "
+                    a href={ "/vendors" @if let Some(id) = scope.project_id() { "?project=" (id) } } { "browse vendors and products" }
+                    " and subscribe from there."
+                }
+            }))
+        }
+        @if total == 0 {
+            // An empty list read as a failure: say what belongs here, and what does not
+            div.card.notice {
+                p { strong { "No subscription yet." } }
+                p {
+                    "A subscription follows a vendor, or one product of a vendor, " strong { "without a version" }
+                    ": every change on one of its CVEs goes into the daily report of the project and is sent to its notifications."
+                }
+                p {
+                    "It is not a tracked application. An " a href=(scope.url("applications")) { "application" }
+                    " has a name and a " strong { "version" } ": it is matched against the CVEs affecting that version, and feeds the list of "
+                    a href=(scope.url("vulnerabilities")) { "vulnerabilities" } " to decide on. To know what affects what you run, add it to the "
+                    a href=(scope.url("applications")) { "applications" } "; subscribe to be told of everything published about a vendor or a product."
+                }
+                @if !targets.is_empty() { p.muted { "Use the “+ Add a subscription” button above to subscribe." } }
+            }
+        } @else {
         (listing.filter_box("Filter: vendor, product…", subs.len(), total))
         table.list {
             thead {
@@ -651,25 +751,12 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
                         }
                     }
                 }
-                @if subs.is_empty() { tr { td colspan="4" .muted { "No subscription yet." } } }
+                @if subs.is_empty() { tr { td colspan="4" .muted { "No subscription matches." } } }
             }
         }
-        @if let (true, Some(id)) = (manage, scope.project_id()) {
-            h2 { "Subscribe" }
-            form.row method="post" action="/subscriptions" {
-                input type="hidden" name="project_id" value=(id);
-                input type="hidden" name="action" value="subscribe";
-                input type="hidden" name="back" value="project";
-                input type="text" name="vendor" placeholder="vendor, e.g. openbsd" maxlength="200" required;
-                input type="text" name="product" placeholder="product (empty = all)" maxlength="200";
-                button type="submit" { "Subscribe" }
-            }
-            p.muted {
-                "Names must match the CVE database exactly. Easier: "
-                a href={ "/vendors?project=" (id) } { "browse vendors and products" } " and subscribe from there."
-            }
-        } @else if scope.all() {
-            p.muted { "Select a project in the menu to subscribe or unsubscribe." }
+        }
+        @if scope.all() && total > 0 {
+            p.muted { "Select a project in the menu to unsubscribe." }
         }
     })
 }

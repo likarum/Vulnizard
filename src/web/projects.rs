@@ -200,6 +200,9 @@ pub async fn watchlist_status(
 
 #[derive(Deserialize)]
 pub struct ApplicationForm {
+    /// Project chosen in the form; the address naming a project does not use it
+    #[serde(default)]
+    project_id: Option<i64>,
     name: String,
     #[serde(default)]
     version: String,
@@ -209,6 +212,32 @@ pub struct ApplicationForm {
     ecosystem: String,
     #[serde(default)]
     back: String,
+}
+
+/// Tracks an application in a project. The caller has checked the right on it.
+fn add_application(db: &Database, project_id: i64, form: &ApplicationForm) -> Result<(), AppError> {
+    let name = form.name.trim();
+    if name.is_empty() || name.len() > 100 || form.version.len() > 64 || form.vendor.len() > 100 {
+        return Err(AppError::Bad("Invalid application name, version or vendor.".into()));
+    }
+    let mut app = Application::new(project_id, name.to_string());
+    app.version = Some(form.version.trim().to_string()).filter(|v| !v.is_empty());
+    app.vendor = Some(form.vendor.trim().to_string()).filter(|v| !v.is_empty());
+    if !form.ecosystem.is_empty() && !crate::db::watchlist::PACKAGE_ECOSYSTEMS.contains(&form.ecosystem.as_str()) {
+        return Err(AppError::Bad("Unknown package ecosystem.".into()));
+    }
+    app.ecosystem = Some(form.ecosystem.clone()).filter(|e| !e.is_empty());
+    if db
+        .get_application_by_name(project_id, &app.name, app.version.as_deref())?
+        .is_some()
+    {
+        return Err(AppError::Bad("This application is already tracked with this version.".into()));
+    }
+    if !crate::db::watchlist::is_matchable_name(&app.name) {
+        return Err(AppError::Bad("The application name needs at least two letters or digits.".into()));
+    }
+    db.add_application_scanned(&mut app)?;
+    Ok(())
 }
 
 pub async fn application_add(
@@ -221,31 +250,30 @@ pub async fn application_add(
         let db = st.db()?;
         let (org, project) = load_project(&db, &user, &org, &project)?;
         require(&org, Permission::ManageProjects)?;
-        let name = form.name.trim();
-        if name.is_empty() || name.len() > 100 || form.version.len() > 64 || form.vendor.len() > 100 {
-            return Err(AppError::Bad("Invalid application name, version or vendor.".into()));
-        }
-        let mut app = Application::new(project.id, name.to_string());
-        app.version = Some(form.version.trim().to_string()).filter(|v| !v.is_empty());
-        app.vendor = Some(form.vendor.trim().to_string()).filter(|v| !v.is_empty());
-        if !form.ecosystem.is_empty() && !crate::db::watchlist::PACKAGE_ECOSYSTEMS.contains(&form.ecosystem.as_str()) {
-            return Err(AppError::Bad("Unknown package ecosystem.".into()));
-        }
-        app.ecosystem = Some(form.ecosystem.clone()).filter(|e| !e.is_empty());
-        if db
-            .get_application_by_name(project.id, &app.name, app.version.as_deref())?
-            .is_some()
-        {
-            return Err(AppError::Bad("This application is already tracked with this version.".into()));
-        }
-        if !crate::db::watchlist::is_matchable_name(&app.name) {
-            return Err(AppError::Bad("The application name needs at least two letters or digits.".into()));
-        }
-        db.add_application_scanned(&mut app)?;
+        add_application(&db, project.id, &form)?;
         Ok(redirect(back_or(
             &form.back,
             product_url(Some((&org.name, &project.name)), "applications"),
         )))
+    })
+}
+
+/// Same, the project being chosen in the form (the "+" button of the
+/// applications view, which also exists with all projects shown). The form
+/// only offers projects the user may manage, but a form can be forged: the
+/// right is checked on the project received.
+pub async fn application_add_any(State(st): St, User(user): User, Form(form): Form<ApplicationForm>) -> ActionResult {
+    blocking(|| {
+        let db = st.db()?;
+        let project_id = form.project_id.ok_or_else(|| AppError::Bad("Choose a project.".into()))?;
+        let allowed = db
+            .project_role(user.id, project_id)?
+            .is_some_and(|role| role.allows(Permission::ManageProjects));
+        if !allowed {
+            return Err(AppError::Forbidden);
+        }
+        add_application(&db, project_id, &form)?;
+        Ok(redirect(back_or(&form.back, product_url(None, "applications"))))
     })
 }
 

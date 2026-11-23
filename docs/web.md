@@ -37,7 +37,11 @@ database was last synchronized (administrators can start a sync from there):
     An application marked *unknown to the sources* has no CVE recorded under its name at any
     version, which is not the same as having none at its version. Then the **inventory sources** of the project and the checklist of
     what they discovered (see *Collecting what is deployed*)
-  - *Subscriptions*: vendors or products whose every CVE change you follow
+  - *Subscriptions*: vendors or products whose every CVE change you follow, without a version:
+    the changes go into the daily reports and the notifications. An application, with its
+    version, feeds the list of vulnerabilities instead
+  - Applications and subscriptions are added with the **+** button at the top of their view. With
+    all projects shown, the form asks for the project, among those you may manage
   - *History*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
     state of every tracked CVE **at any past date**: click a day in a chart, or pick it in the
     date field. A past state is marked as such, with a link back to today
