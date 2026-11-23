@@ -3,6 +3,23 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.5
+
+### Changed
+
+- MCP: the answers of every tool are written as compact JSON instead of indented JSON. Same
+  content, about a quarter lighter: a default page of `list_watchlist` was still heavy for a
+  client.
+
+### Fixed
+
+- MCP: a `limit` or an `offset` out of bounds on `list_watchlist` and `get_audit_log` is
+  refused, with the bounds in the message. It was silently brought back within them
+  (`limit: 0` gave one item, `limit: 501` gave 500), so the caller believed it got what it
+  asked for.
+- MCP: the `application` filter of `list_watchlist` matches the name whatever its case
+  (`Tinyauth` found nothing for `tinyauth`).
+
 ## 0.2.4
 
 ### Changed
