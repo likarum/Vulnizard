@@ -21,6 +21,16 @@ pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
     ("audit", "Audit"),
 ];
 
+/// Color themes, in the order of the menu: (key, label). The first one is the
+/// default. Each has a day and a night palette in `app.css`.
+pub const THEMES: [(&str, &str); 5] = [
+    ("classic", "Classic"),
+    ("forest", "Forest"),
+    ("plum", "Plum"),
+    ("sand", "Sand"),
+    ("contrast", "High contrast"),
+];
+
 /// Where the page sits in the navigation
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Nav<'a> {
@@ -172,6 +182,22 @@ fn project_menu(ctx: &PageContext, scope: Option<(&str, &str)>, view: &str) -> M
     }
 }
 
+/// Theme menu and day/night button. The choice lives in the browser, so the
+/// two are driven by theme.js and hidden by the stylesheet where it does not run.
+fn theme_controls() -> Markup {
+    html! {
+        div.theme {
+            select data-theme-choice aria-label="Color theme" title="Color theme" autocomplete="off" {
+                @for (key, label) in THEMES { option value=(key) { (label) } }
+            }
+            button.secondary type="button" data-mode-toggle title="Switch between day and night colors" {
+                span.to-night { "☾ Night" }
+                span.to-day { "☀ Day" }
+            }
+        }
+    }
+}
+
 pub fn layout(nav: Nav, title: &str, user: Option<&Account>, body: Markup) -> Markup {
     layout_refreshing(nav, title, user, None, body)
 }
@@ -198,6 +224,8 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                 title { (title) " · Vulnizard" }
                 link rel="stylesheet" href="/static/app.css";
                 link rel="icon" type="image/svg+xml" href="/static/logo.svg";
+                // Not deferred: it sets the colors chosen in this browser before anything is drawn
+                script src="/static/theme.js" {}
             }
             body {
                 header.top {
@@ -206,6 +234,7 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                         // Nothing about the instance is shown to who is not signed in
                         @if user.is_some() { (sync_status(&ctx, user)) }
                         div.user {
+                            (theme_controls())
                             @if let Some(u) = user {
                                 @if u.is_admin {
                                     a href="/admin" class=[(nav == Nav::Admin).then_some("active")] { "Admin" }
@@ -741,5 +770,93 @@ mod tests {
         assert_eq!(names(&Listing::parse("/x?q=OPENSS&sort=name&dir=desc", "name", false)), ["OpenSSL", "openssh"]);
         // Unknown column: the caller's order is kept
         assert_eq!(names(&Listing::parse("/x?sort=bogus", "name", false)), ["openssh", "nginx", "mongodb", "OpenSSL"]);
+    }
+
+    /// Variables set by the first rule of the stylesheet with this selector
+    fn variables(css: &str, selector: &str) -> std::collections::BTreeMap<String, String> {
+        let opening = format!("{selector} {{");
+        let start = css
+            .match_indices(&opening)
+            // ":root {" must not be found inside "x:root {"
+            .find(|(at, _)| css[..*at].chars().next_back().is_none_or(char::is_whitespace))
+            .unwrap_or_else(|| panic!("no rule {selector}"))
+            .0;
+        let body = css[start + opening.len()..].split('}').next().unwrap();
+        body.split(';')
+            .filter_map(|declaration| declaration.trim().split_once(':'))
+            .filter(|(name, _)| name.starts_with("--"))
+            .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+            .collect()
+    }
+
+    /// Relative luminance of `#rrggbb` (WCAG 2)
+    fn luminance(color: &str) -> f64 {
+        let hex = color.strip_prefix('#').filter(|h| h.len() == 6).unwrap_or_else(|| panic!("not #rrggbb: {color}"));
+        let channel = |i: usize| {
+            let c = u8::from_str_radix(&hex[i..i + 2], 16).unwrap() as f64 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4)
+    }
+
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn every_theme_keeps_text_badges_and_dots_readable_by_day_and_by_night() {
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let css = comments.replace_all(STYLESHEET, "").into_owned();
+        let day = variables(&css, ":root");
+        let night = variables(&css, ":root[data-mode=\"dark\"]");
+        // Night is written twice (system setting without script, button): the two must not drift apart
+        assert_eq!(night, variables(&css, ":root:not([data-mode=\"light\"])"));
+        assert!(night.len() > 15 && night.keys().all(|name| day.contains_key(name)));
+
+        // Text on its background: 4.5 (WCAG AA, normal size)
+        let text_pairs = [
+            ("--text", "--bg"), ("--text", "--surface"), ("--muted", "--bg"), ("--muted", "--surface"),
+            ("--accent", "--bg"), ("--accent", "--surface"), ("--danger", "--bg"), ("--danger", "--surface"),
+            ("--on-accent", "--accent"), ("--on-danger", "--danger"),
+            ("--text", "--tag-bg"), ("--text", "--added"), ("--text", "--removed"),
+            ("--accent", "--product-wash"), ("--text", "--product-wash"),
+            ("--info-ink", "--info-bg"), ("--info-ink", "--info-wash"), ("--text", "--info-bg"), ("--text", "--info-wash"),
+            ("--badge-critical-ink", "--badge-critical"), ("--badge-high-ink", "--badge-high"),
+            ("--badge-medium-ink", "--badge-medium"), ("--badge-low-ink", "--badge-low"),
+        ];
+        // A dot or a mark told from what is around it: 3 (WCAG, graphical objects)
+        let mark_pairs = [
+            ("--ok", "--surface"), ("--busy", "--surface"), ("--neutral", "--surface"), ("--danger", "--surface"),
+            ("--warn", "--surface"), ("--accent", "--surface"),
+        ];
+        let mut failures = Vec::new();
+        for (theme, _) in THEMES {
+            for mode in ["light", "dark"] {
+                let mut palette = day.clone();
+                if mode == "dark" {
+                    palette.extend(night.clone());
+                }
+                if theme != THEMES[0].0 {
+                    let own = variables(&css, &format!(":root[data-theme=\"{theme}\"][data-mode=\"{mode}\"]"));
+                    assert!(own.keys().all(|name| day.contains_key(name)), "{theme} {mode} sets an unknown variable");
+                    assert!(own.len() >= 6, "{theme} {mode}");
+                    palette.extend(own);
+                }
+                let pairs = text_pairs.iter().map(|p| (p, 4.5)).chain(mark_pairs.iter().map(|p| (p, 3.0)));
+                for ((ink, ground), required) in pairs {
+                    let ratio = contrast(&palette[*ink], &palette[*ground]);
+                    // Shown with --nocapture: the figures of the whole grid
+                    println!("{theme:9} {mode:5} {ink:20} on {ground:16} {ratio:5.2} (min {required})");
+                    if ratio < required {
+                        failures.push(format!("{theme} {mode}: {ink} on {ground} is {ratio:.2}, below {required}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        // The measure itself: black on white is 21, and a known pair
+        assert!((contrast("#000000", "#ffffff") - 21.0).abs() < 0.01);
+        assert!((contrast("#767676", "#ffffff") - 4.54).abs() < 0.01);
     }
 }

@@ -843,6 +843,16 @@ pub async fn filter_script() -> impl IntoResponse {
     )
 }
 
+pub async fn theme_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        include_str!("theme.js"),
+    )
+}
+
 pub async fn login_form(State(st): St) -> ActionResult {
     blocking(|| {
         // Nobody can sign in to an instance without accounts: it is set up first

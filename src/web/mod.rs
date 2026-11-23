@@ -642,6 +642,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/settings/mfa/passkeys/{id}/delete", post(mfa::passkey_delete))
         .route("/static/mfa.js", get(mfa::script))
         .route("/static/filter.js", get(pages::filter_script))
+        .route("/static/theme.js", get(pages::theme_script))
         .route("/login/passkey/start", post(mfa::passwordless_start))
         .route("/login/passkey/finish", post(mfa::passwordless_finish))
         .route("/orgs/{org}/mfa", post(mfa::org_requirement))
@@ -819,6 +820,7 @@ mod tests {
         /// Every cookie set by the response (`name=value`)
         cookies: Vec<String>,
         cache: Option<String>,
+        csp: Option<String>,
         body: String,
     }
 
@@ -835,11 +837,12 @@ mod tests {
                 .filter_map(|v| v.to_str().ok())
                 .map(|c| c.split(';').next().unwrap_or("").to_string())
                 .collect();
-            let (status, location, cookie, cache) = (
+            let (status, location, cookie, cache, csp) = (
                 resp.status(),
                 header(header::LOCATION),
                 header(header::SET_COOKIE).map(|c| c.split(';').next().unwrap().to_string()),
                 header(header::CACHE_CONTROL),
+                header(header::CONTENT_SECURITY_POLICY),
             );
             let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             Reply {
@@ -848,6 +851,7 @@ mod tests {
                 cookie,
                 cookies,
                 cache,
+                csp,
                 body: String::from_utf8_lossy(&bytes).into_owned(),
             }
         }
@@ -1122,8 +1126,11 @@ mod tests {
         // The overview draws its charts without any inline style or script
         let overview = app.get("/product", Some(&editor)).await.body;
         assert!(overview.contains("<svg") && overview.contains("stroke-p0"));
-        // No inline style or script: the only script is the external one of the live filters
-        assert!(!overview.contains("style=") && overview.replace("<script src=\"/static/filter.js\" defer></script>", "").matches("<script").count() == 0);
+        // No inline style or script: the only scripts are the external ones of the theme and of the live filters
+        let without_files = overview
+            .replace("<script src=\"/static/theme.js\"></script>", "")
+            .replace("<script src=\"/static/filter.js\" defer></script>", "");
+        assert!(!overview.contains("style=") && without_files.matches("<script").count() == 0);
 
         // Triage: viewer refused, editor allowed, entry scoped to its project
         let triage = format!("{base}/watchlist/{entry}");
@@ -2894,7 +2901,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 18] = [
+    const PUBLIC_ROUTES: [&str; 19] = [
         "/login",
         "/register",
         "/setup",
@@ -2910,6 +2917,7 @@ mod tests {
         "/static/logo.svg",
         "/static/mfa.js",
         "/static/filter.js",
+        "/static/theme.js",
         "/static/push.js",
         "/sw.js",
         "/favicon.ico",
@@ -3664,5 +3672,46 @@ mod tests {
             let filtered = app.get(&format!("{scope}?view=subscriptions&q=zzz"), Some(&alice)).await.body;
             assert!(filtered.contains("No subscription matches.") && !filtered.contains("No subscription yet."), "{scope}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_page_offers_the_themes_without_loosening_the_policy() {
+        let app = app(open_registration());
+        let login = app.get("/setup", None).await;
+        let alice = app.register("alice").await;
+        let home = app.get("/product", Some(&alice)).await;
+        for page in [&login, &home] {
+            // The script that applies the choice comes before the body, and is a file
+            let head = page.body.split("</head>").next().unwrap();
+            assert!(head.contains("<script src=\"/static/theme.js\"></script>"));
+            // The menu lists every theme, and the button says both ways
+            assert!(page.body.contains("<select data-theme-choice aria-label=\"Color theme\""));
+            for (key, label) in views::THEMES {
+                assert!(page.body.contains(&format!("<option value=\"{key}\">{label}</option>")), "{key}");
+            }
+            assert!(page.body.contains("<button class=\"secondary\" type=\"button\" data-mode-toggle"));
+            assert!(page.body.contains("☾ Night") && page.body.contains("☀ Day"));
+            // Nothing inline: no script body, no handler, no style attribute
+            assert_eq!(page.body.matches("<script").count(), 2);
+            assert_eq!(page.body.matches("<script src=\"/static/").count(), 2);
+            for inline in [" onclick=", " onchange=", " onload=", " style=", "<style", "javascript:"] {
+                assert!(!page.body.contains(inline), "{inline}");
+            }
+            // The policy is the one of before the themes, word for word
+            assert_eq!(
+                page.csp.as_deref(),
+                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+            );
+        }
+        // The script is served like the others, and holds what the page relies on
+        let script = app.get("/static/theme.js", None).await;
+        assert_eq!(script.status, StatusCode::OK);
+        assert!(script.cache.unwrap().contains("max-age"));
+        assert!(script.body.contains("prefers-color-scheme: dark") && script.body.contains("localStorage"));
+        assert!(script.body.contains("data-theme-choice") && script.body.contains("data-mode-toggle"));
+        // Without the script the controls are hidden, and the system setting still picks day or night
+        let css = app.get("/static/app.css", None).await.body;
+        assert!(css.contains(".theme { display: none;") && css.contains(".js .theme { display: flex; }"));
+        assert!(css.contains("@media (prefers-color-scheme: dark) {\n  :root:not([data-mode=\"light\"]) {"));
     }
 }

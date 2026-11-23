@@ -63,9 +63,16 @@ database was last synchronized (administrators can start a sync from there):
   `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
 Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin
-files: browser notifications (Web Push), passkeys, and filters that apply while typing. Every list
-can be sorted (click a column header, click again to reverse) and filtered with its search box;
-everything works without JavaScript except notifications and passkeys.
+files: browser notifications (Web Push), passkeys, filters that apply while typing, and the
+color theme. Every list can be sorted (click a column header, click again to reverse) and
+filtered with its search box; everything works without JavaScript except notifications, passkeys
+and the choice of a theme.
+
+The header has a menu of **color themes** (Classic, Forest, Plum, Sand, High contrast) and a
+**day / night** button. The choice is kept in the browser, not in the account: another browser
+starts from the default. Until the button is used, day or night follows the system setting, and
+keeps following it; without JavaScript the page is Classic and follows the system setting too.
+Severity badges and marks keep the same colors in every theme.
 
 ---
 [← Back to the README](../README.md)
