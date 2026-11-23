@@ -3,6 +3,16 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.4
+
+### Changed
+
+- **On a phone, a table is one card per row.** Below 760 px tables no longer scroll sideways
+  inside their box, which hid most columns and squeezed long texts into rows several screens
+  tall: each row is a card, its short cells on shared lines, each named after its column, and
+  the list to review puts the score beside the CVE. Without JavaScript the cards are shown
+  without the column names. The desktop layout is unchanged.
+
 ## 0.2.3
 
 ### Fixed
