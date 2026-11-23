@@ -298,6 +298,22 @@ pub async fn users(
 
                 (listing.filter_box("Filter: username, email…", accounts.len(), all_accounts.len()))
                 form method="post" action="/admin/users/bulk" {
+                    // Actions on the checked users, right above the list. filter.js greys them out
+                    // while nothing is checked; without it they stay usable and the server refuses
+                    // an empty selection.
+                    div.toolbar data-selection="ids" {
+                        select name="action" aria-label="Action on the selected users" {
+                            option value="assign" { "Give or change a right" }
+                            option value="enable" { "Enable" }
+                            option value="disable" { "Disable" }
+                            option value="grant_admin" { "Make administrator" }
+                            option value="revoke_admin" { "Remove administrator" }
+                        }
+                        (scope_select(&choices, false))
+                        (role_select(true))
+                        button type="submit" { "Apply" }
+                        span.muted.selection-count {}
+                    }
                     table.list {
                         thead {
                             tr {
@@ -330,22 +346,7 @@ pub async fn users(
                             @if accounts.is_empty() { tr { td colspan="8" .muted { "No user matches." } } }
                         }
                     }
-                    div.card {
-                        strong { "For the selected users" }
-                        div.row {
-                            select name="action" {
-                                option value="assign" { "Give or change a right" }
-                                option value="enable" { "Enable" }
-                                option value="disable" { "Disable" }
-                                option value="grant_admin" { "Make administrator" }
-                                option value="revoke_admin" { "Remove administrator" }
-                            }
-                            (scope_select(&choices, false))
-                            (role_select(true))
-                            button type="submit" { "Apply" }
-                        }
-                        p.muted { "The right and the role only apply to “Give or change a right”. Your own account is skipped for status and administrator changes." }
-                    }
+                    p.muted { "The actions above apply to the checked users. The right and the role only apply to “Give or change a right”. Your own account is skipped for status and administrator changes." }
                 }
             },
         ))

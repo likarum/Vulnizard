@@ -3714,4 +3714,45 @@ mod tests {
         assert!(css.contains(".theme { display: none;") && css.contains(".js .theme { display: flex; }"));
         assert!(css.contains("@media (prefers-color-scheme: dark) {\n  :root:not([data-mode=\"light\"]) {"));
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_actions_on_selected_users_are_a_toolbar_above_the_list() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        app.register("dev").await;
+        let page = app.get("/admin/users", Some(&admin)).await.body;
+        // One form holds the toolbar, then the list it acts on; the former title is gone
+        let form = page.split("<form method=\"post\" action=\"/admin/users/bulk\">").nth(1).expect("the bulk form");
+        let form = form.split("</form>").next().unwrap();
+        let toolbar = form.find("<div class=\"toolbar\" data-selection=\"ids\">").expect("the toolbar");
+        assert_eq!(toolbar, 0, "something sits between the form and its toolbar");
+        assert!(toolbar < form.find("<table").unwrap());
+        assert!(!page.contains("For the selected users"));
+        let bar = form.split("<table").next().unwrap();
+        for control in ["<select name=\"action\"", "<select name=\"scope\"", "<select name=\"role\"", "<button type=\"submit\">Apply</button>"] {
+            assert!(bar.contains(control), "{control}");
+        }
+        assert_eq!(form.matches("name=\"ids\"").count(), 2);
+        // Served usable: the script greys the toolbar out, a browser without it must not be locked out
+        assert!(!bar.contains("disabled"));
+        let script = app.get("/static/filter.js", None).await.body;
+        assert!(script.contains("data-selection") && script.contains("control.disabled = checked === 0"));
+
+        // Without a selection the server refuses, whatever the action, and changes nothing
+        let db = Database::connect(&app.db_path).unwrap();
+        let dev = db.get_credentials("dev").unwrap().unwrap().0.id;
+        for action in ["assign", "enable", "disable", "grant_admin", "revoke_admin", ""] {
+            let refused = app.post("/admin/users/bulk", Some(&admin), &format!("action={action}&scope=instance&role=viewer")).await;
+            assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{action}");
+            assert!(refused.body.contains("Select at least one user."), "{action}");
+        }
+        // Ids that are not numbers are no selection either
+        assert_eq!(app.post("/admin/users/bulk", Some(&admin), "action=disable&ids=&ids=x").await.status, StatusCode::BAD_REQUEST);
+        let account = db.list_accounts().unwrap().into_iter().find(|a| a.id == dev).unwrap();
+        assert!(!account.disabled && !account.is_admin && account.instance_role.is_none());
+        // With one, the action applies
+        let applied = app.post("/admin/users/bulk", Some(&admin), &format!("action=disable&ids={dev}")).await;
+        assert_eq!(applied.status, StatusCode::SEE_OTHER, "{}", applied.body);
+        assert!(db.list_accounts().unwrap().into_iter().find(|a| a.id == dev).unwrap().disabled);
+    }
 }
