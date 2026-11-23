@@ -73,7 +73,8 @@ before 1.0, a minor version may change behaviour.
   half an hour without an NVD API key, a few minutes with one, during which the other sources
   wait. It goes on where it stopped if it is interrupted. An instance installed with the former
   default only knew the last six months of the NVD: expect many applications to get their first
-  matches, and notifications for them. `sync.history_months` limits the history again (0, the
+  matches (no notification is sent for them: notifications follow subscriptions, not
+  tracked applications). `sync.history_months` limits the history again (0, the
   new default, reads everything).
 - **An application now matches the product of its exact name** (case and separators aside), no
   longer every product whose name contains it: `nginx` no longer matches `ingress-nginx` or
