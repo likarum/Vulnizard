@@ -167,7 +167,7 @@ pub fn handle(&self, line: &str) -> Option<Value> {
             let _ = db;
             match self.call_tool(name, &args) {
                 Ok(value) => json!({
-                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }],
+                    "content": [{ "type": "text", "text": serde_json::to_string(&value).unwrap_or_default() }],
                     "isError": false,
                 }),
                 Err(e) => {
@@ -435,9 +435,9 @@ fn read_tool_definitions() -> Vec<Value> {
             "List watchlist entries: CVEs tracked per application, with treatment status and priority, and the start of the CVE description (`get_cve` gives it whole). Answers one page (`entries`) with the `total`; ask for the next with `offset`.",
             json!({
                 "project": { "type": "string", "description": "Only this project (name)" },
-                "application": { "type": "string", "description": "Only this application (exact name)" },
+                "application": { "type": "string", "description": "Only this application (its name, whatever the case)" },
                 "status": { "type": "string", "enum": ["untreated", "accepted", "treated", "not_applicable"] },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Entries returned (default 50)" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Entries returned (default 50); refused outside 1 to 500" },
                 "offset": { "type": "integer", "minimum": 0, "description": "Entries skipped (default 0)" },
             }),
             &[],
@@ -462,7 +462,7 @@ fn read_tool_definitions() -> Vec<Value> {
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
                     "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default: accepted risks)" },
                     "event": { "type": "string", "enum": ["status", "detected", "removed", "all"], "description": "Kind of event (default `status`: decisions only). `decision` only filters the decisions" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Events returned (default 100)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Events returned (default 100); refused outside 1 to 500" },
                     "offset": { "type": "integer", "minimum": 0, "description": "Events skipped (default 0)" } }),
             &[],
         ),
@@ -496,11 +496,22 @@ fn read_tool_definitions() -> Vec<Value> {
 /// Characters of a CVE description kept in a list
 const DESCRIPTION_CHARS: usize = 200;
 
-/// Page asked for: `limit` (500 at most) and `offset`
-fn page_of(args: &Value, default: u64) -> (usize, usize) {
-    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(default).clamp(1, 500) as usize;
-    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
-    (limit, offset)
+/// Most items one page holds
+const PAGE_MAX: u64 = 500;
+
+/// Page asked for: `limit` and `offset`. What is out of bounds is refused
+/// rather than brought back within them: the caller would believe it got what
+/// it asked for
+fn page_of(args: &Value, default: u64) -> Result<(usize, usize)> {
+    let limit = match args.get("limit").filter(|v| !v.is_null()) {
+        None => default,
+        Some(v) => v.as_u64().filter(|n| (1..=PAGE_MAX).contains(n)).ok_or_else(|| anyhow!("limit must be an integer from 1 to {PAGE_MAX}"))?,
+    };
+    let offset = match args.get("offset").filter(|v| !v.is_null()) {
+        None => 0,
+        Some(v) => v.as_u64().ok_or_else(|| anyhow!("offset must be an integer, 0 or more"))?,
+    };
+    Ok((limit as usize, offset as usize))
 }
 
 /// Same limits as the web forms
@@ -601,9 +612,14 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
             };
             let mut entries = Vec::new();
             for id in ids {
-                entries.extend(db.list_watchlist_entries(None, Some(id), opt_str(args, "application"), status)?);
+                entries.extend(db.list_watchlist_entries(None, Some(id), None, status)?);
             }
-            let (limit, offset) = page_of(args, 50);
+            // Whatever the case: a name is typed by hand on both sides
+            if let Some(wanted) = opt_str(args, "application") {
+                let wanted = wanted.trim().to_lowercase();
+                entries.retain(|e| e.app_name.to_lowercase() == wanted);
+            }
+            let (limit, offset) = page_of(args, 50)?;
             let total = entries.len();
             // The start of each description is enough to recognise a CVE in a list; `get_cve` has the rest
             let entries: Vec<_> = entries
@@ -659,7 +675,7 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                     if !["status", "detected", "removed", "all"].contains(&kind) {
                         return Err(anyhow!("invalid event '{kind}'"));
                     }
-                    let (limit, offset) = page_of(args, 100);
+                    let (limit, offset) = page_of(args, 100)?;
                     let kept: Vec<_> = events
                         .iter()
                         .rev()
@@ -1024,7 +1040,7 @@ mod tests {
 
         let (is_error, text) = tool_text(&db, "get_cve", json!({ "cve_id": "cve-2024-4242" }));
         assert!(!is_error);
-        assert!(text.contains("\"type\": \"created\""));
+        assert!(text.contains("\"type\":\"created\""));
 
         let (is_error, text) = tool_text(&db, "get_cve", json!({ "cve_id": "CVE-1999-0001" }));
         assert!(is_error);
@@ -1036,7 +1052,7 @@ mod tests {
         assert!(is_error);
         let (is_error, text) = tool_text(&db, "list_projects", json!({}));
         assert!(!is_error);
-        assert!(text.contains("\"org\": \"default\""));
+        assert!(text.contains("\"org\":\"default\""));
     }
 
     #[test]
@@ -1134,13 +1150,13 @@ mod tests {
         let sub = json!({ "org": "default", "project": "io", "vendor": "Dani-Garcia", "product": "vaultwarden" });
         let (err, text) = tool_text(&db, "subscribe", sub.clone());
         assert!(!err, "{text}");
-        assert!(text.contains("\"known_in_catalog\": true"));
+        assert!(text.contains("\"known_in_catalog\":true"));
         let (_, text) = tool_text(&db, "list_projects", json!({}));
         assert!(text.contains("dani-garcia"));
         let (_, text) = tool_text(&db, "search_cves", json!({ "org": "default", "project": "io" }));
         assert!(text.contains("CVE-2024-5000"));
         let (_, text) = tool_text(&db, "subscribe", json!({ "org": "default", "project": "io", "vendor": "nope" }));
-        assert!(text.contains("\"known_in_catalog\": false"));
+        assert!(text.contains("\"known_in_catalog\":false"));
         let (err, _) = tool_text(&db, "unsubscribe", sub);
         assert!(!err);
 
@@ -1148,7 +1164,7 @@ mod tests {
         let old = json!({ "project": "io", "name": "vaultwarden", "vendor": "dani-garcia", "version": "1.20.0" });
         let (err, text) = tool_text(&db, "add_application", old.clone());
         assert!(!err, "{text}");
-        assert!(text.contains("\"matching_cves\": 1"));
+        assert!(text.contains("\"matching_cves\":1"));
         let (err, _) = tool_text(&db, "add_application", old);
         assert!(err);
         let (_, text) = tool_text(&db, "list_watchlist", json!({ "project": "io" }));
@@ -1250,6 +1266,30 @@ mod tests {
         let past = run(&alice_mcp, "list_watchlist", with(json!({ "offset": 1 }))).unwrap();
         assert_eq!((past["total"].as_u64(), past["entries"].as_array().unwrap().len()), (Some(1), 0));
         assert_eq!(run(&alice_mcp, "list_watchlist", with(json!({ "application": "nothing" }))).unwrap()["total"], 0);
+        // The name of an application is matched whatever its case
+        let app_name = listed["entries"][0]["app_name"].as_str().unwrap().to_uppercase();
+        assert_eq!(run(&alice_mcp, "list_watchlist", with(json!({ "application": app_name }))).unwrap()["total"], 1);
+        // A page out of bounds is refused, on both tools; the largest one is not
+        for tool in ["list_watchlist", "get_audit_log"] {
+            for bad in [json!({ "limit": 0 }), json!({ "limit": 501 }), json!({ "limit": "ten" }), json!({ "limit": 1.5 }), json!({ "offset": -1 })] {
+                let refused = run(&alice_mcp, tool, with(bad.clone())).unwrap_err().to_string();
+                assert!(refused.contains("must be an integer"), "{tool} {bad}: {refused}");
+            }
+            assert_eq!(run(&alice_mcp, tool, with(json!({ "limit": 500 }))).unwrap()["limit"], 500);
+        }
+        // A long description is cut in the list, on a character and not inside one; get_cve keeps it whole
+        let long = "é".repeat(DESCRIPTION_CHARS + 50);
+        db.conn().execute("UPDATE cves SET description = ?1 WHERE cve_id = 'CVE-2024-6000'", [&long]).unwrap();
+        let cut = run(&alice_mcp, "list_watchlist", scope.clone()).unwrap()["entries"][0]["cve_description"].as_str().unwrap().to_string();
+        assert_eq!(cut, format!("{}…", "é".repeat(DESCRIPTION_CHARS)));
+        let exact = "é".repeat(DESCRIPTION_CHARS);
+        db.conn().execute("UPDATE cves SET description = ?1 WHERE cve_id = 'CVE-2024-6000'", [&exact]).unwrap();
+        assert_eq!(run(&alice_mcp, "list_watchlist", scope.clone()).unwrap()["entries"][0]["cve_description"], exact);
+        // An application brought by an inventory source says so
+        db.conn().execute("UPDATE applications SET grp = 'servers'", []).unwrap();
+        let brought = run(&alice_mcp, "list_applications", scope.clone()).unwrap();
+        assert_eq!((brought[0]["source"].as_str(), brought[0]["group"].as_str()), (Some("inventory"), Some("servers")));
+        db.conn().execute("UPDATE applications SET grp = ''", []).unwrap();
         let apps = run(&alice_mcp, "list_applications", scope.clone()).unwrap();
         assert_eq!(apps[0]["source"], "manual");
         let status = run(&alice_mcp, "database_status", json!({})).unwrap();
