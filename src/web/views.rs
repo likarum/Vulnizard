@@ -650,7 +650,7 @@ pub fn triage_table(
     actions: impl Fn(&TriageItem) -> Markup,
 ) -> Markup {
     html! {
-        table.list {
+        table.list.triage {
             thead {
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
@@ -661,20 +661,20 @@ pub fn triage_table(
             tbody {
                 @for item in items {
                     tr {
-                        td.nowrap {
+                        td.nowrap.cve {
                             a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                             @if item.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
                             @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                         }
-                        td.nowrap { (cvss_badge(item.cvss)) }
-                        td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
+                        td.nowrap.cvss { (cvss_badge(item.cvss)) }
+                        td.nowrap.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
                         @if show_project {
-                            td.nowrap {
+                            td.nowrap.project {
                                 a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } { (item.project) }
                             }
                         }
-                        td { (truncate(item.description.as_deref().unwrap_or(""), 160)) }
-                        td.right.nowrap { (actions(item)) }
+                        td.desc { (truncate(item.description.as_deref().unwrap_or(""), 160)) }
+                        td.right.nowrap.actions { (actions(item)) }
                     }
                 }
                 @if items.is_empty() {
