@@ -595,6 +595,10 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
                 db.discard_sync(sync_id)?;
                 println!("  └─ Up to date: synchronized recently (name the source with --source to run it anyway)\n");
             }
+            Ok(sync_result) if sync_result.unchanged => {
+                db.unchanged_sync(sync_id)?;
+                println!("  └─ Unchanged upstream since the last run: nothing downloaded\n");
+            }
             Ok(sync_result) => {
                 db.complete_sync(sync_id, sync_result.added, sync_result.updated)?;
                 if sync_result.errors > 0 {

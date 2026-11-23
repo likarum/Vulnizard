@@ -11,37 +11,35 @@ const EPSS_URL: &str = "https://epss.cyentia.com/epss_scores-current.csv.gz";
 
 pub struct EpssSource {
     client: reqwest::blocking::Client,
+    url: String,
 }
 
 impl EpssSource {
     pub fn new() -> Self {
+        Self::at(EPSS_URL)
+    }
+
+    /// Reads from another address (the tests)
+    pub(super) fn at(url: &str) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self { client, url: url.to_string() }
     }
 
-    fn fetch_scores(&self) -> Result<Vec<EpssScore>> {
+    /// The scores, unless the file is the one already read
+    fn fetch_scores(&self, db: &Database, opts: &SyncOptions) -> Result<Option<(Vec<EpssScore>, super::Mark)>> {
         tracing::debug!("Fetching EPSS scores");
+        let Some(download) = super::download_if_changed(&self.client, db, "epss", &self.url, opts)? else {
+            return Ok(None);
+        };
+        let mark = download.mark;
 
-        let response = self
-            .client
-            .get(EPSS_URL)
-            .send()
-            .with_context(|| "Failed to fetch EPSS scores")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "EPSS API returned status {}: {}",
-                response.status(),
-                response.text().unwrap_or_default()
-            );
-        }
-
-        let bytes = response
+        let bytes = download
+            .response
             .bytes()
             .with_context(|| "Failed to read EPSS response")?;
 
@@ -76,7 +74,7 @@ impl EpssSource {
             }
         }
 
-        Ok(scores)
+        Ok(Some((scores, mark)))
     }
 }
 
@@ -104,7 +102,10 @@ impl CveSource for EpssSource {
 
         println!("━━━ EPSS: Fetching exploit prediction scores... ━━━");
 
-        let scores = self.fetch_scores()?;
+        let Some((scores, mark)) = self.fetch_scores(db, opts)? else {
+            println!("  unchanged since the last run");
+            return Ok(SyncResult::unchanged());
+        };
         let total = scores.len();
 
         let pb = ProgressBar::new(total as u64);
@@ -128,6 +129,7 @@ impl CveSource for EpssSource {
 
         pb.finish_with_message(format!("{} EPSS scores processed ✓", total));
 
+        mark.remember(db)?;
         Ok(result)
     }
 }

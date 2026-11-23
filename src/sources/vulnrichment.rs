@@ -34,7 +34,7 @@ impl VulnrichmentSource {
 
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(300))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .default_headers(headers)
             .build()
             .expect("Failed to create HTTP client");

@@ -20,6 +20,7 @@ const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct NucleiSource {
     client: reqwest::blocking::Client,
+    url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,23 +55,28 @@ pub fn parse_index(text: &str) -> BTreeMap<String, String> {
 
 impl NucleiSource {
     pub fn new() -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .user_agent(concat!("vulnizard/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("Failed to create HTTP client");
-        Self { client }
+        Self::at(INDEX_URL)
     }
 
-    fn fetch_index(&self) -> Result<String> {
+    /// Reads from another address (the tests)
+    pub(super) fn at(url: &str) -> Self {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .user_agent(super::USER_AGENT)
+            .build()
+            .expect("Failed to create HTTP client");
+        Self { client, url: url.to_string() }
+    }
+
+    /// The index, unless it is the one already read
+    fn fetch_index(&self, db: &Database, opts: &SyncOptions) -> Result<Option<(String, super::Mark)>> {
         use std::io::Read;
-        let response = self.client.get(INDEX_URL).send().context("Failed to fetch the Nuclei templates index")?;
-        if !response.status().is_success() {
-            anyhow::bail!("the Nuclei templates index returned status {}", response.status());
-        }
+        let Some(download) = super::download_if_changed(&self.client, db, "nuclei", &self.url, opts)? else {
+            return Ok(None);
+        };
         let mut text = String::new();
-        response.take(MAX_INDEX_BYTES).read_to_string(&mut text).context("Failed to read the Nuclei templates index")?;
-        Ok(text)
+        download.response.take(MAX_INDEX_BYTES).read_to_string(&mut text).context("Failed to read the Nuclei templates index")?;
+        Ok(Some((text, download.mark)))
     }
 }
 
@@ -91,7 +97,11 @@ impl CveSource for NucleiSource {
             }
         }
         println!("━━━ Nuclei: Fetching the templates index... ━━━");
-        let templates = parse_index(&self.fetch_index()?);
+        let Some((index, mark)) = self.fetch_index(db, opts)? else {
+            println!("  unchanged since the last run");
+            return Ok(SyncResult::unchanged());
+        };
+        let templates = parse_index(&index);
         if templates.is_empty() {
             anyhow::bail!("the Nuclei templates index holds no CVE template: its format may have changed");
         }
@@ -106,6 +116,7 @@ impl CveSource for NucleiSource {
             }
         }
         println!("  {} CVEs with a Nuclei template ✓", result.added + result.updated);
+        mark.remember(db)?;
         Ok(result)
     }
 }
@@ -156,7 +167,9 @@ not json at all
     #[test]
     #[ignore]
     fn real_nuclei_index_is_read() {
-        let templates = parse_index(&NucleiSource::new().fetch_index().unwrap());
+        let db = Database::open_in_memory().unwrap();
+        let (index, _) = NucleiSource::new().fetch_index(&db, &SyncOptions::new(0)).unwrap().unwrap();
+        let templates = parse_index(&index);
         assert!(templates.len() > 3000, "{}", templates.len());
         assert!(templates.contains_key("CVE-2021-44228"));
     }

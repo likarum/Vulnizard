@@ -845,6 +845,8 @@ pub async fn sources(
                                     } @else if let Some(r) = run {
                                         @if r.status == "completed" {
                                             span.status { span.dot {} (r.added) " added, " (r.updated) " updated" }
+                                        } @else if r.status == "unchanged" {
+                                            span.status { span.dot {} "unchanged upstream, nothing downloaded" }
                                         } @else {
                                             span.status { span.dot.never {} span.error { "failed" } }
                                             @if let Some(e) = &r.error { div.muted { (views::truncate(e, 160)) } }

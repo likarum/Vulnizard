@@ -1704,7 +1704,7 @@ mod tests {
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("Not in this release"));
         // The page says how often each source downloads and what, and that "Sync now" does not wait
         let sources = app.get("/admin/sources", Some(&admin)).await.body;
-        for shown in ["at every cycle: only the CVEs changed", "at most every 12 h: the whole archive of five ecosystems", "at most every 6 h", "downloads at once, without waiting"] {
+        for shown in ["at every cycle: only the CVEs changed", "at most every 12 h: only the advisories changed", "at most every 24 h: the whole file of scores", "at most every 6 h", "downloads at once, without waiting"] {
             assert!(sources.contains(shown), "{shown}");
         }
         let requested = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;

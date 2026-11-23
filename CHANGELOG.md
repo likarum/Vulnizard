@@ -5,15 +5,40 @@ before 1.0, a minor version may change behaviour.
 
 ## 0.2.6
 
+The sources are asked for much less. With the default settings an instance downloaded about
+800 MB a day; it now downloads a few hundred kilobytes on an ordinary day.
+
 ### Changed
 
+- **OSV: only the advisories that changed are fetched.** Each of the five ecosystems was
+  downloaded whole every 12 hours (about 290 MB in all). The whole archives are now read
+  once; after that a run reads the top of the list of changed advisories that OSV publishes
+  and fetches those only (a few to a few hundred small files). The archives are read again
+  once a month, when more than 2,000 advisories changed at once, and on `sync --full`.
+  **The first run after the upgrade reads the archives once** (schema v25, automatic).
+- **A file that did not change is not downloaded again.** KEV, EPSS, Exploit-DB, Metasploit,
+  Nuclei and the Debian advisories send back the fingerprint and the date the server gave
+  last time; a server that still has the same file answers with nothing. This holds for
+  "Sync now" too. Such a run shows as "unchanged upstream, nothing downloaded". After an
+  upgrade each file is read once more, since a release may read it differently.
+- EPSS is asked once a day instead of twice: it is published once a day.
 - **The sources page says how often each source downloads, and what.** It said "enabled
-  sources are synchronized at every cycle", which is only true of the NVD. The NVD and
-  Vulnrichment read what changed since the last run; the other sources download a whole file
-  (from 2 MB for the KEV catalog to about 290 MB for OSV) and therefore wait 6 to 24 hours
-  between two downloads, whatever the interval between cycles. Each source now shows its
-  delay and what one download fetches, and the page warns that "Sync now" downloads at once.
-  Nothing changes in what is downloaded or when.
+  sources are synchronized at every cycle", which is only true of the NVD. Each source now
+  shows its delay and what one download fetches, and the page warns that "Sync now" does not
+  wait for that delay.
+- The sources announce the real version (`vulnizard/0.2.6`) instead of `vulnizard/0.1`.
+
+### Fixed
+
+- **Withdrawn advisories were still counted.** An advisory that OSV marks as withdrawn kept
+  giving its packages and versions to its CVE. On a real database this removes or corrects
+  about 300 package entries, among them packages wrongly shown as affected in every version.
+- **Packages of another ecosystem were filed under the wrong one.** An advisory that names
+  an npm package and a Maven package was read with the npm archive and both were recorded as
+  npm packages (about 1,500 entries on a real database, some from ecosystems that are not
+  followed at all). Each package is now recorded with its own ecosystem only.
+- An ecosystem of OSV that could not be read no longer passes silently: the run is recorded
+  as failed, names the ecosystem, and the next cycle reads it again from the same point.
 
 ## 0.2.5
 

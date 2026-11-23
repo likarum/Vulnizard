@@ -26,19 +26,20 @@ impl DistrosSource {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(900))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
         Self { client }
     }
 
-    fn fetch(&self, family: &str, url: &str, oldest: u32) -> Result<Vec<DistroAdvisory>> {
-        let response = self.client.get(url).send().with_context(|| format!("cannot fetch the {family} advisories"))?;
-        if !response.status().is_success() {
-            bail!("the {family} advisories answered HTTP {}", response.status());
-        }
+    /// The advisories of a family, unless the export is the one already read
+    fn fetch(&self, db: &Database, opts: &SyncOptions, family: &str, url: &str, oldest: u32) -> Result<Option<(Vec<DistroAdvisory>, super::Mark)>> {
+        let Some(download) = super::download_if_changed(&self.client, db, &format!("distros.{family}"), url, opts)? else {
+            return Ok(None);
+        };
+        let mark = download.mark;
         let mut data = Vec::new();
-        response.take(MAX_EXPORT_BYTES + 1).read_to_end(&mut data)?;
+        download.response.take(MAX_EXPORT_BYTES + 1).read_to_end(&mut data).with_context(|| format!("the {family} advisories were cut"))?;
         if data.len() as u64 > MAX_EXPORT_BYTES {
             bail!("the {family} advisories are larger than expected");
         }
@@ -56,7 +57,7 @@ impl DistrosSource {
             }
             advisories.extend(parse_record(&content, family, oldest));
         }
-        Ok(advisories)
+        Ok(Some((advisories, mark)))
     }
 }
 
@@ -132,12 +133,27 @@ impl CveSource for DistrosSource {
                 }
             }
         }
+        let mut unchanged = 0;
         for (family, url, oldest) in DISTROS {
             println!("━━━ Distributions: fetching {family} advisories ━━━");
-            match self.fetch(family, url, *oldest).and_then(|advisories| db.replace_distro_advisories(family, &advisories)) {
-                Ok(count) => {
+            // An export that is still the one read last time is only worth reading again if what it gave was lost
+            let opts = if db.has_distro_advisories()? { opts.clone() } else { opts.clone().force_full() };
+            let stored = self.fetch(db, &opts, family, url, *oldest).and_then(|fetched| match fetched {
+                Some((advisories, mark)) => {
+                    let count = db.replace_distro_advisories(family, &advisories)?;
+                    mark.remember(db)?;
+                    Ok(Some(count))
+                }
+                None => Ok(None),
+            });
+            match stored {
+                Ok(Some(count)) => {
                     tracing::info!("{family}: {count} advisories");
                     result.updated += count as i64;
+                }
+                Ok(None) => {
+                    println!("  unchanged since the last run");
+                    unchanged += 1;
                 }
                 Err(e) => {
                     tracing::warn!("{family} advisories failed: {e:#}");
@@ -147,6 +163,9 @@ impl CveSource for DistrosSource {
         }
         if result.errors > 0 && result.updated == 0 {
             bail!("no distribution advisories could be fetched");
+        }
+        if unchanged == DISTROS.len() {
+            return Ok(SyncResult::unchanged());
         }
         Ok(result)
     }
@@ -246,7 +265,7 @@ mod tests {
     fn real_debian_export_is_ingested() {
         let db = Database::open_in_memory().unwrap();
         let started = std::time::Instant::now();
-        let advisories = DistrosSource::new().fetch("Debian", DISTROS[0].1, DISTROS[0].2).unwrap();
+        let (advisories, _) = DistrosSource::new().fetch(&db, &SyncOptions::new(0), "Debian", DISTROS[0].1, DISTROS[0].2).unwrap().unwrap();
         println!("parsed {} advisories in {:?}", advisories.len(), started.elapsed());
         let started = std::time::Instant::now();
         db.replace_distro_advisories("Debian", &advisories).unwrap();

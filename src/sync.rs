@@ -62,6 +62,12 @@ pub fn run_sources(
                 db.discard_sync(sync_id)?;
                 tracing::debug!("sync {source}: skipped, synchronized recently");
             }
+            // Asked, and nothing new upstream: nothing was downloaded. It counts for the time
+            // to wait before asking again, and shows as such.
+            Some(Ok(r)) if r.unchanged => {
+                db.unchanged_sync(sync_id)?;
+                tracing::info!("sync {source}: unchanged upstream, nothing downloaded");
+            }
             Some(Ok(r)) => {
                 db.complete_sync(sync_id, r.added, r.updated)?;
                 tracing::info!("sync {}: {} added, {} updated, {} errors", source, r.added, r.updated, r.errors);

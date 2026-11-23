@@ -22,7 +22,7 @@ impl NvdSource {
     pub fn new(api_key: Option<String>) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
 
