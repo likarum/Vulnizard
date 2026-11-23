@@ -12,6 +12,36 @@ before 1.0, a minor version may change behaviour.
   tall: each row is a card, its short cells on shared lines, each named after its column, and
   the list to review puts the score beside the CVE. Without JavaScript the cards are shown
   without the column names. The desktop layout is unchanged.
+- **MCP: `list_watchlist` and `get_audit_log` answer one page.** Both returned everything at
+  once (a few hundred events were more than a client could read) as a bare list. They now
+  return `{ total, offset, limit, entries }` (`events` for the audit log), 50 entries or 100
+  events by default and 500 at most, with `limit` and `offset` to go through the rest; in the
+  list, a CVE description is cut after 200 characters (`get_cve` gives it whole). **A client that
+  read the bare list must read `entries` / `events` instead.** `list_watchlist` can also be
+  limited to one `application`.
+- **MCP: `list_watchlist` names the organization, not an account.** Each entry carried a
+  `username` field holding the account that created the project. It is replaced by
+  `organization`, the organization the project belongs to.
+
+### Added
+
+- MCP: `database_status` gives the `version` of the software and the `schema_version` of the
+  database, so that a client can check an upgrade.
+- MCP: each event of `get_audit_log` carries the `version` of the application and its kind
+  (`event`); with `event: detected`, `removed` or `all` the log also lists the entries a scan
+  added and those that left with their application.
+- MCP: `list_applications` says where each application comes from (`source`: `manual` or
+  `inventory`).
+
+### Fixed
+
+- On a phone, the notification settings of a project were wider than the screen: a list of
+  destinations with a long name, and the group of event checkboxes, made the form as wide as
+  their content. A field no longer widens its form, and each checkbox sits on one line with
+  its text (on a desktop too).
+- A refused call to the API or to MCP over HTTP (401) announced HTTP Basic only. It now
+  announces `Bearer` first, then `Basic`: a token is the way meant for programs, and the only
+  one left once the account has a second factor.
 
 ## 0.2.3
 
@@ -66,7 +96,8 @@ before 1.0, a minor version may change behaviour.
   half an hour without an NVD API key, a few minutes with one, during which the other sources
   wait. It goes on where it stopped if it is interrupted. An instance installed with the former
   default only knew the last six months of the NVD: expect many applications to get their first
-  matches, and notifications for them. `sync.history_months` limits the history again (0, the
+  matches (no notification is sent for them: notifications follow subscriptions, not
+  tracked applications). `sync.history_months` limits the history again (0, the
   new default, reads everything).
 - **An application now matches the product of its exact name** (case and separators aside), no
   longer every product whose name contains it: `nginx` no longer matches `ingress-nginx` or

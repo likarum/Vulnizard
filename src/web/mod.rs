@@ -206,7 +206,13 @@ impl IntoResponse for ApiError {
         let (status, message) = self.0.status_message();
         let body = Json(serde_json::json!({ "error": message }));
         if status == StatusCode::UNAUTHORIZED {
-            (status, [(header::WWW_AUTHENTICATE, "Basic realm=\"vulnizard\"")], body).into_response()
+            // A token first: it is the way meant for programs, and the only
+            // one left once the account has a second factor
+            let mut response = (status, body).into_response();
+            for challenge in ["Bearer realm=\"vulnizard\"", "Basic realm=\"vulnizard\""] {
+                response.headers_mut().append(header::WWW_AUTHENTICATE, header::HeaderValue::from_static(challenge));
+            }
+            response
         } else {
             (status, body).into_response()
         }
@@ -3034,6 +3040,13 @@ mod tests {
         assert_eq!(mcp(Some(format!("Bearer {bob_token}"))).await.status, StatusCode::UNAUTHORIZED);
         assert_eq!(app.api("/api/cve", Some(&format!("Bearer {bob_token}"))).await.status, StatusCode::UNAUTHORIZED);
         assert_eq!(app.get("/cve", Some(&other)).await.location.as_deref(), Some("/login"));
+    }
+
+    #[test]
+    fn a_refused_api_call_asks_for_a_token_first() {
+        let response = ApiError(AppError::Unauthorized).into_response();
+        let challenges: Vec<_> = response.headers().get_all(header::WWW_AUTHENTICATE).iter().map(|v| v.to_str().unwrap().to_string()).collect();
+        assert_eq!(challenges, ["Bearer realm=\"vulnizard\"", "Basic realm=\"vulnizard\""]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

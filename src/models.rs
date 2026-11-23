@@ -347,7 +347,8 @@ pub struct WatchlistEntryWithContext {
     pub app_name: String,
     pub app_version: Option<String>,
     pub project_name: String,
-    pub username: String,
+    /// Organization the project belongs to (not the account that created it)
+    pub organization: String,
     // CVE details (optional, may not exist if CVE not in DB)
     pub cve_cvss: Option<f64>,
     pub cve_description: Option<String>,

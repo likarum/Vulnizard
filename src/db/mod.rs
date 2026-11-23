@@ -1459,6 +1459,11 @@ impl Database {
     }
 
     /// Get metadata value by key
+    /// Version of the schema this database is at
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self.get_metadata("schema_version")?.and_then(|v| v.parse().ok()).unwrap_or(1))
+    }
+
     pub fn get_metadata(&self, key: &str) -> Result<Option<String>> {
         let result: Option<String> = self.conn.query_row(
             "SELECT value FROM metadata WHERE key = ?1",
