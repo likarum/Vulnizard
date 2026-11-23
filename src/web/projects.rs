@@ -193,7 +193,7 @@ pub async fn watchlist_status(
         }
         Ok(redirect(back_or(
             &form.back,
-            product_url(Some((&org.name, &project.name)), "review"),
+            product_url(Some((&org.name, &project.name)), "vulnerabilities"),
         )))
     })
 }

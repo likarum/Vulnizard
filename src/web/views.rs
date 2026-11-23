@@ -14,7 +14,7 @@ pub fn enc(s: &str) -> String {
 /// Views of the "products" side, in navigation order: (key, label)
 pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
     ("overview", "Overview"),
-    ("review", "To review"),
+    ("vulnerabilities", "Vulnerabilities"),
     ("applications", "Applications"),
     ("subscriptions", "Subscriptions"),
     ("evolution", "Evolution"),
@@ -64,6 +64,16 @@ pub struct PageContext {
 
 tokio::task_local! {
     pub static PAGE: PageContext;
+}
+
+/// Key of a product view as written in an address. Views were renamed: the
+/// addresses people bookmarked, and those in notifications already sent,
+/// keep answering.
+pub fn canonical_view(view: &str) -> &str {
+    match view {
+        "review" => "vulnerabilities",
+        other => other,
+    }
 }
 
 /// URL of a product view for a scope

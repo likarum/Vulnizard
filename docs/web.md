@@ -21,8 +21,9 @@ database was last synchronized (administrators can start a sync from there):
   filters every view:
   - *Overview*: counters and charts. With all projects, each project has its own color and each
     severity level its own bar; for a single project, severity levels are told apart by color
-  - *To review*: CVEs affecting the deployed versions — **close** once fixed, **accept the risk**
-    with a justification, or mark **not applicable**
+  - *Vulnerabilities*: CVEs affecting the deployed versions. Those still to review are listed
+    first (the default filter); the other filter lists those already decided. **Close** once
+    fixed, **accept the risk** with a justification, or mark **not applicable**
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
     version closes the CVEs it fixes, and an entry still to review that no longer matches after a
     source corrected its data is set aside as not applicable). The name is the product name of

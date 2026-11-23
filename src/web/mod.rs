@@ -1010,7 +1010,7 @@ mod tests {
         let project = app.post("/projects", Some(&alice), "org=acme&name=infra&description=Prod").await;
         assert_eq!(project.location.as_deref(), Some("/product/acme/infra?view=applications"));
         for scope in ["/product", "/product/acme/infra"] {
-            for view in ["", "?view=review", "?view=review&show=handled", "?view=applications", "?view=subscriptions",
+            for view in ["", "?view=vulnerabilities", "?view=vulnerabilities&show=handled", "?view=applications", "?view=subscriptions",
                          "?view=evolution", "?view=evolution&days=365&at=2026-01-01", "?view=evolution&at=garbage",
                          "?view=audit", "?view=audit&decision=all", "?view=settings", "?view=bogus"] {
                 let page = app.get(&format!("{scope}{view}"), Some(&alice)).await;
@@ -1112,7 +1112,7 @@ mod tests {
         let app_id = db.list_applications(project_id).unwrap()[0].id.unwrap();
 
         // Everyone sees the entry; the dashboard lists it with actions only for those who can triage
-        for page in ["/product/acme/infra", "/product", "/product?view=review"] {
+        for page in ["/product/acme/infra", "/product", "/product?view=vulnerabilities"] {
             let viewer_page = app.get(page, Some(&viewer)).await;
             assert!(viewer_page.body.contains("CVE-2024-4343"), "{page}");
             assert!(!viewer_page.body.contains(&format!("/watchlist/{entry}")), "{page}");
@@ -1142,9 +1142,9 @@ mod tests {
         let evil = app
             .post(&triage, Some(&editor), "status=untreated&back=https%3A%2F%2Fevil.example%2F")
             .await;
-        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=review"));
+        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=vulnerabilities"));
         let evil = app.post(&triage, Some(&editor), "status=treated&back=%2F%2Fevil.example").await;
-        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=review"));
+        assert_eq!(evil.location.as_deref(), Some("/product/acme/infra?view=vulnerabilities"));
         app.post("/projects", Some(&owner), "org=acme&name=other").await;
         let foreign = format!("/orgs/acme/projects/other/watchlist/{entry}");
         assert_eq!(app.post(&foreign, Some(&editor), "status=accepted&comment=x").await.status, StatusCode::NOT_FOUND);
@@ -2439,7 +2439,7 @@ mod tests {
         let apps = db.list_applications(project).unwrap();
         assert_eq!(apps.len(), 2);
         assert!(apps.iter().all(|a| a.group == "web"));
-        let review = app.get("/product/acme/infra?view=review", Some(&admin)).await.body;
+        let review = app.get("/product/acme/infra?view=vulnerabilities", Some(&admin)).await.body;
         assert_eq!(review.matches("CVE-2024-6387</a>").count(), 1);
         assert!(review.contains(">web</span>"));
         let page = app.get(view, Some(&admin)).await.body;
@@ -3488,5 +3488,39 @@ mod tests {
         assert_eq!(app.post(&path, Some(&session), "password=wrong-password").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&path, Some(&session), "password=a-long-password").await.status, StatusCode::SEE_OTHER);
         assert!(!db.has_second_factor(user_id).unwrap());
+    }
+
+    /// The entry of a view in the products menu, as the page writes it
+    fn menu_entry(scope: &str, key: &str, label: &str, active: bool) -> String {
+        let class = if active { " class=\"active\"" } else { "" };
+        format!("<a href=\"{scope}?view={key}\"{class}>{label}</a>")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_view_keeps_its_old_address() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        for scope in ["/product", "/product/acme/infra"] {
+            let page = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
+            assert!(page.contains("<title>Vulnerabilities · Vulnizard</title>"), "{scope}");
+            assert!(page.contains(&menu_entry(scope, "vulnerabilities", "Vulnerabilities", true)), "{scope}");
+            // The menu no longer names the view after its default filter, which is still the first one
+            assert!(!page.contains("view=review"), "{scope}");
+            assert!(page.contains(&format!("<a href=\"{scope}?view=vulnerabilities\" class=\"active\">To review</a>")), "{scope}");
+            assert!(page.contains("Nothing to review."), "{scope}");
+            // The address of before the renaming shows the same view, under its new name
+            for old in ["?view=review", "?view=review&show=handled"] {
+                let former = app.get(&format!("{scope}{old}"), Some(&alice)).await;
+                assert_eq!(former.status, StatusCode::OK, "{scope}{old}");
+                assert!(former.body.contains("<title>Vulnerabilities · Vulnizard</title>"), "{scope}{old}");
+                assert!(former.body.contains(&menu_entry(scope, "vulnerabilities", "Vulnerabilities", true)), "{scope}{old}");
+            }
+            let decided = app.get(&format!("{scope}?view=review&show=handled"), Some(&alice)).await.body;
+            assert!(decided.contains("No decision yet."), "{scope}");
+        }
+        // Other pages lead to the view under its new name
+        assert!(app.get("/product", Some(&alice)).await.body.contains(&menu_entry("/product", "vulnerabilities", "Vulnerabilities", false)));
     }
 }

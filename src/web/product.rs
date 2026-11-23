@@ -19,7 +19,7 @@ use crate::rbac::{Permission, Role};
 #[derive(Deserialize, Default)]
 pub struct ProductQuery {
     view: Option<String>,
-    /// Review: "handled" lists the decided entries
+    /// Vulnerabilities: "handled" lists the decided entries
     show: Option<String>,
     /// Evolution: day whose state is shown (YYYY-MM-DD)
     at: Option<String>,
@@ -110,8 +110,9 @@ fn render(
         summaries: db.project_summaries(user.id)?,
     };
     let view = nonempty(&q.view).unwrap_or_else(|| "overview".into());
-    let (title, body) = match view.as_str() {
-        "review" => ("To review", review(db, user, &scope, q)?),
+    let view = views::canonical_view(&view);
+    let (title, body) = match view {
+        "vulnerabilities" => ("Vulnerabilities", vulnerabilities(db, user, &scope, q)?),
         "applications" => ("Applications", applications(db, st, user, &scope, q)?),
         "subscriptions" => ("Subscriptions", subscriptions(db, user, &scope)?),
         "evolution" => ("Evolution", evolution(db, user, &scope, q)?),
@@ -126,7 +127,7 @@ fn render(
     Ok(layout(
         Nav::Product {
             scope: scope.names(),
-            view: &view,
+            view,
         },
         title,
         Some(user),
@@ -278,7 +279,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
 
         div.head {
             h2 { "To review first" }
-            a href=(scope.url("review")) { "All " (untreated) " →" }
+            a href=(scope.url("vulnerabilities")) { "All " (untreated) " →" }
         }
         (views::triage_table(&open[..open.len().min(8)], scope.all(), None, |item| {
             if scope.can_in(&item.org, &item.project, Permission::Triage) { triage_actions(item) } else { html! {} }
@@ -414,17 +415,17 @@ fn overview_charts_project(
 }
 
 // ==========================================
-// To review
+// Vulnerabilities: to review by default, decided on request
 // ==========================================
 
-fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
+fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
     let handled = nonempty(&q.show).as_deref() == Some("handled");
     let mut items = db.scoped_triage(user.id, scope.project_id(), handled, 2000)?;
     let total = items.len();
     // Default order: most urgent first (known exploited, then CVSS)
     let listing = Listing::from_page("urgency", true);
     listing.apply(&mut items, views::triage_text, views::triage_key);
-    let base = scope.url("review");
+    let base = scope.url("vulnerabilities");
     Ok(html! {
         div.chips {
             a href=(base) class=[(!handled).then_some("active")] { "To review" }
@@ -450,7 +451,7 @@ fn review(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Res
                             }
                             td.nowrap { (views::cvss_badge(item.cvss)) }
                             td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
-                            @if scope.all() { td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "review")) { (item.project) } } }
+                            @if scope.all() { td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "vulnerabilities")) { (item.project) } } }
                             td { (status_badge(&item.status)) }
                             td.right.nowrap {
                                 @if scope.can_in(&item.org, &item.project, Permission::Triage) { (triage_actions(item)) }
