@@ -27,6 +27,30 @@ The sources are asked for much less. With the default settings an instance downl
   shows its delay and what one download fetches, and the page warns that "Sync now" does not
   wait for that delay.
 - The sources announce the real version (`vulnizard/0.2.6`) instead of `vulnizard/0.1`.
+- **"To review" is now "Vulnerabilities".** The view shows every tracked vulnerability, not
+  only those to review; "To review" remains its default filter. The old address
+  (`view=review`) still works.
+- **"Evolution" is now "History", and going back in time is visible.** The view says that a
+  day of a chart is a link, a day shows as one under the pointer, and a card gives the day
+  shown, with previous and next day, a date field, and, on a past day, a "Past state" mark
+  and a way back to today. The old address (`view=evolution`) still works.
+- **Administration → Users: the actions on the checked users are a toolbar above the list**,
+  greyed out until a user is checked. Without JavaScript they stay usable and the server
+  refuses an action without a selection, as before.
+- Colours of the severity badges and tags were adjusted for contrast (the "medium" badge was
+  white on amber, 2.8:1; it is now 8.3:1), in every theme, by day and by night.
+
+### Added
+
+- **A "+" button adds an application or a subscription from the page.** It sits at the top
+  of the Applications and Subscriptions views and opens the form in place, without
+  JavaScript too. On "All projects" the form asks for the project, among those the user may
+  manage; the right is checked on the server for the project received. An empty list of
+  subscriptions now says what a subscription is and how it differs from a tracked
+  application.
+- **Colour themes and a day/night button**, in the header of every page: Classic, Forest,
+  Plum, Sand and High contrast. The choice is kept by the browser; without one, day or night
+  follows the system. Without JavaScript the page is Classic and follows the system.
 
 ### Fixed
 
