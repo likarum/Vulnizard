@@ -434,6 +434,37 @@ footer.bottom a:hover { color: var(--accent); }
   table.list td { min-width: 5.5em; }
   table.list td.right, table.list td.nowrap { min-width: 0; }
 
+  /* The triage table becomes one card per CVE: a description squeezed into a
+     narrow column made each row several screens tall */
+  table.triage, table.triage tbody { display: block; overflow: visible; }
+  table.triage thead { display: block; border-bottom: 1px solid var(--border); }
+  table.triage thead tr { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 4px 10px; }
+  table.triage th { border: none; padding: 4px 0; }
+  table.triage th.plain { display: none; }
+  table.triage tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 10px;
+    padding: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.triage tbody tr:last-child { border-bottom: none; }
+  table.triage td, table.triage td.nowrap, table.triage td.right {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    grid-column: 1 / -1;
+  }
+  table.triage td.cve { grid-column: 1; font-weight: 600; }
+  table.triage td.cvss { grid-column: 2; text-align: right; }
+  table.triage td.desc { color: var(--muted); font-size: 14px; }
+  table.triage td:empty { display: none; }
+  table.triage td.actions { margin-top: 4px; }
+
   form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
   form.filters > *, form.row > * { width: 100%; }
   form.filters label, form.row label { display: flex; align-items: center; gap: 8px; }
