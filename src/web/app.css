@@ -290,7 +290,8 @@ details.menu li.sep { border-top: 1px solid var(--border); margin-top: 4px; padd
 
 main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; }
 
-h1 { font-size: 24px; margin: 8px 0 16px; }
+/* A title is a name someone typed: a very long one breaks rather than widening the page */
+h1 { font-size: 24px; margin: 8px 0 16px; overflow-wrap: break-word; }
 h2 { font-size: 18px; margin: 28px 0 10px; }
 
 .muted { color: var(--muted); }
@@ -321,42 +322,90 @@ table.list th, table.list td {
 }
 table.list th { font-size: 13px; color: var(--muted); font-weight: 600; }
 table.list tr:last-child td { border-bottom: none; }
+/* Cells asking for it (the actions of a row) are aligned on the right */
+table.list td.right { text-align: right; }
+table.list td.right form.row { justify-content: flex-end; }
 
 /* A list whose columns are sized here (its colgroup names them) rather than
    by their content: the table is exactly as wide as its box at any window
    width, and long names and texts wrap inside their column. The page never
-   scrolls sideways because of it. */
+   scrolls sideways because of it. Every list of the interface is one.
+
+   A column is named after what it holds, and the name gives its width: a
+   fixed one for what has a known size (an identifier, a date, a count, a
+   button), a share of the table for names, and nothing for the one or two
+   columns of free text, which take what is left. */
 table.list.fit { table-layout: fixed; }
 table.fit td { overflow-wrap: anywhere; }
+table.fit th { overflow-wrap: break-word; }
 table.fit td.cve a { white-space: nowrap; }
-table.fit td.app .tag { white-space: normal; }
+table.fit td .tag, table.fit td .status { white-space: normal; }
+table.fit td input[type="text"], table.fit td select { max-width: 100%; }
+table.fit col.check { width: 44px; }
 table.fit col.cve { width: 162px; }
 table.fit col.cvss { width: 122px; }
-table.fit col.app { width: 16%; }
-table.fit col.project { width: 11%; }
+table.fit col.when { width: 186px; }
+table.fit col.day { width: 124px; }
+table.fit col.num { width: 116px; }
+table.fit col.flag { width: 96px; }
+table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
-/* The decisions on two lines; a single button once the decision is taken */
+table.fit col.name { width: 20%; }
+table.fit col.app { width: 16%; }
+table.fit col.who { width: 13%; }
+table.fit col.project { width: 11%; }
+table.fit col.wide { width: 30%; }
+/* A version in its field, with the button updating it */
+table.fit col.version { width: 248px; }
+/* One button; two, or the decisions on two lines */
+table.fit col.act { width: 124px; }
 table.fit col.actions { width: 190px; }
 table.fit td.actions button, table.fit td.actions .btn { margin-bottom: 4px; white-space: nowrap; }
 table.fit td.actions input[type="text"] { width: 100%; }
 /* Decided: no description, the application takes what is left */
 table.decided col.app { width: auto; }
 table.decided col.actions { width: 110px; }
-/* Between the phone layout and a wide window: tighter cells, the decisions
-   one under the other, a project name kept on one line and a description cut
-   after four lines (their title attribute holds the whole text) */
+/* A list of seven or eight columns: the date over its time and narrower
+   names at any width, which leaves room to its text. The last resort is for
+   it too: under the width it needs to stay readable (see below), it scrolls
+   sideways inside its own box, not the page. */
+table.dense td.nowrap { white-space: normal; }
+table.dense col.when { width: 112px; }
+table.dense col.who { width: 11%; }
+table.dense col.app { width: 14%; }
+table.dense col.project { width: 10%; }
+.scroll { overflow-x: auto; }
+/* Between the phone layout and a wide window: tighter cells, a date over its
+   time, the buttons one under the other, a project name kept on one line and
+   a description cut after four lines (their title attribute holds the whole
+   text) */
 @media (min-width: 761px) and (max-width: 1199px) {
   table.fit th, table.fit td { padding: 8px; }
+  table.fit td.nowrap { white-space: normal; }
+  table.fit col.check { width: 36px; }
   table.fit col.cve { width: 154px; }
   table.fit col.cvss { width: 114px; }
-  table.fit col.app { width: 15%; }
-  table.fit col.project { width: 10%; }
+  table.fit col.when { width: 104px; }
+  table.fit col.day { width: 104px; }
+  table.fit col.num { width: 104px; }
+  table.fit col.flag { width: 84px; }
+  table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
+  table.fit col.name { width: 19%; }
+  table.fit col.app { width: 15%; }
+  table.fit col.who { width: 12%; }
+  table.fit col.project { width: 10%; }
+  table.fit col.wide { width: 28%; }
+  table.fit col.version { width: 136px; }
   table.fit col.actions { width: 134px; }
   table.decided col.app { width: auto; }
   table.decided col.actions { width: 90px; }
+  table.fit.dense { min-width: 960px; }
+  table.dense col.who { width: 12%; }
+  table.dense col.app { width: 13%; }
+  table.dense col.project { width: 9%; }
   table.fit td.actions form.inline, table.fit td.actions details.inline { display: block; }
-  table.fit td.project a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.fit td.project a, table.fit .cut { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   table.fit .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
 }
 
