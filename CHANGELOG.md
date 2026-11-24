@@ -86,6 +86,13 @@ The sources are asked for much less. With the default settings an instance downl
   sent the user to the settings. The page now offers to enable notifications on the spot,
   then sends the test. The message only remains when the permission is refused or the
   browser cannot receive notifications.
+- **Other lists were wider than the window between 760 and 1200 px** (#93): applications,
+  history, audit, project settings, CVE list, and most administration pages. No page scrolls
+  sideways any more. Eight lists with many columns (history, audit, recent syncs, users,
+  notifications of all projects, destinations, sign-in providers, inventory sources) scroll
+  inside their own box below about 1000 px. Columns now have set widths, so tables look
+  somewhat different on wide screens too.
+- Action buttons of a list are aligned to the right, as the pages always asked.
 
 ## 0.2.5
 
