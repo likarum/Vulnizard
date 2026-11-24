@@ -1151,7 +1151,6 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
     blocking(|| {
         let db = st.db()?;
         let orgs = db.list_orgs(user.id)?;
-        let awaiting = db.orgs_awaiting_mfa(user.id)?;
         let own = db.own_org_memberships(user.id)?;
         Ok(views::layout(
             views::Nav::PRODUCTS,
@@ -1179,18 +1178,7 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
                                 }
                             }
                         }
-                        @for name in &awaiting {
-                            tr {
-                                td { (name) }
-                                td { span.muted { "closed: requires two-step sign-in — " } a href="/settings/mfa" { "set it up" } }
-                                td.right {
-                                    form.inline method="post" action={ "/orgs/" (enc(name)) "/leave" } {
-                                        button.small.secondary type="submit" { "Leave" }
-                                    }
-                                }
-                            }
-                        }
-                        @if orgs.is_empty() && awaiting.is_empty() { tr { td colspan="3" .muted { "You are not a member of any organization yet." } } }
+                        @if orgs.is_empty() { tr { td colspan="3" .muted { "You are not a member of any organization yet." } } }
                     }
                 }
                 h2 { "New organization" }

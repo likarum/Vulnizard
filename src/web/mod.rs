@@ -3864,18 +3864,24 @@ mod tests {
         assert_eq!(app.post("/orgs/acme/mfa", Some(&root), "required=1").await.status, StatusCode::SEE_OTHER);
         assert!(app.get("/orgs/acme", Some(&root)).await.body.contains("checked"));
 
-        // The organization is closed to bob (no factor) and only that: the rest of his account works
-        assert_eq!(app.get("/orgs/acme", Some(&bob)).await.status, StatusCode::NOT_FOUND);
-        assert_eq!(app.get("/product", Some(&bob)).await.status, StatusCode::OK);
-        assert_eq!(app.get("/settings", Some(&bob)).await.status, StatusCode::OK);
-        let listed = app.get("/orgs", Some(&bob)).await.body;
-        assert!(listed.contains("closed: requires two-step sign-in") && listed.contains("/orgs/acme/leave"));
-        assert!(app.get("/settings/mfa", Some(&bob)).await.body.contains("Closed until you set up a second factor"));
+        // Bob, a member without a factor, is held to setting one up: nothing else answers, as when
+        // the instance requires it. Carol, who is not a member, is not concerned.
+        for path in ["/orgs/acme", "/product", "/settings", "/orgs"] {
+            assert_eq!(app.get(path, Some(&bob)).await.location.as_deref(), Some("/settings/mfa"), "{path}");
+        }
+        assert_eq!(app.post("/orgs/acme/leave", Some(&bob), "").await.status, StatusCode::FORBIDDEN);
+        let enrol = app.get("/settings/mfa", Some(&bob)).await.body;
+        assert!(enrol.contains("A second factor is required for your account.") && enrol.contains("Required by: acme."));
+        assert_eq!(app.get("/product", Some(&carol)).await.status, StatusCode::OK);
+        assert!(app.get(&format!("/admin/users/{bob_id}"), Some(&root)).await.body.contains("required, not set up"));
+        // The requirement lifted, the account works again
         // Someone without a factor cannot turn the requirement on (they would lock themselves out)
         app.post("/orgs", Some(&carol), "name=carols").await;
         let refused = app.post("/orgs/carols/mfa", Some(&carol), "required=1").await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
-        // Added without being asked, bob can leave; the only owner cannot
+        assert_eq!(app.post("/orgs/acme/mfa", Some(&root), "").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/product", Some(&bob)).await.status, StatusCode::OK);
+        // Bob can leave; the only owner cannot
         assert_eq!(app.post("/orgs/acme/leave", Some(&bob), "").await.status, StatusCode::SEE_OTHER);
         assert!(!app.get("/orgs", Some(&bob)).await.body.contains("acme"));
         assert_eq!(app.post("/orgs/carols/leave", Some(&carol), "").await.status, StatusCode::BAD_REQUEST);
@@ -3919,8 +3925,8 @@ mod tests {
         assert!(filtered.contains("Two-step sign-in reset") && !filtered.contains("Authenticator app set up"));
         assert!(app.get(&format!("/admin/users/{bob_id}"), Some(&root)).await.body.contains("Two-step sign-in reset"));
         // Saving the same requirement again records nothing
-        app.post("/orgs/acme/mfa", Some(&root), "required=1").await;
-        assert_eq!(db.list_security_events(None, 100).unwrap().iter().filter(|e| e.event == "mfa_requirement").count(), 3);
+        app.post("/orgs/acme/mfa", Some(&root), "").await;
+        assert_eq!(db.list_security_events(None, 100).unwrap().iter().filter(|e| e.event == "mfa_requirement").count(), 4);
         assert_eq!(app.get("/settings", Some(&carol)).await.status, StatusCode::OK);
     }
 

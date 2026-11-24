@@ -53,6 +53,10 @@ before 1.0, a minor version may change behaviour.
   it. The charts moved to History, which now follows the day shown; "To review first" and
   "Latest changes" are gone from the Overview (they are the Vulnerabilities list in its
   default order, and "Changes on subscribed products" in History).
+- **An organization that requires two-step sign-in holds its members to it.** A member
+  without a second factor used to keep the rest of their account and only lose that
+  organization; they now can do nothing but set one up once signed in, as when the instance
+  requires it. They can no longer leave the organization instead.
 - A KEV or NVD answer that lacks a field Vulnizard does not use is no longer refused (#11).
 
 ## 0.2.6

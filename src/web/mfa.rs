@@ -550,10 +550,7 @@ fn manage_page(st: &AppState, db: &Database, user: &Account, message: Option<Mar
                     p.muted { "A second factor is required for your account." }
                 }
                 @if !awaiting.is_empty() {
-                    div.card.notice {
-                        strong { "Closed until you set up a second factor: " }
-                        (awaiting.join(", ")) ". These organizations require two-step sign-in from their members."
-                    }
+                    p.muted { "Required by: " (awaiting.join(", ")) ". These organizations require two-step sign-in from their members." }
                 }
                 p.muted {
                     "After your password, Vulnizard asks for a code of an authenticator app, or a passkey. "

@@ -167,9 +167,10 @@ It can be **required**:
 - for the **whole instance** (*Admin → Users*): an account without a second factor can do nothing
   but set one up, and cannot remove its last one;
 - for **one organization** (its page, by whoever manages its members and has a second factor
-  themselves): members without a second factor cannot open that organization — web, API and MCP
-  alike — while the rest of their account keeps working. Anyone can leave an organization they
-  were added to.
+  themselves): a member without a second factor is held like under the requirement of the
+  instance: once signed in they can do nothing but set one up, whatever else their account
+  gives. The organization also stays closed to them through the API and the MCP. Accounts
+  that are not members of it are not concerned.
 
 - Passkeys are bound to the host of `web.base_url`: browsers only allow them over HTTPS (or on
   `localhost`), never on a bare IP address. Otherwise only the authenticator app is offered.
