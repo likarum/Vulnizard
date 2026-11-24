@@ -12,9 +12,10 @@ pub fn enc(s: &str) -> String {
 }
 
 /// Views of the "products" side, in navigation order: (key, label)
-pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
+pub const PRODUCT_VIEWS: [(&str, &str); 7] = [
     ("overview", "Overview"),
     ("vulnerabilities", "Vulnerabilities"),
+    ("overdue", "Overdue"),
     ("applications", "Applications"),
     ("subscriptions", "Subscriptions"),
     ("history", "History"),
@@ -948,7 +949,7 @@ mod tests {
         let css = comments.replace_all(STYLESHEET, "").into_owned();
         // Between the phone layout and a wide window the same columns are tighter
         let narrow = css.split("@media (min-width: 761px) and (max-width: 1199px) {").nth(1).unwrap().split("\n}\n").next().unwrap();
-        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "fig", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
         for column in sized {
             assert!(css.contains(&format!("\ntable.fit col.{column} {{ width:")), "{column}");
             // One button keeps its width: its text has to fit

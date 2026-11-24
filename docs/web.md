@@ -19,8 +19,17 @@ database was last synchronized (administrators can start a sync from there):
 
 - **My products** — what you run and follow. A project selector (all projects `*` by default)
   filters every view:
-  - *Overview*: counters and charts. With all projects, each project has its own color and each
-    severity level its own bar; for a single project, severity levels are told apart by color
+  - *Overview*: the executive figures, and nothing else. How many vulnerabilities are **open**
+    (still to review; one CVE on one application counts for one), in total and by severity
+    (critical, high, medium, low, no score); how many of them are **overdue** on their remediation
+    deadline, in total and by severity; the **average lateness** of the overdue ones and the
+    **worst** one, in days past the deadline; the **average time to resolve**, in total and by
+    severity. *Resolved* means decided — closed, not applicable or risk accepted — and the time
+    runs from the detection to that decision; the average is over the decisions taken during the
+    last 90 days (30, 90 or 365 on request) that still stand, so one reopened since does not
+    count, and one taken before its application was removed does. The severity is the one the
+    CVE has today. A figure with nothing to measure shows a dash, never a zero. Each count leads
+    to the list of what it counts
   - *Vulnerabilities*: CVEs affecting the deployed versions. Those still to review are listed
     first (the default filter); the other filters list those overdue and those already decided.
     **Close** once fixed, **accept the risk** with a justification, or mark **not applicable**.
@@ -32,7 +41,17 @@ database was last synchronized (administrators can start a sync from there):
     shorter. Any decision stops the clock: a decided entry is never overdue. An entry reopened is
     due at its first deadline again, and changing the version of the application moves nothing.
     The delays are set for the instance and may be replaced by an organization (see
-    *Administration*); with all projects shown, each entry follows those of its organization
+    *Administration*); with all projects shown, each entry follows those of its organization.
+    The list can be narrowed to one application (`&app=<name>`) and to one severity
+    (`&severity=critical|high|medium|low|none`), which is how the figures of the other views
+    lead to it; the narrowing is said above the list, with a link showing everything again
+  - *Overdue*: what is late and where. By application: how many overdue vulnerabilities, their
+    average and worst lateness, the worst first; each row leads to the overdue entries of that
+    application, in its project. Over time: today's overdue vulnerabilities by week of detection
+    and by week of deadline — a batch that arrived at once is one tall week — and how many were
+    overdue at the end of each day of the last 30, 90 or 365 days, entries removed since
+    included — a period without triage is a line that keeps climbing. Each chart has its
+    figures in a table under it
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
     version closes the CVEs it fixes, and an entry still to review that no longer matches after a
     source corrected its data is set aside as not applicable). The name is the product name of
@@ -51,9 +70,15 @@ database was last synchronized (administrators can start a sync from there):
     version, feeds the list of vulnerabilities instead
   - Applications and subscriptions are added with the **+** button at the top of their view. With
     all projects shown, the form asks for the project, among those you may manage
-  - *History*: stock and daily activity (new, accepted, closed) over 30/90/365 days, and the
-    state of every tracked CVE **at any past date**: click a day in a chart, or pick it in the
-    date field. A past state is marked as such, with a link back to today
+  - *History*: over 30/90/365 days, the CVEs to review at the end of each day **by severity**
+    (critical, high, medium, low, no score, stacked; the severity is the one each CVE has today,
+    not the one it had that day), the accepted risks as a line of their own, the figures of both
+    in a table under them, and the daily activity (new, accepted, closed). Then the state of
+    every tracked CVE **at any past date**: click a day in a chart, or pick it in the date field.
+    A past state is marked as such, with a link back to today. The state of the day shown is also
+    drawn: with all projects, to review by project and by severity (each project its own color)
+    and every tracked CVE by project and status; for a single project, by severity, by status and
+    by application
   - *Audit*: who decided what, when and why — accepted risks first
   - *Settings* (per project): the project's own notification **destinations** (email with its own
     SMTP server, ntfy, Slack, webhook) in one table: a row per destination, a checkbox
@@ -80,9 +105,17 @@ database was last synchronized (administrators can start a sync from there):
   to review past their deadline, most overdue first, `?page=`; an entry to review carries `due_at`
   (a day, UTC), `days_left` (negative once overdue) and `overdue_days`, a decided one
   `resolved_in_days`, from its detection to the decision),
+  `/api/summary` and `/api/organizations/{org}/projects/{project}/summary` (the figures of the
+  *Overview*, for every project the token can read — `?org=` keeps those of one organization —
+  or for one project; `?days=` sets the period of the resolution figures, 1 to 365, 90 by
+  default. Figures only, no CVE and no name:
+  `{ as_of, open, overdue, overdue_days: { avg, max }, period_days, resolved, resolved_avg_days }`,
+  where `open`, `overdue`, `resolved` and `resolved_avg_days` each hold `total`, `critical`,
+  `high`, `medium`, `low` and `none` (no score); an average over nothing is `null`),
   `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
-Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin
+Charts are SVG rendered by the server; the charts over time come with their figures in a table.
+The JavaScript shipped is a handful of small same-origin
 files: passkeys, filters that apply while typing, and the
 color theme. Every list can be sorted (click a column header, click again to reverse) and
 filtered with its search box; everything works without JavaScript except passkeys

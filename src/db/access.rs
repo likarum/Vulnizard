@@ -97,14 +97,6 @@ pub struct ProjectSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Breakdown {
-    pub project_id: i64,
-    pub status: String,
-    pub severity: String,
-    pub count: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct ScopedApplication {
     pub org: String,
     pub project: String,
@@ -499,38 +491,6 @@ impl Database {
         self.with_deadlines(rows)
     }
 
-    /// Watchlist counts per (project id, status, severity level) for the
-    /// user's projects, or one project.
-    pub fn watch_breakdown(&self, user_id: i64, project_id: Option<i64>) -> Result<Vec<Breakdown>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT p.id, w.status,
-                    CASE WHEN c.cvss_v3_score >= 9.0 THEN 'critical'
-                         WHEN c.cvss_v3_score >= 7.0 THEN 'high'
-                         WHEN c.cvss_v3_score >= 4.0 THEN 'medium'
-                         WHEN c.cvss_v3_score > 0 THEN 'low'
-                         ELSE 'none' END,
-                    COUNT(*)
-             FROM watchlist_entries w
-             JOIN applications a ON a.id = w.app_id
-             JOIN projects p ON p.id = a.project_id
-             JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
-             LEFT JOIN cves c ON c.cve_id = w.cve_id
-             WHERE (?2 IS NULL OR p.id = ?2)
-             GROUP BY 1, 2, 3",
-        )?;
-        let rows = stmt
-            .query_map(params![user_id, project_id], |r| {
-                Ok(Breakdown {
-                    project_id: r.get(0)?,
-                    status: r.get(1)?,
-                    severity: r.get(2)?,
-                    count: r.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     /// Untreated entries of the user's projects, optionally for one project
     /// or for the projects of one organization. The organization only narrows
     /// what the user's rights give: it is never what gives access. Each entry
@@ -913,14 +873,7 @@ mod tests {
         assert!(db.scoped_triage(bob, None, Some("acme"), false, 10).unwrap().is_empty());
         assert_eq!(items.len(), 1);
         assert_eq!((items[0].project.as_str(), items[0].kev), ("infra", true));
-        let breakdown = db.watch_breakdown(alice, None).unwrap();
-        assert_eq!(breakdown.len(), 1);
-        assert_eq!(
-            (breakdown[0].project_id, breakdown[0].status.as_str(), breakdown[0].severity.as_str(), breakdown[0].count),
-            (project, "untreated", "critical", 1)
-        );
         assert!(db.scoped_triage(bob, None, None, false, 10).unwrap().is_empty());
-        assert!(db.watch_breakdown(bob, None).unwrap().is_empty());
         assert!(db.scoped_triage(alice, Some(other_project), None, false, 10).unwrap().is_empty());
         assert_eq!(db.scoped_applications(alice, None).unwrap()[0].untreated, 1);
         // A run left "running" by a stopped process no longer shows as in progress
@@ -938,7 +891,6 @@ mod tests {
         assert!(db.set_watchlist_status(project, entry, CveStatus::NotApplicable, &actor, None).unwrap());
         assert!(db.project_triage(project, false).unwrap().is_empty());
         assert_eq!(db.project_triage(project, true).unwrap()[0].status, "not_applicable");
-        assert_eq!(db.watch_breakdown(alice, None).unwrap()[0].status, "not_applicable");
 
         let summary = &db.project_summaries(alice).unwrap()[0];
         assert_eq!((summary.applications, summary.untreated, summary.role.as_str()), (1, 0, "owner"));

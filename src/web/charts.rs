@@ -173,6 +173,7 @@ pub fn stacked_rows(rows: &[(String, Vec<Segment>)], legend_segments: &[Segment]
 const CHART_W: f64 = 1100.0;
 const PLOT_LEFT: f64 = 36.0;
 const PLOT_RIGHT: f64 = 12.0;
+const PLOT_W: f64 = CHART_W - PLOT_LEFT - PLOT_RIGHT;
 
 fn nice_max(value: i64) -> i64 {
     let value = value.max(4);
@@ -185,10 +186,10 @@ fn nice_max(value: i64) -> i64 {
     10 * magnitude
 }
 
-/// Shared frame of the time charts: gridlines, y ticks, first/middle/last dates
-fn time_frame(days: &[DayStats], max: i64, plot_h: f64) -> Markup {
-    let plot_w = CHART_W - PLOT_LEFT - PLOT_RIGHT;
-    let label_days: Vec<usize> = match days.len() {
+/// Shared frame of the time charts: gridlines, y ticks, first/middle/last
+/// label of the x axis (one label per day, or per week)
+fn time_frame(labels: &[&str], max: i64, plot_h: f64) -> Markup {
+    let shown: Vec<usize> = match labels.len() {
         0 => vec![],
         1 => vec![0],
         n => vec![0, n / 2, n - 1],
@@ -199,73 +200,153 @@ fn time_frame(days: &[DayStats], max: i64, plot_h: f64) -> Markup {
             line.grid x1=(PLOT_LEFT) x2=(CHART_W - PLOT_RIGHT) y1=(y) y2=(y) {}
             text.label x=(PLOT_LEFT - 6.0) y=(y + 4.0) text-anchor="end" { (tick) }
         }
-        @for i in label_days {
-            @let x = PLOT_LEFT + (i as f64 + 0.5) * plot_w / days.len() as f64;
+        @for i in shown {
+            @let x = PLOT_LEFT + (i as f64 + 0.5) * PLOT_W / labels.len() as f64;
             text.label x=(x) y=(plot_h + 26.0)
-                text-anchor=(if i == 0 { "start" } else if i == days.len() - 1 { "end" } else { "middle" }) {
-                (days[i].day)
+                text-anchor=(if i == 0 { "start" } else if i == labels.len() - 1 { "end" } else { "middle" }) {
+                (labels[i])
             }
         }
     }
 }
 
-/// Transparent per-day columns: tooltip, link to that day, marker of the selected one
-fn day_targets(
-    days: &[DayStats],
+/// Transparent columns, one per label: tooltip, marker of the selected one,
+/// and a link to that day when the chart leads somewhere
+fn targets(
+    labels: &[&str],
     plot_h: f64,
     selected: Option<&str>,
-    link: &dyn Fn(&str) -> String,
-    describe: &dyn Fn(&DayStats) -> String,
+    link: Option<&dyn Fn(&str) -> String>,
+    describe: &dyn Fn(usize) -> String,
 ) -> Markup {
-    let plot_w = CHART_W - PLOT_LEFT - PLOT_RIGHT;
-    let col = plot_w / days.len().max(1) as f64;
+    let col = PLOT_W / labels.len().max(1) as f64;
     html! {
-        @for (i, d) in days.iter().enumerate() {
+        @for (i, label) in labels.iter().enumerate() {
             @let x = PLOT_LEFT + i as f64 * col;
-            @if selected == Some(d.day.as_str()) {
+            @let hit = html! {
+                rect.hit x=(format!("{x:.1}")) y="8" width=(format!("{col:.1}")) height=(plot_h) {
+                    title { (label) " — " (describe(i)) }
+                }
+            };
+            @if selected == Some(*label) {
                 rect.selected x=(format!("{x:.1}")) y="8" width=(format!("{col:.1}")) height=(plot_h) {}
             }
-            a href=(link(&d.day)) {
-                rect.hit x=(format!("{x:.1}")) y="8" width=(format!("{col:.1}")) height=(plot_h) {
-                    title { (d.day) " — " (describe(d)) }
-                }
+            @if let Some(link) = link { a href=(link(label)) { (hit) } } @else { (hit) }
+        }
+    }
+}
+
+fn day_labels(days: &[DayStats]) -> Vec<&str> {
+    days.iter().map(|d| d.day.as_str()).collect()
+}
+
+/// Width of a mark in a column: thin, with a gap between neighbours when there is room
+fn mark_width(col: f64) -> f64 {
+    (col - 2.0).clamp(1.0, 18.0)
+}
+
+/// Marks stacked from the baseline up in one column: (value, color key) from the bottom
+fn stack(x: f64, width: f64, plot_h: f64, max: i64, parts: &[(i64, &str)]) -> Markup {
+    let mut y = 8.0 + plot_h;
+    html! {
+        @for (value, color) in parts {
+            @if *value > 0 {
+                @let h = *value as f64 / max as f64 * plot_h;
+                @let _ = { y -= h; };
+                rect x=(format!("{x:.1}")) y=(format!("{y:.1}")) width=(format!("{width:.1}"))
+                    height=(format!("{:.1}", (h - 1.0).max(1.0))) rx="1.5" class={ "fill-" (color) } {}
             }
         }
     }
 }
 
-/// Stock over time: entries still to review, and accepted risks (same unit, one axis)
-pub fn stock_chart(days: &[DayStats], selected: Option<&str>, link: &dyn Fn(&str) -> String) -> Markup {
+/// Entries to review at the end of each day, stacked by severity (the most
+/// severe at the bottom, where its trend reads against the baseline). The
+/// severity is the one the CVE has today.
+pub fn severity_chart(days: &[DayStats], selected: Option<&str>, link: &dyn Fn(&str) -> String) -> Markup {
     const PLOT_H: f64 = 150.0;
-    let plot_w = CHART_W - PLOT_LEFT - PLOT_RIGHT;
-    let max = nice_max(days.iter().map(|d| d.open.max(d.accepted_total)).max().unwrap_or(0));
-    let col = plot_w / days.len().max(1) as f64;
-    let points = |value: &dyn Fn(&DayStats) -> i64| -> String {
-        days.iter()
-            .enumerate()
-            .map(|(i, d)| {
-                format!(
-                    "{:.1},{:.1}",
-                    PLOT_LEFT + (i as f64 + 0.5) * col,
-                    8.0 + PLOT_H - value(d) as f64 / max as f64 * PLOT_H
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let last = days.last();
+    let max = nice_max(days.iter().map(|d| d.open).max().unwrap_or(0));
+    let col = PLOT_W / days.len().max(1) as f64;
+    let width = mark_width(col);
+    let labels = day_labels(days);
+    let last = days.last().map(|d| d.open_by_severity).unwrap_or_default();
+    let legend_segments: Vec<Segment> =
+        SEVERITIES.iter().zip(last).map(|((_, label, color), value)| Segment::new(*label, value, *color)).collect();
     html! {
         div.chart {
             svg viewBox={ "0 0 " (CHART_W) " " (PLOT_H + 34.0) } role="img"
-                aria-label="CVEs to review and accepted risks over time" {
-                (time_frame(days, max, PLOT_H))
-                polyline class="series stroke-st-accepted" points=(points(&|d| d.accepted_total)) {}
-                polyline class="series stroke-st-open" points=(points(&|d| d.open)) {}
-                (day_targets(days, PLOT_H, selected, link, &|d| format!("{} to review, {} accepted", d.open, d.accepted_total)))
+                aria-label="CVEs to review per day, by severity" {
+                (time_frame(&labels, max, PLOT_H))
+                @for (i, d) in days.iter().enumerate() {
+                    @let parts: Vec<(i64, &str)> = d.open_by_severity.iter().zip(SEVERITIES).map(|(n, (_, _, color))| (*n, color)).collect();
+                    (stack(PLOT_LEFT + i as f64 * col + (col - width) / 2.0, width, PLOT_H, max, &parts))
+                }
+                (targets(&labels, PLOT_H, selected, Some(link), &|i| {
+                    let [critical, high, medium, low, none] = days[i].open_by_severity;
+                    format!("{} to review: {critical} critical, {high} high, {medium} medium, {low} low, {none} without a score", days[i].open)
+                }))
+            }
+            (legend(&legend_segments, true))
+        }
+    }
+}
+
+/// One count per day, as a line: `(day, value)` oldest first. `what` names
+/// the count ("accepted risks"). A single series: its name is the title of
+/// the chart, so there is no legend.
+pub fn line_chart(
+    points: &[(String, i64)],
+    color: &str,
+    what: &str,
+    plot_h: f64,
+    selected: Option<&str>,
+    link: &dyn Fn(&str) -> String,
+) -> Markup {
+    let max = nice_max(points.iter().map(|(_, value)| *value).max().unwrap_or(0));
+    let col = PLOT_W / points.len().max(1) as f64;
+    let labels: Vec<&str> = points.iter().map(|(day, _)| day.as_str()).collect();
+    let line = points
+        .iter()
+        .enumerate()
+        .map(|(i, (_, value))| {
+            format!("{:.1},{:.1}", PLOT_LEFT + (i as f64 + 0.5) * col, 8.0 + plot_h - *value as f64 / max as f64 * plot_h)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    html! {
+        div.chart {
+            svg viewBox={ "0 0 " (CHART_W) " " (plot_h + 34.0) } role="img" aria-label={ (what) " per day" } {
+                (time_frame(&labels, max, plot_h))
+                polyline class={ "series stroke-" (color) } points=(line) {}
+                (targets(&labels, plot_h, selected, Some(link), &|i| format!("{} {what}", points[i].1)))
+            }
+        }
+    }
+}
+
+/// Two counts per bucket, side by side: `(label, first, second)` oldest
+/// first, and the (name, color key) of each of the two series
+pub fn paired_bars(buckets: &[(String, i64, i64)], first: (&str, &str), second: (&str, &str), what: &str) -> Markup {
+    const PLOT_H: f64 = 120.0;
+    let max = nice_max(buckets.iter().map(|(_, a, b)| *a.max(b)).max().unwrap_or(0));
+    let col = PLOT_W / buckets.len().max(1) as f64;
+    // Two thin marks and a gap, centred in the column of the bucket
+    let width = ((col - 4.0) / 2.0).clamp(1.0, 12.0);
+    let labels: Vec<&str> = buckets.iter().map(|(label, _, _)| label.as_str()).collect();
+    html! {
+        div.chart {
+            svg viewBox={ "0 0 " (CHART_W) " " (PLOT_H + 34.0) } role="img" aria-label=(what) {
+                (time_frame(&labels, max, PLOT_H))
+                @for (i, (_, a, b)) in buckets.iter().enumerate() {
+                    @let x = PLOT_LEFT + i as f64 * col + col / 2.0;
+                    (stack(x - width - 0.5, width, PLOT_H, max, &[(*a, first.1)]))
+                    (stack(x + 0.5, width, PLOT_H, max, &[(*b, second.1)]))
+                }
+                (targets(&labels, PLOT_H, None, None, &|i| format!("{} {}, {} {}", buckets[i].1, first.0, buckets[i].2, second.0)))
             }
             (legend(&[
-                Segment::new("To review", last.map(|d| d.open).unwrap_or(0), "st-open"),
-                Segment::new("Risk accepted", last.map(|d| d.accepted_total).unwrap_or(0), "st-accepted"),
+                Segment::new(first.0, buckets.iter().map(|(_, a, _)| a).sum(), first.1),
+                Segment::new(second.0, buckets.iter().map(|(_, _, b)| b).sum(), second.1),
             ], true))
         }
     }
@@ -274,7 +355,6 @@ pub fn stock_chart(days: &[DayStats], selected: Option<&str>, link: &dyn Fn(&str
 /// Daily activity: new entries and decisions, stacked per day
 pub fn activity_chart(days: &[DayStats], selected: Option<&str>, link: &dyn Fn(&str) -> String) -> Markup {
     const PLOT_H: f64 = 120.0;
-    let plot_w = CHART_W - PLOT_LEFT - PLOT_RIGHT;
     let parts = |d: &DayStats| {
         [
             (d.new + d.reopened, "st-open"),
@@ -289,30 +369,21 @@ pub fn activity_chart(days: &[DayStats], selected: Option<&str>, link: &dyn Fn(&
             .max()
             .unwrap_or(0),
     );
-    let col = plot_w / days.len().max(1) as f64;
-    // Thin marks, with a gap between neighbouring days when there is room
-    let bar_w = (col - 2.0).clamp(1.0, 18.0);
+    let col = PLOT_W / days.len().max(1) as f64;
+    let width = mark_width(col);
+    let labels = day_labels(days);
     let sum = |f: &dyn Fn(&DayStats) -> i64| days.iter().map(f).sum::<i64>();
     html! {
         div.chart {
             svg viewBox={ "0 0 " (CHART_W) " " (PLOT_H + 34.0) } role="img"
                 aria-label="New entries and decisions per day" {
-                (time_frame(days, max, PLOT_H))
+                (time_frame(&labels, max, PLOT_H))
                 @for (i, d) in days.iter().enumerate() {
-                    @let x = PLOT_LEFT + i as f64 * col + (col - bar_w) / 2.0;
-                    @let mut y = 8.0 + PLOT_H;
-                    @for (value, color) in parts(d) {
-                        @if value > 0 {
-                            @let h = value as f64 / max as f64 * PLOT_H;
-                            @let _ = { y -= h; };
-                            rect x=(format!("{x:.1}")) y=(format!("{y:.1}")) width=(format!("{bar_w:.1}"))
-                                height=(format!("{:.1}", (h - 1.0).max(1.0))) rx="1.5" class={ "fill-" (color) } {}
-                        }
-                    }
+                    (stack(PLOT_LEFT + i as f64 * col + (col - width) / 2.0, width, PLOT_H, max, &parts(d)))
                 }
-                (day_targets(days, PLOT_H, selected, link, &|d| format!(
+                (targets(&labels, PLOT_H, selected, Some(link), &|i| format!(
                     "{} new, {} accepted, {} closed, {} not applicable",
-                    d.new + d.reopened, d.accepted, d.closed, d.not_applicable
+                    days[i].new + days[i].reopened, days[i].accepted, days[i].closed, days[i].not_applicable
                 )))
             }
             (legend(&[
@@ -352,13 +423,17 @@ mod tests {
     #[test]
     fn svg_elements_are_explicitly_closed() {
         // In HTML an SVG element is never void: an unclosed <rect> would swallow what follows
-        let days = vec![DayStats { day: "2026-01-01".into(), new: 2, open: 2, ..Default::default() }];
+        let days = vec![DayStats { day: "2026-01-01".into(), new: 2, open: 2, open_by_severity: [1, 0, 1, 0, 0], ..Default::default() }];
         let link = |d: &str| d.to_string();
+        let points = vec![("2026-01-01".to_string(), 2)];
+        let weeks = vec![("2026-01-05".to_string(), 2, 1)];
         let rows = vec![("io".to_string(), vec![Segment::new("a", 2, "p0"), Segment::new("b", 1, "p1")])];
         for svg in [
             donut(&[Segment::new("a", 1, "p0"), Segment::new("b", 2, "p1")], "t").into_string(),
             stacked_rows(&rows, &rows[0].1).into_string(),
-            stock_chart(&days, Some("2026-01-01"), &link).into_string(),
+            severity_chart(&days, Some("2026-01-01"), &link).into_string(),
+            line_chart(&points, "st-accepted", "accepted risks", 60.0, None, &link).into_string(),
+            paired_bars(&weeks, ("detected", "p0"), ("due", "p1"), "Overdue entries per week").into_string(),
             activity_chart(&days, None, &link).into_string(),
         ] {
             // A repeated attribute is dropped by the browser (the color would be lost)
@@ -393,18 +468,45 @@ mod tests {
                 day: format!("2026-01-0{i}"),
                 new: i,
                 open: i * 3,
+                accepted_total: i,
+                // No high one on the first day
+                open_by_severity: [i, i - 1, i, 0, 1],
                 ..Default::default()
             })
             .collect();
         let link = |day: &str| format!("/product?view=history&at={day}");
-        let stock = stock_chart(&days, Some("2026-01-02"), &link).into_string();
+        let stock = severity_chart(&days, Some("2026-01-02"), &link).into_string();
         assert_eq!(stock.matches("<a href=").count(), 3);
         assert_eq!(stock.matches("class=\"selected\"").count(), 1);
         assert!(stock.contains("at=2026-01-03"));
+        // One mark per day and per severity that has entries, plus the legend; the legend gives the last day
+        for (color, marks) in [("sev-critical", 3), ("sev-high", 2), ("sev-medium", 3), ("sev-low", 0), ("sev-none", 3)] {
+            assert_eq!(stock.matches(&format!("fill-{color}")).count(), marks + 1, "{color}");
+        }
+        assert!(stock.contains("Critical <strong>3</strong>") && stock.contains("High <strong>2</strong>") && stock.contains("No score <strong>1</strong>"));
+        // The figures of a day are in its tooltip, in words
+        assert!(stock.contains("<title>2026-01-02 — 6 to review: 2 critical, 1 high, 2 medium, 0 low, 1 without a score</title>"), "{stock}");
+        // The text of a chart takes its color from the page, never from a series
+        assert!(!regex::Regex::new(r#"<text[^>]*(fill-|stroke-)"#).unwrap().is_match(&stock));
         let activity = activity_chart(&days, None, &link).into_string();
         assert_eq!(activity.matches("fill-st-open").count(), 3 + 1); // three bars + legend
         assert_eq!((nice_max(0), nice_max(9), nice_max(37), nice_max(120)), (4, 10, 40, 200));
-        assert!(stock_chart(&[], None, &link).into_string().contains("<svg"));
+        assert!(severity_chart(&[], None, &link).into_string().contains("<svg"));
+
+        // A single series is a line without a legend: its title names it
+        let points: Vec<(String, i64)> = days.iter().map(|d| (d.day.clone(), d.accepted_total)).collect();
+        let line = line_chart(&points, "st-accepted", "accepted risks", 60.0, Some("2026-01-03"), &link).into_string();
+        assert_eq!((line.matches("<polyline").count(), line.matches("<a href=").count(), line.matches("class=\"legend\"").count()), (1, 3, 0));
+        assert!(line.contains("stroke-st-accepted") && line.contains("<title>2026-01-03 — 3 accepted risks</title>"));
+        assert!(line_chart(&[], "p0", "overdue", 60.0, None, &link).into_string().contains("<svg"));
+
+        // Two series side by side: a legend with their totals, and no link (a week is not a day)
+        let weeks = vec![("2026-01-05".to_string(), 4, 0), ("2026-01-12".to_string(), 1, 5)];
+        let pairs = paired_bars(&weeks, ("detected", "p0"), ("due", "p1"), "Overdue entries per week").into_string();
+        assert_eq!((pairs.matches("fill-p0").count(), pairs.matches("fill-p1").count(), pairs.matches("<a href=").count()), (2 + 1, 1 + 1, 0));
+        assert!(pairs.contains("detected <strong>5</strong>") && pairs.contains("due <strong>5</strong>"));
+        assert!(pairs.contains("<title>2026-01-12 — 1 detected, 5 due</title>"));
+        assert!(paired_bars(&[], ("a", "p0"), ("b", "p1"), "x").into_string().contains("<svg"));
     }
 
     #[test]

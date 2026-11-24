@@ -445,9 +445,17 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_evolution",
-            "Day-by-day evolution of the tracked CVEs of a project (or of every accessible project): new, accepted, closed, not applicable, and the stock still to review and accepted at the end of each day.",
+            "Day-by-day evolution of the tracked CVEs of a project (or of every accessible project): new, accepted, closed, not applicable, and the stock still to review (`open`) and accepted at the end of each day. `open_by_severity` splits `open` by the severity each CVE has today, as five counts in this order: critical, high, medium, low, no score.",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
                     "days": { "type": "integer", "minimum": 1, "maximum": 365, "description": "Length of the window ending today (default 30)" } }),
+            &[],
+        ),
+        tool(
+            "get_summary",
+            "Executive figures of a project, of every accessible project, or of those of one organization (`org` without `project`), and nothing else: no CVE, no application. As of today: `open` (entries to review) and `overdue` (those past their remediation deadline), each with a `total` and a count per severity (`critical`, `high`, `medium`, `low`, `none` for CVEs without a score; the severity is the one the CVE has today); `overdue_days` (`avg` and `max` number of days past the deadline). Over the last `period_days` days: `resolved` (entries decided then: closed, not applicable or risk accepted, the decision still standing) and `resolved_avg_days` (average number of days from detection to that decision). An average over nothing is null, never 0.",
+            json!({ "org": { "type": "string", "description": "Organization name. With `project`: its organization (defaults to `default`). Alone: only the projects of that organization" },
+                    "project": { "type": "string", "description": "Project name; omit for every accessible project" },
+                    "days": { "type": "integer", "minimum": 1, "maximum": 365, "description": "Length of the period the resolution figures are taken over, ending today (default 90); refused outside 1 to 365" } }),
             &[],
         ),
         tool(
@@ -627,6 +635,23 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
             let total = entries.len();
             let entries: Vec<Value> = entries.into_iter().skip(offset).take(limit).collect();
             json!({ "total": total, "offset": offset, "limit": limit, "entries": entries })
+        }
+        "get_summary" => {
+            let project_id = match opt_str(args, "project") {
+                Some(_) => Some(self.target(args)?.id),
+                None => None,
+            };
+            // Without a project, an organization narrows what the caller can read: it gives nothing more
+            let org = opt_str(args, "org").filter(|_| project_id.is_none());
+            let reader = match &self.caller {
+                Caller::Local => None,
+                Caller::User(account) => Some(account.id),
+            };
+            let days = match args.get("days").filter(|v| !v.is_null()) {
+                None => 90,
+                Some(v) => v.as_i64().filter(|n| (1..=365).contains(n)).ok_or_else(|| anyhow!("days must be an integer from 1 to 365"))?,
+            };
+            json!(db.figures(reader, project_id, org, days)?)
         }
         "get_evolution" | "get_state_at" | "get_audit_log" => {
             // One project, or everything the caller can read
@@ -1026,13 +1051,13 @@ mod tests {
         let db = db();
         let list = call(&db, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(!t["description"].as_str().unwrap().is_empty());
         }
         // Tools without required arguments all run on a fresh database
-        for name in ["search_cves", "list_vendors", "list_weaknesses", "list_projects", "list_watchlist", "database_status"] {
+        for name in ["search_cves", "list_vendors", "list_weaknesses", "list_projects", "list_watchlist", "get_summary", "get_evolution", "database_status"] {
             let (is_error, text) = tool_text(&db, name, json!({}));
             assert!(!is_error, "{name}: {text}");
         }
@@ -1069,7 +1094,7 @@ mod tests {
         let ask = |msg: Value| server.handle(&msg.to_string()).unwrap();
         let list = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         assert!(!names.contains(&"list_inventory") && !names.contains(&"choose_components"));
         for name in INVENTORY_TOOLS {
             let answer = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": name, "arguments": {} } }));
@@ -1088,7 +1113,7 @@ mod tests {
                 // read
                 "search_cves", "get_cve", "list_vendors", "list_products", "list_weaknesses", "list_projects",
                 "list_reports", "get_report", "list_applications", "list_watchlist",
-                "get_evolution", "get_state_at", "get_audit_log", "list_inventory", "list_notifications",
+                "get_evolution", "get_summary", "get_state_at", "get_audit_log", "list_inventory", "list_notifications",
                 "get_security_log", "database_status",
                 // write
                 "create_project", "subscribe", "unsubscribe", "add_application",
@@ -1115,7 +1140,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 18);
         assert!(!names.contains(&"subscribe"));
 
         let refused = handle_line(
@@ -1457,5 +1482,103 @@ mod tests {
         assert!(closed.get("due_at").is_none());
         assert!(of(&state(today.to_string()), "cve_id", "CVE-2024-6001").get("due_at").is_none());
         assert_eq!(run("list_watchlist", json!({ "overdue": true }))["total"], 0);
+    }
+
+    #[test]
+    fn the_summary_gives_the_figures_and_nothing_else() {
+        use crate::models::{AffectedProduct, Application};
+
+        let db = db();
+        let alice = db.create_account("alice", None, "h", false).unwrap();
+        db.create_account("bob", None, "h", false).unwrap();
+        let carol = db.create_account("carol", None, "h", false).unwrap();
+        let org = db.create_org("acme", alice).unwrap();
+        let project = db.create_org_project(org, alice, "infra", None).unwrap();
+        db.add_member(org, "bob", "viewer").unwrap();
+        let bob = db.get_credentials("bob").unwrap().unwrap().0.id;
+        for (id, cvss) in [("CVE-2024-6001", 9.8), ("CVE-2024-6002", 5.0)] {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw in widget".into());
+            cve.cvss_v3_score = Some(cvss);
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        let mut app = Application::new(project, "widget".into());
+        app.version = Some("1.0".into());
+        app.id = Some(db.create_application(&app).unwrap());
+        db.scan_app_for_cves(&app).unwrap();
+        // Detected ten days ago: the critical one was due after 7 days
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-10 days')", []).unwrap();
+        db.conn().execute("UPDATE watchlist_events SET at = datetime('now', '-10 days')", []).unwrap();
+
+        let as_user = |id: i64, name: &str| Mcp {
+            db: &db,
+            caller: Caller::User(crate::db::Account { id, username: name.into(), is_admin: false }),
+            allow_write: true,
+            request_sync: None,
+            inventory: false,
+        };
+        let (alice_mcp, bob_mcp, carol_mcp) = (as_user(alice, "alice"), as_user(bob, "bob"), as_user(carol, "carol"));
+        let local = Mcp { db: &db, caller: Caller::Local, allow_write: false, request_sync: None, inventory: false };
+        let scope = json!({ "org": "acme", "project": "infra" });
+        let today = chrono::Utc::now().date_naive().to_string();
+        let expected = json!({
+            "as_of": today,
+            "open": { "total": 2, "critical": 1, "high": 0, "medium": 1, "low": 0, "none": 0 },
+            "overdue": { "total": 1, "critical": 1, "high": 0, "medium": 0, "low": 0, "none": 0 },
+            "overdue_days": { "avg": 3.0, "max": 3 },
+            "period_days": 90,
+            "resolved": { "total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "none": 0 },
+            "resolved_avg_days": { "total": null, "critical": null, "high": null, "medium": null, "low": null, "none": null },
+        });
+        // A reader of the project gets it, for the project, for everything readable, for the organization
+        for server in [&alice_mcp, &bob_mcp, &local] {
+            for args in [scope.clone(), json!({}), json!({ "org": "acme" }), json!({ "days": 90 })] {
+                assert_eq!(server.call_tool("get_summary", &args).unwrap(), expected, "{args}");
+            }
+        }
+        // Figures only: no CVE, no application, no project
+        let text = alice_mcp.call_tool("get_summary", &scope).unwrap().to_string();
+        for leaked in ["CVE-", "widget", "infra", "acme", "Flaw"] {
+            assert!(!text.contains(leaked), "{leaked}");
+        }
+        // Who is not a member is refused the project, and reads figures of nothing elsewhere
+        assert!(carol_mcp.call_tool("get_summary", &scope).unwrap_err().to_string().contains("not found"));
+        for args in [json!({}), json!({ "org": "acme" }), json!({ "org": "nowhere" })] {
+            let nothing = carol_mcp.call_tool("get_summary", &args).unwrap();
+            assert_eq!((nothing["open"]["total"].as_i64(), nothing["overdue"]["total"].as_i64()), (Some(0), Some(0)), "{args}");
+            assert!(nothing["overdue_days"]["avg"].is_null() && nothing["resolved_avg_days"]["total"].is_null(), "{args}");
+        }
+        assert_eq!(alice_mcp.call_tool("get_summary", &json!({ "org": "nowhere" })).unwrap()["open"]["total"], 0);
+        // The period is the caller's to choose, within bounds
+        assert_eq!(alice_mcp.call_tool("get_summary", &json!({ "days": 30 })).unwrap()["period_days"], 30);
+        for bad in [json!({ "days": 0 }), json!({ "days": 366 }), json!({ "days": "ten" }), json!({ "days": 1.5 })] {
+            assert!(alice_mcp.call_tool("get_summary", &bad).unwrap_err().to_string().contains("days must be an integer"), "{bad}");
+        }
+
+        // The evolution splits what is to review by severity, each day
+        let evolution = bob_mcp.call_tool("get_evolution", &json!({ "org": "acme", "project": "infra", "days": 12 })).unwrap();
+        let days = evolution.as_array().unwrap();
+        assert_eq!(days.len(), 12);
+        for day in days {
+            let by_severity: Vec<i64> = day["open_by_severity"].as_array().unwrap().iter().map(|n| n.as_i64().unwrap()).collect();
+            assert_eq!((by_severity.len(), by_severity.iter().sum::<i64>()), (5, day["open"].as_i64().unwrap()), "{day}");
+        }
+        assert_eq!((&days[0]["open_by_severity"], &days[1]["open_by_severity"], &days[11]["open_by_severity"]), (&json!([0, 0, 0, 0, 0]), &json!([1, 0, 1, 0, 0]), &json!([1, 0, 1, 0, 0])));
+        assert!(carol_mcp.call_tool("get_evolution", &scope).is_err());
+        assert_eq!(carol_mcp.call_tool("get_evolution", &json!({ "days": 1 })).unwrap()[0]["open_by_severity"], json!([0, 0, 0, 0, 0]));
+
+        // A decision: one less open, nothing overdue, and how long it took
+        alice_mcp.call_tool("set_cve_status", &json!({ "org": "acme", "project": "infra", "cve_id": "CVE-2024-6001", "status": "treated" })).unwrap();
+        let after = bob_mcp.call_tool("get_summary", &scope).unwrap();
+        assert_eq!((after["open"]["total"].as_i64(), after["overdue"]["total"].as_i64(), after["resolved"]["critical"].as_i64()), (Some(1), Some(0), Some(1)));
+        assert_eq!((after["resolved_avg_days"]["critical"].as_f64(), after["resolved_avg_days"]["total"].as_f64()), (Some(10.0), Some(10.0)));
+        assert!(after["overdue_days"]["avg"].is_null() && after["overdue_days"]["max"].is_null() && after["resolved_avg_days"]["medium"].is_null());
     }
 }

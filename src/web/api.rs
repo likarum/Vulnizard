@@ -129,6 +129,51 @@ pub async fn watchlist(
     })
 }
 
+#[derive(Deserialize, Default)]
+pub struct SummaryQuery {
+    /// Length in days of the period the resolution figures are taken over (default 90)
+    days: Option<String>,
+    /// All readable projects: only those of this organization
+    org: Option<String>,
+}
+
+fn summary_period(days: Option<&str>) -> Result<i64, AppError> {
+    match days.filter(|d| !d.is_empty()) {
+        None => Ok(90),
+        Some(d) => d
+            .parse::<i64>()
+            .ok()
+            .filter(|n| (1..=365).contains(n))
+            .ok_or_else(|| AppError::Bad("days must be a whole number from 1 to 365".into())),
+    }
+}
+
+/// Executive figures of every project the caller can read, or of those of
+/// one organization: figures only (see `crate::deadlines::Figures`). An
+/// organization the caller reads nothing of answers as one without anything.
+pub async fn summary(State(st): St, ApiUser(user): ApiUser, Query(q): Query<SummaryQuery>) -> ApiResult {
+    blocking(|| {
+        let days = summary_period(q.days.as_deref())?;
+        let org = q.org.as_deref().filter(|o| !o.is_empty());
+        Ok(Json(json!(st.db()?.figures(Some(user.id), None, org, days)?)))
+    })
+}
+
+/// Executive figures of one project
+pub async fn project_summary(
+    State(st): St,
+    ApiUser(user): ApiUser,
+    Path((org, project)): Path<(String, String)>,
+    Query(q): Query<SummaryQuery>,
+) -> ApiResult {
+    blocking(|| {
+        let db = st.db()?;
+        let (_, project) = load_project(&db, &user, &org, &project)?;
+        let days = summary_period(q.days.as_deref())?;
+        Ok(Json(json!(db.figures(Some(user.id), Some(project.id), None, days)?)))
+    })
+}
+
 pub async fn reports(
     State(st): St,
     ApiUser(user): ApiUser,

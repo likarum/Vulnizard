@@ -708,6 +708,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/organizations/{org}/projects", get(api::projects))
         .route("/organizations/{org}/projects/{project}", get(api::project))
         .route("/organizations/{org}/projects/{project}/watchlist", get(api::watchlist))
+        .route("/organizations/{org}/projects/{project}/summary", get(api::project_summary))
+        .route("/summary", get(api::summary))
         .route("/organizations/{org}/projects/{project}/reports", get(api::reports))
         .route("/organizations/{org}/projects/{project}/reports/{day}", get(api::report))
         .fallback(|| async { ApiError(AppError::NotFound) });
@@ -1137,15 +1139,20 @@ mod tests {
         let entry = db.project_triage(project_id, false).unwrap()[0].entry_id;
         let app_id = db.list_applications(project_id).unwrap()[0].id.unwrap();
 
-        // Everyone sees the entry; the dashboard lists it with actions only for those who can triage
-        for page in ["/product/acme/infra", "/product", "/product?view=vulnerabilities"] {
+        // Everyone sees the entry; the list shows it with actions only for those who can triage
+        for page in ["/product/acme/infra?view=vulnerabilities", "/product?view=vulnerabilities"] {
             let viewer_page = app.get(page, Some(&viewer)).await;
             assert!(viewer_page.body.contains("CVE-2024-4343"), "{page}");
             assert!(!viewer_page.body.contains(&format!("/watchlist/{entry}")), "{page}");
             assert!(app.get(page, Some(&editor)).await.body.contains(&format!("/watchlist/{entry}")), "{page}");
         }
-        // The overview draws its charts without any inline style or script
-        let overview = app.get("/product", Some(&editor)).await.body;
+        // The overview counts it, and names neither the CVE nor a decision to take
+        for page in ["/product/acme/infra", "/product"] {
+            let figures = app.get(page, Some(&editor)).await.body;
+            assert!(figures.contains(&open_figure(page, 1)) && !figures.contains("CVE-2024-4343") && !figures.contains("/watchlist/"), "{page}");
+        }
+        // The history draws its charts without any inline style or script
+        let overview = app.get("/product?view=history", Some(&editor)).await.body;
         assert!(overview.contains("<svg") && overview.contains("stroke-p0"));
         // No inline style or script: the only scripts are the external ones of the theme and of the live filters
         let without_files = overview
@@ -4093,8 +4100,6 @@ mod tests {
             // The rule is said under the list, with the delays that apply
             assert!(page.contains("7 days for a critical CVE, 30 for high, 90 for medium, 180 for low") && page.contains("without a score follows the medium delay"), "{scope}");
         }
-        // The overview lists what is most urgent with its deadline too
-        assert!(app.get("/product/acme/infra", Some(&owner)).await.body.contains(&late));
         // Somebody else's projects are not theirs to list
         assert!(!app.get("/product?view=vulnerabilities&show=overdue", Some(&stranger)).await.body.contains("CVE-2024-4343"));
         assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&show=overdue", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
@@ -4182,12 +4187,13 @@ mod tests {
         let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
         let user = format!("/admin/users/{id}");
         // The widths the stylesheet knows; a column without a name takes what is left
-        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "due", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "fig", "flag", "kind", "decision", "due", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
         let table = regex::Regex::new(r#"(?s)<table class="([^"]*)">(.*?)</table>"#).unwrap();
         let column = regex::Regex::new(r#"<col(?: class="([a-z]+)")?>"#).unwrap();
         let pages = [
             "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=vulnerabilities&show=overdue",
             "/product/acme/infra?view=vulnerabilities&show=overdue", "/admin/deadlines", "/product?view=applications",
+            "/product?view=overdue", "/product/acme/infra?view=overdue", "/product/default/default",
             "/product?view=subscriptions", "/product?view=history", "/product?view=audit",
             "/product/acme/infra", "/product/acme/infra?view=vulnerabilities", "/product/acme/infra?view=applications",
             "/product/acme/infra?view=subscriptions", "/product/acme/infra?view=history", "/product/acme/infra?view=audit",
@@ -4298,11 +4304,11 @@ mod tests {
             assert!(former.body.contains("<title>History · Vulnizard</title>") && former.body.contains("Past state"), "{scope}");
             assert!(former.body.contains(&menu_entry(scope, "history", "History", true)), "{scope}");
         }
-        // The overview leads there, day by day
+        // The overview leads there
         app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0").await;
         let overview = app.get("/product", Some(&alice)).await.body;
-        assert!(overview.contains(&format!("<a href=\"/product?view=history&amp;at={}\">", day(2))));
-        assert!(overview.contains("<a href=\"/product?view=history\">History →</a>"));
+        assert!(overview.contains("Charts, and the state of any past day: <a href=\"/product?view=history\">History</a>."));
+        assert!(overview.contains("What is late and where: <a href=\"/product?view=overdue\">Overdue</a>."));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4542,8 +4548,13 @@ mod tests {
         format!("<button type=\"submit\" name=\"org\" value=\"{org}\"{class}>{label}</button>")
     }
 
+    /// The first figure of the overview of a scope, leading to the list it counts
+    fn open_figure(scope: &str, count: i64) -> String {
+        format!("<div class=\"value\"><a href=\"{scope}?view=vulnerabilities\">{count}</a></div><div class=\"label\">open vulnerabilities</div>")
+    }
+
     fn to_review(count: i64) -> String {
-        format!("<div class=\"value\">{count}</div><div class=\"label\">CVEs to review</div>")
+        open_figure("/product", count)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4593,7 +4604,7 @@ mod tests {
         let acme = format!("{root}; vz_org=acme");
 
         // The project menu and every list of "all projects" keep that organization only
-        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+        for view in ["overview", "vulnerabilities", "overdue", "applications", "subscriptions", "history", "audit"] {
             let page = app.get(&format!("/product?view={view}"), Some(&acme)).await;
             assert_eq!(page.status, StatusCode::OK, "{view}");
             let body = page.body;
@@ -4610,12 +4621,23 @@ mod tests {
         assert!(vulnerabilities.contains("CVE-2024-4343"));
         let applications = app.get("/product?view=applications", Some(&acme)).await.body;
         assert!(applications.contains("widget"));
+        // The figures are those of that organization: its critical CVE, not the medium one of the other
+        let by_severity = |body: &str, severity: &str| body.contains(&format!("<a href=\"/product?view=vulnerabilities&amp;severity={severity}\">1</a>"));
         let overview = app.get("/product", Some(&acme)).await.body;
-        assert!(overview.contains(&to_review(1)) && overview.contains("CVE-2024-4343"));
+        assert!(overview.contains(&to_review(1)) && by_severity(&overview, "critical") && !by_severity(&overview, "medium"));
         assert!(app.get("/product?view=history", Some(&acme)).await.body.contains("<div class=\"value\">1</div><div class=\"label\">to review</div>"));
         let globex = format!("{root}; vz_org=globex");
         let other = app.get("/product", Some(&globex)).await.body;
-        assert!(other.contains(&to_review(1)) && other.contains("CVE-2024-4444") && !other.contains("CVE-2024-4343"));
+        assert!(other.contains(&to_review(1)) && by_severity(&other, "medium") && !by_severity(&other, "critical"));
+        let everything = app.get("/product", Some(&root)).await.body;
+        assert!(by_severity(&everything, "critical") && by_severity(&everything, "medium"));
+        // So is what is overdue: the critical one is late once detected ten days ago, the medium one is not
+        Database::connect(&app.db_path).unwrap().conn().execute("UPDATE watchlist_events SET at = datetime('now', '-10 days')", []).unwrap();
+        let late = "<a href=\"/product?view=vulnerabilities&amp;show=overdue\">1</a></div><div class=\"label\">overdue on their remediation deadline</div>";
+        assert!(app.get("/product", Some(&acme)).await.body.contains(late) && app.get("/product", Some(&root)).await.body.contains(late));
+        assert!(app.get("/product", Some(&globex)).await.body.contains("<div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div>"));
+        assert!(app.get("/product?view=overdue", Some(&acme)).await.body.contains("app=widget\">widget</a>"));
+        assert!(app.get("/product?view=overdue", Some(&globex)).await.body.contains("Nothing is overdue."));
 
         // It narrows lists and is no access rule: a project of the other organization still opens
         let direct = app.get("/product/globex/shop?view=applications", Some(&acme)).await;
@@ -4676,7 +4698,7 @@ mod tests {
 
         // A member of one organization has no menu, and learns nothing by asking for another:
         // an organization that exists and one that does not get the very same pages
-        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+        for view in ["overview", "vulnerabilities", "overdue", "applications", "subscriptions", "history", "audit"] {
             let path = format!("/product?view={view}");
             let plain = app.get(&path, Some(&alice)).await.body;
             assert!(!plain.contains("Switch organization") && !plain.contains("/org-filter") && !plain.contains("globex"), "{view}");
@@ -4726,5 +4748,380 @@ mod tests {
         let foreign = app.send(foreign).await;
         assert_eq!(foreign.status, StatusCode::FORBIDDEN);
         assert!(foreign.cookies.is_empty());
+    }
+
+    /// A project with two applications and six CVEs: five on `widget` detected 20 days ago (one
+    /// of each severity, the medium one known exploited, one without a score), one critical on
+    /// `gadget` detected 10 days ago. Three entries are overdue, by 13, 6 and 3 days; the high
+    /// one was closed today, 20 days after its detection. Returns (owner, viewer, stranger).
+    async fn late_project(app: &TestApp) -> (String, String, String) {
+        let owner = app.register("owner").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        app.post("/projects", Some(&owner), "org=acme&name=infra").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&owner), "username=viewer&role=viewer").await.status, StatusCode::SEE_OTHER);
+        app.accept_invitations("viewer");
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, product, cvss, kev) in [
+            ("CVE-2024-5001", "widget", Some(9.1), false),
+            ("CVE-2024-5002", "widget", Some(8.0), false),
+            ("CVE-2024-5003", "widget", Some(5.0), true),
+            ("CVE-2024-5004", "widget", Some(2.0), false),
+            ("CVE-2024-5005", "widget", None, false),
+            ("CVE-2024-5006", "gadget", Some(9.5), false),
+        ] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.cvss_v3_score = cvss;
+            cve.kev_known_exploited = kev;
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some(product.into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        for form in ["name=widget&version=1.0&vendor=acme", "name=gadget&version=2.0&vendor=acme"] {
+            assert_eq!(app.post("/orgs/acme/projects/infra/applications", Some(&owner), form).await.status, StatusCode::SEE_OTHER);
+        }
+        db.conn()
+            .execute_batch(
+                "UPDATE watchlist_entries SET created_at = datetime('now', '-20 days');
+                 UPDATE watchlist_events SET at = datetime('now', '-20 days');
+                 UPDATE watchlist_entries SET created_at = datetime('now', '-10 days') WHERE cve_id = 'CVE-2024-5006';
+                 UPDATE watchlist_events SET at = datetime('now', '-10 days') WHERE cve_id = 'CVE-2024-5006';",
+            )
+            .unwrap();
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        let high = db.project_entries_for_cve(project, "CVE-2024-5002").unwrap()[0].0;
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{high}"), Some(&owner), "status=treated").await.status, StatusCode::SEE_OTHER);
+        (owner, viewer, stranger)
+    }
+
+    /// The cells following the name of a row of a table of figures, up to the end of the row
+    fn figures_row(body: &str, name: &str) -> String {
+        let after = body.split(&format!("{name}</span></td>")).nth(1).unwrap_or_else(|| panic!("no row {name}"));
+        after.split("</tr>").next().unwrap().to_string()
+    }
+
+    const NO_DATA: &str = "<span class=\"nodata\" title=\"Nothing to measure\">—</span>";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overview_shows_the_executive_figures_and_history_keeps_the_rest() {
+        let app = app(open_registration());
+        let (owner, viewer, stranger) = late_project(&app).await;
+        let db = Database::connect(&app.db_path).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let day = |back: i64| (today - chrono::Duration::days(back)).to_string();
+        let days = |n: &str| format!("{n}<span class=\"unit\"> days</span>");
+
+        for scope in ["/product", "/product/acme/infra"] {
+            for reader in [&owner, &viewer] {
+                let page = app.get(scope, Some(reader)).await;
+                assert_eq!(page.status, StatusCode::OK, "{scope}");
+                let body = page.body;
+                let list = format!("{scope}?view=vulnerabilities");
+                // What is open and what is overdue, each leading to the list that shows it
+                assert!(body.contains(&format!("<div class=\"tile\"><div class=\"value\"><a href=\"{list}\">5</a></div><div class=\"label\">open vulnerabilities</div></div>")), "{scope}: {body}");
+                assert!(body.contains(&format!("<div class=\"tile alert\"><div class=\"value\"><a href=\"{list}&amp;show=overdue\">3</a></div><div class=\"label\">overdue on their remediation deadline</div></div>")), "{scope}");
+                // How late, and how long a decision takes: figures with their unit
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average lateness of the overdue ones</div>", days("7.3"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">worst lateness</div>", days("13"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average time to resolve, last 90 days</div>", days("20"))), "{scope}");
+                // By severity: counts linked to their list, a dash where nothing was decided
+                let narrowed = |count: i64, narrowing: &str| format!("<td><a href=\"{list}{narrowing}\">{count}</a></td>");
+                assert_eq!(
+                    figures_row(&body, "Critical"),
+                    format!("{}{}<td>{NO_DATA}</td><td>0</td>", narrowed(2, "&amp;severity=critical"), narrowed(2, "&amp;show=overdue&amp;severity=critical")),
+                    "{scope}"
+                );
+                assert_eq!(figures_row(&body, "High"), format!("<td>0</td><td>0</td><td>{}</td><td>1</td>", days("20")), "{scope}");
+                assert_eq!(
+                    figures_row(&body, "Medium"),
+                    format!("{}{}<td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=medium"), narrowed(1, "&amp;show=overdue&amp;severity=medium")),
+                    "{scope}"
+                );
+                assert_eq!(figures_row(&body, "Low"), format!("{}<td>0</td><td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=low")), "{scope}");
+                assert_eq!(figures_row(&body, "No score"), format!("{}<td>0</td><td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=none")), "{scope}");
+                assert!(
+                    body.contains(&format!(
+                        "<tr class=\"total\"><td>All</td>{}{}<td>{}</td><td>1</td></tr>",
+                        narrowed(5, ""),
+                        narrowed(3, "&amp;show=overdue"),
+                        days("20")
+                    )),
+                    "{scope}"
+                );
+                // The period is said and chosen without a script; so is what "resolved" means
+                assert!(body.contains(&format!("<a href=\"{scope}\" class=\"active\">90 days</a>")) && body.contains(&format!("<a href=\"{scope}?period=30\">30 days</a>")), "{scope}");
+                assert!(body.contains(&format!("<a href=\"{scope}?period=365\">365 days</a>")), "{scope}");
+                assert!(body.contains("<strong>Resolved</strong> means decided: closed, not applicable or risk accepted."), "{scope}");
+                assert!(body.contains(&format!("during the last 90 days ({} to {today}, UTC)", day(89))), "{scope}");
+                // Figures only: no chart, no list of CVEs, no decision button, no change of a subscription
+                for gone in ["class=\"chart", "<polyline", "<circle", "CVE-2024", "/watchlist/", "list triage", "To review first", "Latest changes", "What changed", "widget", "gadget"] {
+                    assert!(!body.contains(gone), "{scope}: {gone}");
+                }
+                assert!(!body.contains("style="), "{scope}");
+            }
+        }
+
+        // What left the overview is in the History view: the charts follow the day shown
+        let history = app.get("/product/acme/infra?view=history", Some(&viewer)).await.body;
+        for kept in ["To review, by severity", "All tracked CVEs, by status", "To review, by application", "class=\"chart donut\"", "Changes on subscribed products"] {
+            assert!(history.contains(kept), "{kept}");
+        }
+        assert!(history.contains("<div class=\"tile alert\"><div class=\"value\">1</div><div class=\"label\">to review and known exploited (KEV)</div></div>"));
+        assert!(history.contains("<div class=\"value\">0</div><div class=\"label\">risks accepted</div>"));
+        let all = app.get("/product?view=history", Some(&viewer)).await.body;
+        for kept in ["To review, by project", "colored by project", "All tracked CVEs, by project and status", "stroke-p0", "Changes on subscribed products"] {
+            assert!(all.contains(kept), "{kept}");
+        }
+        // The new chart: to review per day and per severity, the accepted risks apart, and their figures in a table
+        for scope in ["/product", "/product/acme/infra"] {
+            let now = app.get(&format!("{scope}?view=history"), Some(&owner)).await.body;
+            assert!(now.contains("CVEs to review, by severity") && now.contains("the severity is the one each CVE has today"), "{scope}");
+            assert!(now.contains("aria-label=\"CVEs to review per day, by severity\"") && now.contains("aria-label=\"accepted risks per day\""), "{scope}");
+            for color in ["sev-critical", "sev-medium", "sev-low", "sev-none"] {
+                assert!(now.contains(&format!("rx=\"1.5\" class=\"fill-{color}\"></rect>")), "{scope} {color}");
+            }
+            assert!(now.contains("<h3 class=\"next\">Accepted risks <small>— 0 on "), "{scope}");
+            assert!(now.contains("<details class=\"daily\"><summary>The figures of these two charts, day by day</summary><table class=\"list fit\"><colgroup><col><col class=\"fig\">"), "{scope}");
+            assert!(now.contains("<th>Day</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>No score</th><th>To review</th><th>Accepted</th>"), "{scope}");
+            let row = |back: i64, figures: [i64; 7]| format!("<tr><td>{}</td>{}</tr>", day(back), figures.map(|n| format!("<td>{n}</td>")).concat());
+            // Today, the day before (the high one still open), before the second application, before anything
+            assert!(now.contains(&row(0, [2, 0, 1, 1, 1, 5, 0])), "{scope}");
+            assert!(now.contains(&row(1, [2, 1, 1, 1, 1, 6, 0])), "{scope}");
+            assert!(now.contains(&row(15, [1, 1, 1, 1, 1, 5, 0])), "{scope}");
+            assert!(now.contains(&row(21, [0, 0, 0, 0, 0, 0, 0])), "{scope}");
+            // The window of the view is the one of the chart
+            assert!(!now.contains(&format!("<tr><td>{}</td>", day(30))), "{scope}");
+            assert!(app.get(&format!("{scope}?view=history&days=90"), Some(&owner)).await.body.contains(&row(30, [0, 0, 0, 0, 0, 0, 0])), "{scope}");
+        }
+        // On a past day the charts moved here count that day: five entries, all on the first application
+        let then = app.get(&format!("/product/acme/infra?view=history&at={}", day(15)), Some(&owner)).await.body;
+        assert!(then.contains("aria-label=\"to review: 5\"") && then.contains("<title>widget · to review: 5</title>") && !then.contains("<title>gadget"), "{then}");
+
+        // A decision older than the period no longer counts in it: a dash, never a zero
+        db.conn()
+            .execute_batch(
+                "UPDATE watchlist_events SET at = datetime('now', '-65 days') WHERE cve_id = 'CVE-2024-5002' AND kind = 'detected';
+                 UPDATE watchlist_events SET at = datetime('now', '-45 days') WHERE cve_id = 'CVE-2024-5002' AND kind = 'status';",
+            )
+            .unwrap();
+        let month = app.get("/product/acme/infra?period=30", Some(&owner)).await.body;
+        assert!(month.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">average time to resolve, last 30 days</div>")), "{month}");
+        assert!(month.contains("<a href=\"/product/acme/infra?period=30\" class=\"active\">30 days</a>") && month.contains("<th>Resolved in 30 days</th>"));
+        assert_eq!(figures_row(&month, "High"), format!("<td>0</td><td>0</td><td>{NO_DATA}</td><td>0</td>"));
+        assert!(month.contains("<a href=\"/product/acme/infra?view=vulnerabilities\">5</a>"));
+        for (asked, label) in [("90", "90 days"), ("365", "365 days"), ("7", "90 days"), ("", "90 days")] {
+            let page = app.get(&format!("/product/acme/infra?period={asked}"), Some(&owner)).await.body;
+            assert!(page.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average time to resolve, last {label}</div>", days("20"))), "{asked}");
+        }
+
+        // A project with nothing to count: zeros that lead nowhere, and dashes
+        app.post("/projects", Some(&owner), "org=acme&name=quiet").await;
+        assert_eq!(app.post("/orgs/acme/projects/quiet/applications", Some(&owner), "name=harmless&version=1.0").await.status, StatusCode::SEE_OTHER);
+        let quiet = app.get("/product/acme/quiet", Some(&owner)).await.body;
+        assert!(quiet.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">open vulnerabilities</div></div>"));
+        assert!(quiet.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        for label in ["average lateness of the overdue ones", "worst lateness", "average time to resolve, last 90 days"] {
+            assert!(quiet.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">{label}</div>")), "{label}");
+        }
+        assert_eq!(quiet.matches("class=\"nodata\"").count(), 3 + 6);
+        assert!(!quiet.contains("0<span class=\"unit\">") && !quiet.contains("view=vulnerabilities&amp;"));
+        // Nothing monitored at all: the first steps, as before
+        app.post("/projects", Some(&owner), "org=acme&name=blank").await;
+        assert!(app.get("/product/acme/blank", Some(&owner)).await.body.contains("This project does not monitor anything yet."));
+
+        // Nothing for who is not signed in, nor for who is not a member
+        for path in ["/product", "/product/acme/infra", "/product/acme/infra?period=30", "/product?view=overdue", "/product/acme/infra?view=overdue"] {
+            assert_eq!(app.get(path, None).await.location.as_deref(), Some("/login"), "{path}");
+        }
+        for path in ["/product/acme/infra", "/product/acme/infra?period=30", "/product/acme/infra?view=overdue", "/product/acme/infra?view=history"] {
+            assert_eq!(app.get(path, Some(&stranger)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let outside = app.get("/product", Some(&stranger)).await.body;
+        assert!(outside.contains("Nothing is monitored yet") && !outside.contains("open vulnerabilities"));
+
+        // REST API: the same figures and nothing else, for who can read the project
+        let token = |session: &str| {
+            let (app, session) = (&app, session.to_string());
+            async move { format!("Bearer {}", tokens_of(&app.post("/settings/tokens", Some(&session), "name=ci&password=a-long-password").await.body).remove(0)) }
+        };
+        let (bearer, reader, other) = (token(&owner).await, token(&viewer).await, token(&stranger).await);
+        let one = "/api/organizations/acme/projects/infra/summary";
+        for path in ["/api/summary", one] {
+            assert_eq!(app.api(path, None).await.status, StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(app.get(path, Some(&owner)).await.status, StatusCode::UNAUTHORIZED, "{path}");
+            for bad in ["0", "366", "ten", "-1"] {
+                assert_eq!(app.api(&format!("{path}?days={bad}"), Some(&bearer)).await.status, StatusCode::BAD_REQUEST, "{path} {bad}");
+            }
+        }
+        assert_eq!(app.api(one, Some(&other)).await.status, StatusCode::NOT_FOUND);
+        let read = |path: String, bearer: String| {
+            let app = &app;
+            async move {
+                let reply = app.api(&path, Some(&bearer)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.body);
+                // Figures only: no CVE, no application, no project
+                for leaked in ["CVE-", "widget", "gadget", "infra", "acme"] {
+                    assert!(!reply.body.contains(leaked), "{path}: {leaked}");
+                }
+                serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()
+            }
+        };
+        let expected = serde_json::json!({
+            "as_of": today.to_string(),
+            "open": { "total": 5, "critical": 2, "high": 0, "medium": 1, "low": 1, "none": 1 },
+            "overdue": { "total": 3, "critical": 2, "high": 0, "medium": 1, "low": 0, "none": 0 },
+            "overdue_days": { "avg": 7.3, "max": 13 },
+            "period_days": 90,
+            "resolved": { "total": 1, "critical": 0, "high": 1, "medium": 0, "low": 0, "none": 0 },
+            "resolved_avg_days": { "total": 20.0, "critical": null, "high": 20.0, "medium": null, "low": null, "none": null },
+        });
+        for path in [one, "/api/summary", "/api/summary?org=acme", "/api/summary?days=90"] {
+            for who in [&bearer, &reader] {
+                assert_eq!(read(path.to_string(), who.clone()).await, expected, "{path}");
+            }
+        }
+        let month = read(format!("{one}?days=30"), bearer.clone()).await;
+        assert_eq!((month["period_days"].as_i64(), month["resolved"]["total"].as_i64(), month["open"]["total"].as_i64()), (Some(30), Some(0), Some(5)));
+        assert!(month["resolved_avg_days"]["total"].is_null() && month["resolved_avg_days"]["high"].is_null());
+        // Who reads nothing gets figures of nothing, and an organization that is not theirs narrows to nothing
+        for (path, who) in [("/api/summary", &other), ("/api/summary?org=acme", &other), ("/api/summary?org=nowhere", &bearer)] {
+            let nothing = read(path.to_string(), who.clone()).await;
+            assert_eq!((nothing["open"]["total"].as_i64(), nothing["resolved"]["total"].as_i64()), (Some(0), Some(0)), "{path}");
+            assert!(nothing["overdue_days"]["avg"].is_null() && nothing["overdue_days"]["max"].is_null() && nothing["resolved_avg_days"]["total"].is_null(), "{path}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overdue_view_tells_where_the_late_ones_are_and_since_when() {
+        use chrono::Datelike;
+
+        let app = app(open_registration());
+        let (owner, viewer, stranger) = late_project(&app).await;
+        let today = chrono::Utc::now().date_naive();
+        let ago = |back: i64| today - chrono::Duration::days(back);
+        let days = |n: &str| format!("{n}<span class=\"unit\"> days</span>");
+        let tables = regex::Regex::new(r#"<table class="([^"]*)">(<colgroup>)?"#).unwrap();
+
+        for scope in ["/product", "/product/acme/infra"] {
+            for reader in [&owner, &viewer] {
+                let page = app.get(&format!("{scope}?view=overdue"), Some(reader)).await;
+                assert_eq!(page.status, StatusCode::OK, "{scope}");
+                let body = page.body;
+                assert!(body.contains("<title>Overdue · Vulnizard</title>") && body.contains(&menu_entry(scope, "overdue", "Overdue", true)), "{scope}");
+                // How many, how late
+                assert!(body.contains(&format!("<div class=\"tile alert\"><div class=\"value\"><a href=\"{scope}?view=vulnerabilities&amp;show=overdue\">3</a></div><div class=\"label\">overdue vulnerabilities</div></div>")), "{scope}: {body}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average lateness</div>", days("7.3"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">worst lateness</div>", days("13"))), "{scope}");
+                // By application, the worst first; each leads to its overdue entries, in its project
+                let project = if scope == "/product" { "<td class=\"project\"><a href=\"/product/acme/infra?view=overdue\" title=\"infra\">infra</a></td>" } else { "" };
+                let row = |name: &str, count: i64, average: &str, worst: &str| {
+                    format!(
+                        "<tr><td><a href=\"/product/acme/infra?view=vulnerabilities&amp;show=overdue&amp;app={name}\">{name}</a></td>{project}<td>{count}</td><td>{}</td><td>{}</td></tr>",
+                        days(average),
+                        days(worst)
+                    )
+                };
+                let (widget, gadget) = (row("widget", 2, "9.5", "13"), row("gadget", 1, "3", "3"));
+                let at = |row: &str| body.find(row).unwrap_or_else(|| panic!("{scope}: no {row} in {body}"));
+                assert!(at(&widget) < at(&gadget), "{scope}");
+                // Every table is sized by the stylesheet
+                let found: Vec<_> = tables.captures_iter(&body).collect();
+                assert_eq!(found.len(), 3, "{scope}");
+                assert!(found.iter().all(|t| t[1].starts_with("list fit") && t.get(2).is_some()), "{scope}");
+
+                // Over time: today's overdue entries by week of detection and of deadline…
+                let mut weeks: std::collections::BTreeMap<chrono::NaiveDate, (i64, i64)> = Default::default();
+                let monday = |day: chrono::NaiveDate| day - chrono::Duration::days(i64::from(day.weekday().num_days_from_monday()));
+                for (detected, due) in [(20, 13), (20, 6), (10, 3)] {
+                    weeks.entry(monday(ago(detected))).or_default().0 += 1;
+                    weeks.entry(monday(ago(due))).or_default().1 += 1;
+                }
+                for (week, (detected, due)) in &weeks {
+                    assert!(body.contains(&format!("<tr><td>{week}</td><td>{detected}</td><td>{due}</td></tr>")), "{scope} {week}");
+                }
+                assert!(body.contains("detected that week <strong>3</strong>") && body.contains("due that week <strong>3</strong>"), "{scope}");
+                // …and how many were overdue at the end of each day: none, then one, two, three
+                for (back, count) in [(0, 3), (2, 3), (3, 2), (5, 2), (6, 1), (12, 1), (13, 0), (29, 0)] {
+                    assert!(body.contains(&format!("<tr><td>{}</td><td>{count}</td></tr>", ago(back))), "{scope} {back}");
+                    assert!(body.contains(&format!("<title>{} — {count} overdue</title>", ago(back))), "{scope} {back}");
+                }
+                // The window is the one of the History view, and a day leads to its state there
+                assert!(body.contains(&format!("<a href=\"{scope}?view=overdue&amp;days=30\" class=\"active\">30 days</a>")) && body.contains(&format!("<a href=\"{scope}?view=overdue&amp;days=365\">1 year</a>")), "{scope}");
+                assert!(body.contains(&format!("<a href=\"{scope}?view=history&amp;at={}\">", ago(4))), "{scope}");
+                assert!(!body.contains(&format!("<tr><td>{}</td>", ago(30))), "{scope}");
+                assert!(!body.contains("style=") && !body.contains("CVE-2024"), "{scope}");
+            }
+            let year = app.get(&format!("{scope}?view=overdue&days=365"), Some(&owner)).await.body;
+            assert!(year.contains(&format!("<tr><td>{}</td><td>0</td></tr>", ago(364))) && !year.contains(&format!("<tr><td>{}</td>", ago(365))), "{scope}");
+            // Sorted on request
+            let fewest = app.get(&format!("{scope}?view=overdue&sort=count&dir=asc"), Some(&owner)).await.body;
+            assert!(fewest.find("app=gadget\">").unwrap() < fewest.find("app=widget\">").unwrap(), "{scope}");
+        }
+
+        // The list narrowed to one application, as the rows above link to it
+        for scope in ["/product", "/product/acme/infra"] {
+            let list = format!("{scope}?view=vulnerabilities");
+            let cves = |body: &str| -> Vec<u32> { (5001..=5006).filter(|n| body.contains(&format!("CVE-2024-{n}</a>"))).collect() };
+            let get = |query: &'static str| {
+                let (app, owner, list) = (&app, owner.clone(), list.clone());
+                async move { app.get(&format!("{list}{query}"), Some(&owner)).await.body }
+            };
+            let widget = get("&show=overdue&app=widget").await;
+            assert_eq!(cves(&widget), [5001, 5003], "{scope}");
+            assert!(widget.contains(&format!("<p class=\"narrowed\">Only the application <strong>widget</strong> · <a href=\"{list}&amp;show=overdue\">Show all</a></p>")), "{scope}: {widget}");
+            // The narrowing follows from one list to the other, and through a sort
+            assert!(widget.contains(&format!("<a href=\"{list}&amp;app=widget\">To review</a>")), "{scope}");
+            assert!(widget.contains(&format!("<a href=\"{list}&amp;show=overdue&amp;app=widget\" class=\"active\">Overdue</a>")), "{scope}");
+            assert!(widget.contains("show=overdue&amp;app=widget&amp;sort=cvss&amp;dir=asc"), "{scope}");
+            assert_eq!(cves(&get("&show=overdue&app=gadget").await), [5006], "{scope}");
+            assert_eq!(cves(&get("&app=widget").await), [5001, 5003, 5004, 5005], "{scope}");
+            assert_eq!(cves(&get("&show=handled&app=widget").await), [5002], "{scope}");
+            assert!(get("&show=handled&app=gadget").await.contains("No decision yet."), "{scope}");
+            // A name is matched whole, and one nobody runs lists nothing
+            assert_eq!(cves(&get("&app=widge").await), [] as [u32; 0], "{scope}");
+            // By severity, as the figures of the overview link to it; both together
+            let critical = get("&severity=critical").await;
+            assert_eq!(cves(&critical), [5001, 5006], "{scope}");
+            assert!(critical.contains(&format!("Only the CVEs of severity <strong>Critical</strong> · <a href=\"{list}\">Show all</a>")), "{scope}");
+            assert_eq!(cves(&get("&show=overdue&severity=medium").await), [5003], "{scope}");
+            assert_eq!(cves(&get("&severity=none").await), [5005], "{scope}");
+            assert_eq!(cves(&get("&severity=low").await), [5004], "{scope}");
+            let both = get("&severity=critical&app=gadget").await;
+            assert_eq!(cves(&both), [5006], "{scope}");
+            assert!(both.contains("Only the application <strong>gadget</strong>, the CVEs of severity <strong>Critical</strong>"), "{scope}");
+            // What is not a severity narrows nothing; a name is written back escaped
+            let bogus = get("&severity=bogus").await;
+            assert!(cves(&bogus).len() == 5 && !bogus.contains("class=\"narrowed\""), "{scope}");
+            let evil = get("&app=%3Cscript%3Ealert(1)%3C%2Fscript%3E").await;
+            assert!(!evil.contains("<script>alert") && evil.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{scope}");
+        }
+        // Somebody else's entries are not theirs to narrow to
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&app=widget", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get("/product?view=vulnerabilities&app=widget", Some(&stranger)).await.body.contains("CVE-2024-500"));
+
+        // Nothing overdue: the view says so, for who reads nothing as for a project in time
+        let outside = app.get("/product?view=overdue", Some(&stranger)).await.body;
+        assert!(outside.contains("<strong>Nothing is overdue.</strong>") && !outside.contains("widget") && !outside.contains("By application"));
+        assert_eq!(app.get("/product/acme/infra?view=overdue", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+        // Once decided nothing is late any more, and what was late before stays in the chart of the days
+        let db = Database::connect(&app.db_path).unwrap();
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        for cve in ["CVE-2024-5001", "CVE-2024-5003", "CVE-2024-5006"] {
+            let id = db.project_entries_for_cve(project, cve).unwrap()[0].0;
+            assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{id}"), Some(&owner), "status=not_applicable").await.status, StatusCode::SEE_OTHER);
+        }
+        let calm = app.get("/product/acme/infra?view=overdue", Some(&owner)).await.body;
+        assert!(calm.contains("<strong>Nothing is overdue.</strong>") && !calm.contains("By application") && !calm.contains("app=widget"));
+        assert!(calm.contains(&format!("<tr><td>{today}</td><td>0</td></tr>")) && calm.contains(&format!("<tr><td>{}</td><td>3</td></tr>", ago(1))));
+        let overview = app.get("/product/acme/infra", Some(&owner)).await.body;
+        assert!(overview.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        assert!(overview.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">worst lateness</div>")));
     }
 }
