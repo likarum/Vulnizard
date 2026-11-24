@@ -3,6 +3,30 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.3.0 (in preparation)
+
+### Added
+
+- **Remediation deadlines** (#68). A delay in days per CVSS severity (critical 7, high 30,
+  medium 90, low 180 by default) and one for exploited CVEs (CISA KEV, 14), which wins when
+  it is shorter; a CVE without a score follows the medium delay. Set for the instance in
+  Administration → Deadlines; the owners of an organization may replace any of them for its
+  projects. The clock starts when the entry is detected and any decision (closed, not
+  applicable, accepted risk) stops it. The Vulnerabilities view has a sortable "Due" column
+  and an "Overdue" filter. MCP `list_watchlist` and the new REST
+  `GET /api/organizations/{org}/projects/{project}/watchlist` give `due_at`, `days_left`
+  and `overdue_days`, and can list the overdue entries only. Schema v29, automatic.
+- **Invitations** (#10). Adding a member to an organization or a project by name no longer
+  grants a role at once, and no longer says whether the name exists: it records an
+  invitation, valid 14 days, which the person accepts or declines after signing in (a mark in
+  the header, a section in Settings). An account created after the invitation can never take
+  it. Changing the role of someone already in the list still applies at once, and so do the
+  rights given from Administration → Users. Schema v30, automatic.
+
+### Changed
+
+- A KEV or NVD answer that lacks a field Vulnizard does not use is no longer refused (#11).
+
 ## 0.2.6
 
 The sources are asked for much less. With the default settings an instance downloaded about
