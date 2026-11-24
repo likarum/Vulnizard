@@ -365,6 +365,8 @@ table.fit col.cvss { width: 122px; }
 table.fit col.when { width: 186px; }
 table.fit col.day { width: 124px; }
 table.fit col.num { width: 116px; }
+/* A figure among several in a row (a count per severity) */
+table.fit col.fig { width: 84px; }
 table.fit col.flag { width: 96px; }
 table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
@@ -433,6 +435,7 @@ table.dense col.project { width: 10%; }
   table.fit col.when { width: 104px; }
   table.fit col.day { width: 104px; }
   table.fit col.num { width: 104px; }
+  table.fit col.fig { width: 72px; }
   table.fit col.flag { width: 84px; }
   table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
@@ -556,6 +559,19 @@ nav.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); fo
 .tile .label { color: var(--muted); font-size: 13px; }
 .tile.alert { border-color: var(--danger); }
 .tile.alert .value { color: var(--danger); }
+/* A figure leading to the list of what it counts keeps its color; the unit is said next to it, smaller */
+.tile .value a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+.unit { font-size: 0.6em; font-weight: 600; color: var(--muted); }
+table.list .unit { font-size: inherit; font-weight: 400; }
+.nodata { color: var(--muted); }
+table.list tr.total td { font-weight: 600; }
+.chips.period { align-items: center; }
+p.narrowed { margin: -4px 0 14px; }
+/* The figures of a chart, for who cannot read it: folded under it */
+details.daily { margin-top: 10px; }
+details.daily summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.daily[open] summary { margin-bottom: 8px; }
+.card h3.next { margin-top: 16px; }
 
 .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; justify-content: space-between; }
 .head h1, .head h2 { margin-bottom: 8px; }

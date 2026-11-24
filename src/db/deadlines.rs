@@ -6,7 +6,7 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use crate::db::{Actor, Database, TriageItem};
-use crate::deadlines::{DelayOverride, Delays, Policies, FIELDS};
+use crate::deadlines::{DelayOverride, Delays, EntryTrack, Figures, Policies, FIELDS};
 
 /// One row per organization replacing at least one delay; a NULL follows the instance
 const DEADLINES_SCHEMA: &str = r#"
@@ -128,6 +128,29 @@ impl Database {
         Ok(policies)
     }
 
+    /// The history of every entry of a scope, each with the delays of its
+    /// organization: the entries `reader` may read (`None`: the local
+    /// operator, who reads everything), of one project when `project_id` is
+    /// given, and of the organization named `org` when one is. The
+    /// organization only narrows what the rights of the reader give.
+    pub fn entry_tracks(&self, reader: Option<i64>, project_id: Option<i64>, org: Option<&str>) -> Result<Vec<EntryTrack>> {
+        let mut events = self.lifecycle_events_for(reader, project_id)?;
+        if let Some(org) = org {
+            events.retain(|e| e.org == org);
+        }
+        Ok(crate::deadlines::tracks(&events, &self.deadline_policies()?))
+    }
+
+    /// The executive figures of a scope (the one of [`Database::entry_tracks`]:
+    /// one project, everything the reader may read, or that narrowed to an
+    /// organization) as of today, the resolution averages being taken over
+    /// the last `period_days` days. What the overview shows, and what the
+    /// REST API and the MCP server answer: see [`crate::deadlines::figures`].
+    pub fn figures(&self, reader: Option<i64>, project_id: Option<i64>, org: Option<&str>, period_days: i64) -> Result<Figures> {
+        let tracks = self.entry_tracks(reader, project_id, org)?;
+        Ok(crate::deadlines::figures(&tracks, chrono::Utc::now().date_naive(), period_days))
+    }
+
     /// Gives each entry its deadline as of today (`TriageItem::deadline`),
     /// with the delays of its organization
     pub(super) fn with_deadlines(&self, mut items: Vec<TriageItem>) -> Result<Vec<TriageItem>> {
@@ -154,7 +177,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deadlines::{tracks, DeadlineState};
+    use crate::deadlines::{tracks, BySeverity, DeadlineState, Lateness};
     use crate::models::{AffectedProduct, Application, Cve, CveStatus};
     use std::collections::BTreeMap;
 
@@ -361,5 +384,105 @@ mod tests {
         db.delete_org(other).unwrap();
         let left: i64 = db.conn().query_row("SELECT COUNT(*) FROM organization_delays", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn the_figures_of_a_scope_follow_the_reader_the_organization_and_its_delays() {
+        let db = Database::open_in_memory().unwrap();
+        let alice = db.create_account("alice", None, "h", false).unwrap();
+        let bob = db.create_account("bob", None, "h", false).unwrap();
+        let actor = Actor::user(alice, "alice");
+        let acme = db.create_org("acme", alice).unwrap();
+        let other = db.create_org("other", alice).unwrap();
+        let infra = db.create_org_project(acme, alice, "infra", None).unwrap();
+        let elsewhere = db.create_org_project(other, alice, "elsewhere", None).unwrap();
+        // Each severity, one without a score, two known exploited
+        for (id, cvss, kev) in [
+            ("CVE-2024-8001", Some(9.8), false),
+            ("CVE-2024-8002", Some(8.0), false),
+            ("CVE-2024-8003", Some(5.0), false),
+            ("CVE-2024-8004", Some(2.0), false),
+            ("CVE-2024-8005", None, false),
+            ("CVE-2024-8006", Some(8.0), true),
+            ("CVE-2024-8007", Some(9.8), true),
+        ] {
+            cve(&db, id, cvss, kev, "5.0");
+        }
+        let mut apps = Vec::new();
+        for project in [infra, elsewhere] {
+            let mut app = Application::new(project, "widget".into());
+            app.version = Some("1.0".into());
+            app.id = Some(db.create_application(&app).unwrap());
+            db.scan_app_for_cves(&app).unwrap();
+            apps.push(app);
+        }
+        // Detected 20 days ago: the two critical ones are 13 days late, the exploited high one 6
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-20 days')", []).unwrap();
+        db.conn().execute("UPDATE watchlist_events SET at = datetime('now', '-20 days')", []).unwrap();
+
+        let all = db.figures(Some(alice), None, None, 90).unwrap();
+        assert_eq!(all.open, BySeverity { total: 14, critical: 4, high: 4, medium: 2, low: 2, none: 2 });
+        assert_eq!(all.overdue, BySeverity { total: 6, critical: 4, high: 2, medium: 0, low: 0, none: 0 });
+        assert_eq!(all.overdue_days, Lateness { avg: Some(10.7), max: Some(13) });
+        assert_eq!((all.resolved.total, all.resolved_avg_days.total, all.period_days), (0, None, 90));
+        assert_eq!(all.as_of, chrono::Utc::now().date_naive());
+        // What is counted is what the lists show
+        let listed = |project: Option<i64>, org: Option<&str>| {
+            (db.scoped_triage(alice, project, org, false, -1).unwrap().len() as i64, db.scoped_overdue(alice, project, org).unwrap().len() as i64)
+        };
+        let counted = |project: Option<i64>, org: Option<&str>| {
+            let f = db.figures(Some(alice), project, org, 90).unwrap();
+            assert_eq!(f.open.bands().iter().map(|n| **n).sum::<i64>(), f.open.total);
+            assert_eq!(f.overdue.bands().iter().map(|n| **n).sum::<i64>(), f.overdue.total);
+            (f.open.total, f.overdue.total)
+        };
+        for (project, org) in [(None, None), (Some(infra), None), (Some(elsewhere), None), (None, Some("acme")), (None, Some("other")), (None, Some("nowhere"))] {
+            assert_eq!(counted(project, org), listed(project, org), "{project:?} {org:?}");
+        }
+        assert_eq!((counted(Some(infra), None), counted(None, Some("other")), counted(None, Some("nowhere"))), ((7, 3), (7, 3), (0, 0)));
+        // The local operator reads everything; who has no project reads nothing, whatever is asked
+        assert_eq!(db.figures(None, None, None, 90).unwrap(), all);
+        for (project, org) in [(None, None), (Some(infra), None), (None, Some("acme"))] {
+            let nothing = db.figures(Some(bob), project, org, 90).unwrap();
+            assert_eq!((nothing.open.total, nothing.overdue.total, nothing.overdue_days.max), (0, 0, None), "{project:?} {org:?}");
+        }
+        assert!(db.entry_tracks(Some(bob), None, None).unwrap().is_empty());
+        assert_eq!(db.entry_tracks(Some(alice), None, Some("acme")).unwrap().len(), 7);
+
+        // One organization gives itself 25 days for a critical CVE and 5 for a high one: each entry
+        // follows the delays of its own organization, in "all projects" too
+        db.set_org_delay_override(acme, &DelayOverride { critical: Some(25), high: Some(5), ..Default::default() }, &actor).unwrap();
+        let (strict, plain) = (db.figures(Some(alice), None, Some("acme"), 90).unwrap(), db.figures(Some(alice), None, Some("other"), 90).unwrap());
+        // acme: the two high ones are 15 days late, the critical ones are in time (the exploited one too: 14 days is shorter than 25 and 20 days have passed)
+        assert_eq!(strict.overdue, BySeverity { total: 3, critical: 1, high: 2, medium: 0, low: 0, none: 0 });
+        assert_eq!(strict.overdue_days, Lateness { avg: Some(12.0), max: Some(15) });
+        assert_eq!(plain.overdue, BySeverity { total: 3, critical: 2, high: 1, medium: 0, low: 0, none: 0 });
+        assert_eq!(plain.overdue_days, Lateness { avg: Some(10.7), max: Some(13) });
+        let mixed = db.figures(Some(alice), None, None, 90).unwrap();
+        assert_eq!(mixed.overdue, BySeverity { total: 6, critical: 3, high: 3, medium: 0, low: 0, none: 0 });
+        assert_eq!(mixed.overdue_days, Lateness { avg: Some(11.3), max: Some(15) });
+        assert_eq!(db.figures(Some(alice), Some(infra), None, 90).unwrap(), strict);
+        assert_eq!(counted(None, None), listed(None, None));
+
+        // Decisions: counted over the period, from the detection; a reopened one no longer counts
+        let entry = |project: i64, cve: &str| db.project_entries_for_cve(project, cve).unwrap()[0].0;
+        db.set_watchlist_status(elsewhere, entry(elsewhere, "CVE-2024-8001"), CveStatus::Accepted, &actor, Some("because")).unwrap();
+        db.set_watchlist_status(elsewhere, entry(elsewhere, "CVE-2024-8005"), CveStatus::NotApplicable, &actor, None).unwrap();
+        db.set_watchlist_status(elsewhere, entry(elsewhere, "CVE-2024-8004"), CveStatus::Treated, &actor, None).unwrap();
+        db.set_watchlist_status(elsewhere, entry(elsewhere, "CVE-2024-8004"), CveStatus::Untreated, &actor, None).unwrap();
+        let decided = db.figures(Some(alice), Some(elsewhere), None, 90).unwrap();
+        assert_eq!((decided.open.total, decided.open.low, decided.overdue.total), (5, 1, 2));
+        assert_eq!(decided.resolved, BySeverity { total: 2, critical: 1, high: 0, medium: 0, low: 0, none: 1 });
+        assert_eq!(decided.resolved_avg_days, BySeverity { total: Some(20.0), critical: Some(20.0), high: None, medium: None, low: None, none: Some(20.0) });
+        // The application is removed: nothing of it is open any more, and what was decided stays decided
+        db.delete_application_by_id(elsewhere, apps[1].id.unwrap(), &actor).unwrap();
+        let removed = db.figures(Some(alice), Some(elsewhere), None, 90).unwrap();
+        assert_eq!((removed.open.total, removed.overdue.total, removed.overdue_days), (0, 0, Lateness::default()));
+        assert_eq!((removed.resolved, removed.resolved_avg_days), (decided.resolved, decided.resolved_avg_days));
+        // Out of the period, a decision is not counted: an average of nothing is not a zero
+        db.conn().execute("UPDATE watchlist_events SET at = datetime(at, '-40 days')", []).unwrap();
+        let month = db.figures(Some(alice), Some(elsewhere), None, 30).unwrap();
+        assert_eq!((month.resolved.total, month.resolved_avg_days.total, month.resolved_avg_days.critical), (0, None, None));
+        assert_eq!(db.figures(Some(alice), Some(elsewhere), None, 90).unwrap().resolved.total, 2);
     }
 }

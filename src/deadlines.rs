@@ -27,6 +27,11 @@
 //!   into one [`EntryTrack`] per entry, which also knows the past:
 //!   [`EntryTrack::overdue_on`] a given day, [`overdue_per_day`] over a window.
 //!
+//! The executive figures ([`Figures`]: what is open, what is overdue, how long
+//! a decision takes) are computed in one place, [`figures`], from those
+//! tracks; `Database::figures` reads them for a scope. The overview, the REST
+//! API and the MCP server all answer with it.
+//!
 //! The delays differ from one organization to the next: a view mixing
 //! organizations must go through [`Policies`] (`Database::deadline_policies`),
 //! which picks the delays of the organization of each entry, and never apply
@@ -272,7 +277,6 @@ impl Deadline {
     }
 
     /// Days from detection to the decision; `None` while to review
-    #[allow(dead_code)] // for the figures of the overview (resolution time)
     pub fn resolved_in_days(&self) -> Option<i64> {
         match self.state {
             DeadlineState::Open { .. } => None,
@@ -441,11 +445,13 @@ impl EntryTrack {
         day > self.due && self.open_on(day)
     }
 
-    /// Where the entry stands today; `None` once removed
-    #[allow(dead_code)] // for the overdue analysis, which also counts what was removed
+    /// Where the entry stands today. An entry removed with its application
+    /// keeps the decision it left with; removed while to review it stands
+    /// nowhere (`None`): nobody decided, and nothing is left to decide.
     pub fn deadline(&self, today: NaiveDate) -> Option<Deadline> {
-        let state = match (self.status.as_deref()?, self.decided) {
-            ("untreated", _) | (_, None) => DeadlineState::Open { days_left: (self.due - today).num_days() },
+        let state = match (self.status.as_deref(), self.decided) {
+            (None, None) => return None,
+            (Some("untreated"), _) | (Some(_), None) => DeadlineState::Open { days_left: (self.due - today).num_days() },
             (_, Some(on)) => DeadlineState::Decided {
                 took_days: (on - self.detected).num_days().max(0),
                 late_days: (on - self.due).num_days().max(0),
@@ -510,12 +516,127 @@ pub fn tracks(events: &[LifecycleEvent], policies: &Policies) -> Vec<EntryTrack>
 }
 
 /// Number of overdue entries at the end of each day, from `from` to `to` included
-#[allow(dead_code)] // for the chart of the overdue entries over time
 pub fn overdue_per_day(tracks: &[EntryTrack], from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, i64)> {
     from.iter_days()
         .take_while(|day| *day <= to)
         .map(|day| (day, tracks.iter().filter(|t| t.overdue_on(day)).count() as i64))
         .collect()
+}
+
+/// Keys of the severity bands, most severe first; `none`: CVEs without a score
+pub const BANDS: [&str; 5] = ["critical", "high", "medium", "low", "none"];
+
+/// Position in [`BANDS`] of the band of a score
+pub fn band(cvss: Option<f64>) -> usize {
+    match Severity::of(cvss) {
+        Some(Severity::Critical) => 0,
+        Some(Severity::High) => 1,
+        Some(Severity::Medium) => 2,
+        Some(Severity::Low) => 3,
+        None => 4,
+    }
+}
+
+/// One value per severity band, and one for all of them together
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct BySeverity<T> {
+    pub total: T,
+    pub critical: T,
+    pub high: T,
+    pub medium: T,
+    pub low: T,
+    /// CVEs without a score
+    pub none: T,
+}
+
+impl<T> BySeverity<T> {
+    fn new(total: T, [critical, high, medium, low, none]: [T; 5]) -> Self {
+        BySeverity { total, critical, high, medium, low, none }
+    }
+
+    /// The values of the bands, in the order of [`BANDS`]
+    pub fn bands(&self) -> [&T; 5] {
+        [&self.critical, &self.high, &self.medium, &self.low, &self.none]
+    }
+}
+
+/// Lateness of the entries that are overdue today, in days past their deadline
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Lateness {
+    pub avg: Option<f64>,
+    pub max: Option<i64>,
+}
+
+/// The executive figures of a scope. Counts are of watchlist entries (one
+/// CVE on one application); the severity is the one the CVE has today. An
+/// average over nothing is `None`, never 0.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Figures {
+    /// Day the figures are those of (UTC)
+    pub as_of: NaiveDate,
+    /// Entries to review
+    pub open: BySeverity<i64>,
+    /// Entries to review that are past their remediation deadline
+    pub overdue: BySeverity<i64>,
+    /// How late the overdue entries are
+    pub overdue_days: Lateness,
+    /// Length of the period the two figures below are taken over, ending on `as_of`
+    pub period_days: i64,
+    /// Entries resolved during the period: any decision (closed, not
+    /// applicable, risk accepted) taken then and still in force, or in force
+    /// when the entry left with its application. A decision reopened since
+    /// does not count.
+    pub resolved: BySeverity<i64>,
+    /// Average number of days from the detection of those entries to their decision
+    pub resolved_avg_days: BySeverity<Option<f64>>,
+}
+
+/// Mean of whole days, to one decimal; `None` of nothing
+fn mean(days: &[i64]) -> Option<f64> {
+    if days.is_empty() {
+        return None;
+    }
+    Some((days.iter().sum::<i64>() as f64 / days.len() as f64 * 10.0).round() / 10.0)
+}
+
+/// The executive figures of these entries as of `today`, the averages of
+/// resolution being taken over the `period_days` days ending today (at least
+/// one, at most [`MAX_DAYS`]). The only place they are computed: narrow the
+/// tracks to the scope wanted before calling (`Database::figures` does).
+pub fn figures(tracks: &[EntryTrack], today: NaiveDate, period_days: i64) -> Figures {
+    let period_days = period_days.clamp(1, i64::from(MAX_DAYS));
+    let since = today - Duration::days(period_days - 1);
+    let (mut open, mut overdue) = ([0i64; 5], [0i64; 5]);
+    let mut late: Vec<i64> = Vec::new();
+    let mut took: [Vec<i64>; 5] = Default::default();
+    for track in tracks {
+        let Some(deadline) = track.deadline(today) else { continue };
+        let band = band(track.cvss);
+        match deadline.resolved_in_days() {
+            None => {
+                open[band] += 1;
+                if deadline.is_overdue() {
+                    overdue[band] += 1;
+                    late.push(deadline.overdue_days());
+                }
+            }
+            Some(days) => {
+                if track.decided.is_some_and(|on| on >= since && on <= today) {
+                    took[band].push(days);
+                }
+            }
+        }
+    }
+    let every: Vec<i64> = took.iter().flatten().copied().collect();
+    Figures {
+        as_of: today,
+        open: BySeverity::new(open.iter().sum(), open),
+        overdue: BySeverity::new(overdue.iter().sum(), overdue),
+        overdue_days: Lateness { avg: mean(&late), max: late.iter().copied().max() },
+        period_days,
+        resolved: BySeverity::new(every.len() as i64, took.each_ref().map(|days| days.len() as i64)),
+        resolved_avg_days: BySeverity::new(mean(&every), took.each_ref().map(|days| mean(days))),
+    }
 }
 
 #[cfg(test)]
@@ -658,11 +779,99 @@ mod tests {
         // Removed: overdue until then, nothing after
         assert!(four.overdue_on(day("2026-03-09")) && !four.overdue_on(day("2026-03-10")));
         assert!(four.deadline(today).is_none());
+        // Removed after a decision: the decision it left with stays
+        let mut left = three.clone();
+        left.status = None;
+        assert_eq!(left.deadline(today).unwrap().resolved_in_days(), Some(3));
 
         let per_day = overdue_per_day(&tracks, day("2026-03-03"), day("2026-03-12"));
         assert_eq!(per_day.len(), 10);
         let counts: Vec<i64> = per_day.iter().map(|(_, n)| *n).collect();
         //                  3  4  5  6  7  8  9  10 11 12
         assert_eq!(counts, [0, 1, 1, 1, 1, 1, 3, 2, 2, 1]);
+    }
+
+    #[test]
+    fn the_figures_count_what_is_open_overdue_and_resolved() {
+        let mut policies = Policies::uniform(Delays::default());
+        policies.replace("strict", &DelayOverride { high: Some(5), ..Default::default() });
+        let today = day("2026-06-30");
+        // Nothing tracked: counts are zero, averages are unknown
+        let empty = figures(&[], today, 90);
+        assert_eq!((empty.open, empty.overdue, empty.resolved), (BySeverity::default(), BySeverity::default(), BySeverity::default()));
+        assert_eq!((empty.overdue_days, empty.resolved_avg_days), (Lateness { avg: None, max: None }, BySeverity::default()));
+        assert_eq!((empty.as_of, empty.period_days), (today, 90));
+
+        let kev = |mut e: LifecycleEvent| {
+            e.kev = true;
+            e
+        };
+        let events = vec![
+            // 1 critical, detected 06-10, due 06-17: 13 days late
+            event(1, 1, "2026-06-10", "detected", Some("untreated"), "acme", Some(9.8)),
+            // 2 high, detected 06-10, due 07-10 in acme: in time…
+            event(2, 2, "2026-06-10", "detected", Some("untreated"), "acme", Some(7.5)),
+            // 3 …and due 06-15 in the stricter organization: 15 days late
+            event(3, 3, "2026-06-10", "detected", Some("untreated"), "strict", Some(7.5)),
+            // 4 medium but known exploited: 14 days, due 06-24, 6 days late
+            kev(event(4, 4, "2026-06-10", "detected", Some("untreated"), "acme", Some(5.0))),
+            // 5 low, in time; 6 without a score follows the medium delay: in time
+            event(5, 5, "2026-06-10", "detected", Some("untreated"), "acme", Some(2.0)),
+            event(6, 6, "2026-06-10", "detected", Some("untreated"), "acme", None),
+            // 7 critical closed after 4 days, 8 critical accepted after 11 days: in the period
+            event(7, 7, "2026-06-01", "detected", Some("untreated"), "acme", Some(9.8)),
+            event(8, 7, "2026-06-05", "status", Some("treated"), "acme", Some(9.8)),
+            event(9, 8, "2026-06-01", "detected", Some("untreated"), "acme", Some(9.8)),
+            event(10, 8, "2026-06-12", "status", Some("accepted"), "acme", Some(9.8)),
+            // 9 without a score, not applicable after 2 days
+            event(11, 9, "2026-06-20", "detected", Some("untreated"), "acme", None),
+            event(12, 9, "2026-06-22", "status", Some("not_applicable"), "acme", None),
+            // 10 high decided long ago: out of a 30 day period, in a 365 day one (took 9 days)
+            event(13, 10, "2026-01-01", "detected", Some("untreated"), "acme", Some(8.0)),
+            event(14, 10, "2026-01-10", "status", Some("treated"), "acme", Some(8.0)),
+            // 11 medium closed then reopened: open again, due at its first deadline, and not resolved
+            event(15, 11, "2026-03-01", "detected", Some("untreated"), "acme", Some(5.0)),
+            event(16, 11, "2026-06-02", "status", Some("treated"), "acme", Some(5.0)),
+            event(17, 11, "2026-06-25", "status", Some("untreated"), "acme", Some(5.0)),
+            // 12 low closed after 20 days, then its application was removed: the decision stays
+            event(18, 12, "2026-06-01", "detected", Some("untreated"), "acme", Some(2.0)),
+            event(19, 12, "2026-06-21", "status", Some("treated"), "acme", Some(2.0)),
+            event(20, 12, "2026-06-28", "removed", None, "acme", Some(2.0)),
+            // 13 critical removed while overdue: counts nowhere
+            event(21, 13, "2026-06-01", "detected", Some("untreated"), "acme", Some(9.8)),
+            event(22, 13, "2026-06-28", "removed", None, "acme", Some(9.8)),
+        ];
+        let tracked = tracks(&events, &policies);
+        let f = figures(&tracked, today, 30);
+        assert_eq!(f.open, BySeverity { total: 7, critical: 1, high: 2, medium: 2, low: 1, none: 1 });
+        // 11 was due on 05-30: 31 days late
+        assert_eq!(f.overdue, BySeverity { total: 4, critical: 1, high: 1, medium: 2, low: 0, none: 0 });
+        assert_eq!(f.overdue_days, Lateness { avg: Some(16.3), max: Some(31) });
+        assert_eq!(f.resolved, BySeverity { total: 4, critical: 2, high: 0, medium: 0, low: 1, none: 1 });
+        assert_eq!(
+            f.resolved_avg_days,
+            BySeverity { total: Some(9.3), critical: Some(7.5), high: None, medium: None, low: Some(20.0), none: Some(2.0) }
+        );
+        // A longer period reaches the older decision; the state of today does not depend on it
+        let year = figures(&tracked, today, 365);
+        assert_eq!((year.open, year.overdue, year.overdue_days), (f.open, f.overdue, f.overdue_days));
+        assert_eq!((year.resolved.total, year.resolved.high, year.resolved_avg_days.high), (5, 1, Some(9.0)));
+        assert_eq!(year.resolved_avg_days.total, Some(9.2));
+        // The period ends today and starts `period_days - 1` days before: 06-22 is the first day of 9 days
+        assert_eq!(figures(&tracked, today, 9).resolved.total, 1);
+        assert_eq!(figures(&tracked, today, 8).resolved.total, 0);
+        assert_eq!((figures(&tracked, today, 0).period_days, figures(&tracked, today, 99_999).period_days), (1, i64::from(MAX_DAYS)));
+        // Narrowed to one organization
+        let strict: Vec<EntryTrack> = tracked.iter().filter(|t| t.org == "strict").cloned().collect();
+        let s = figures(&strict, today, 30);
+        assert_eq!((s.open.total, s.overdue.high, s.overdue_days), (1, 1, Lateness { avg: Some(15.0), max: Some(15) }));
+        // The bands come in the order of their keys, and the answer is plain JSON
+        assert_eq!(f.open.bands().map(|n| *n), [1, 2, 2, 1, 1]);
+        assert_eq!([Some(9.5), Some(7.0), Some(4.0), Some(0.1), None].map(band), [0, 1, 2, 3, 4]);
+        let json = serde_json::to_value(&f).unwrap();
+        assert_eq!(json["as_of"], "2026-06-30");
+        assert_eq!(json["resolved_avg_days"]["high"], serde_json::Value::Null);
+        assert_eq!((json["overdue_days"]["max"].as_i64(), json["open"]["none"].as_i64()), (Some(31), Some(1)));
+        assert!(!json.to_string().contains("CVE-") && !json.to_string().contains("app"));
     }
 }

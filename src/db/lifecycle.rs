@@ -173,6 +173,9 @@ pub struct DayStats {
     pub open: i64,
     /// Entries whose risk is accepted at the end of the day
     pub accepted_total: i64,
+    /// `open` by severity of the CVE as scored today: critical, high, medium,
+    /// low, no score (the order of `crate::deadlines::BANDS`)
+    pub open_by_severity: [i64; 5],
 }
 
 /// An entry as it was at a given instant
@@ -436,17 +439,33 @@ impl Database {
 /// Day-by-day activity and stock between two dates (inclusive), computed by
 /// replaying the events. Days without event are present, carrying the stock.
 pub fn timeline(events: &[LifecycleEvent], from: NaiveDate, to: NaiveDate) -> Vec<DayStats> {
-    let mut status: BTreeMap<i64, String> = BTreeMap::new();
+    /// Entries to review per severity band, and accepted risks
+    #[derive(Clone, Copy, Default)]
+    struct Stock {
+        open: [i64; 5],
+        accepted: i64,
+    }
+    impl Stock {
+        fn count(&mut self, status: &str, band: usize, by: i64) {
+            match status {
+                "untreated" => self.open[band] += by,
+                "accepted" => self.accepted += by,
+                _ => {}
+            }
+        }
+        fn write(&self, stats: &mut DayStats) {
+            stats.open = self.open.iter().sum();
+            stats.open_by_severity = self.open;
+            stats.accepted_total = self.accepted;
+        }
+    }
+    // Status and severity band of each entry
+    let mut status: BTreeMap<i64, (String, usize)> = BTreeMap::new();
     let mut per_day: BTreeMap<String, DayStats> = BTreeMap::new();
     let (from_s, to_s) = (from.to_string(), to.to_string());
-    let stock = |status: &BTreeMap<i64, String>| {
-        (
-            status.values().filter(|s| *s == "untreated").count() as i64,
-            status.values().filter(|s| *s == "accepted").count() as i64,
-        )
-    };
+    let mut stock = Stock::default();
     // Stock at the end of the day before `from`
-    let mut carried = (0, 0);
+    let mut carried = Stock::default();
     for e in events {
         let day = e.day();
         if day > to_s.as_str() {
@@ -454,30 +473,33 @@ pub fn timeline(events: &[LifecycleEvent], from: NaiveDate, to: NaiveDate) -> Ve
         }
         let in_range = day >= from_s.as_str();
         let stats = per_day.entry(day.to_string()).or_default();
-        match (e.kind.as_str(), e.status.as_deref()) {
+        // The severity is the one the CVE has today, on every event of the entry
+        let band = crate::deadlines::band(e.cvss);
+        let before = match (e.kind.as_str(), e.status.as_deref()) {
             ("detected", _) => {
-                status.insert(e.entry_id, "untreated".into());
                 stats.new += 1;
+                stock.count("untreated", band, 1);
+                status.insert(e.entry_id, ("untreated".into(), band))
             }
             ("status", Some(new)) => {
-                status.insert(e.entry_id, new.to_string());
                 match new {
                     "accepted" => stats.accepted += 1,
                     "treated" => stats.closed += 1,
                     "not_applicable" => stats.not_applicable += 1,
                     _ => stats.reopened += 1,
                 }
+                stock.count(new, band, 1);
+                status.insert(e.entry_id, (new.to_string(), band))
             }
-            ("removed", _) => {
-                status.remove(&e.entry_id);
-            }
-            _ => {}
+            ("removed", _) => status.remove(&e.entry_id),
+            _ => None,
+        };
+        if let Some((previous, band)) = before {
+            stock.count(&previous, band, -1);
         }
-        let (open, accepted_total) = stock(&status);
-        stats.open = open;
-        stats.accepted_total = accepted_total;
+        stock.write(stats);
         if !in_range {
-            carried = (open, accepted_total);
+            carried = stock;
         }
     }
 
@@ -485,13 +507,13 @@ pub fn timeline(events: &[LifecycleEvent], from: NaiveDate, to: NaiveDate) -> Ve
     let mut day = from;
     while day <= to {
         let key = day.to_string();
-        let mut stats = per_day.remove(&key).unwrap_or(DayStats {
-            open: carried.0,
-            accepted_total: carried.1,
-            ..Default::default()
+        let mut stats = per_day.remove(&key).unwrap_or_else(|| {
+            let mut quiet = DayStats::default();
+            carried.write(&mut quiet);
+            quiet
         });
         stats.day = key;
-        carried = (stats.open, stats.accepted_total);
+        carried = Stock { open: stats.open_by_severity, accepted: stats.accepted_total };
         out.push(stats);
         match day.succ_opt() {
             Some(next) => day = next,
@@ -740,5 +762,82 @@ mod tests {
         let entry = db.project_triage(project, false).unwrap()[0].entry_id;
         assert!(db.change_entry_status(entry, CveStatus::Accepted, &Actor::system("cli"), Some("x")).unwrap());
         let _ = app;
+    }
+
+    #[test]
+    fn the_stock_by_severity_adds_up_to_the_stock_and_matches_the_state_of_each_day() {
+        let event = |id: i64, entry_id: i64, day: u32, kind: &str, status: Option<&str>, cvss: Option<f64>| LifecycleEvent {
+            id,
+            entry_id,
+            org: "acme".into(),
+            project: "infra".into(),
+            cve_id: format!("CVE-2026-{entry_id}"),
+            app_name: "widget".into(),
+            app_version: None,
+            at: format!("2026-03-{day:02} 09:00:00"),
+            kind: kind.into(),
+            status: status.map(String::from),
+            previous: None,
+            actor: "t".into(),
+            automatic: false,
+            project_deleted: false,
+            comment: None,
+            cvss,
+            kev: false,
+        };
+        // One entry per severity and one without a score, then decisions, a reopening and a removal
+        let events = vec![
+            event(1, 1, 2, "detected", Some("untreated"), Some(9.8)),
+            event(2, 2, 2, "detected", Some("untreated"), Some(7.5)),
+            event(3, 3, 3, "detected", Some("untreated"), Some(5.0)),
+            event(4, 4, 3, "detected", Some("untreated"), Some(2.0)),
+            event(5, 5, 4, "detected", Some("untreated"), None),
+            event(6, 6, 4, "detected", Some("untreated"), Some(9.1)),
+            event(7, 1, 5, "status", Some("accepted"), Some(9.8)),
+            event(8, 2, 6, "status", Some("treated"), Some(7.5)),
+            event(9, 3, 6, "status", Some("not_applicable"), Some(5.0)),
+            event(10, 2, 8, "status", Some("untreated"), Some(7.5)),
+            event(11, 6, 9, "removed", None, Some(9.1)),
+            event(12, 1, 10, "status", Some("treated"), Some(9.8)),
+            event(13, 4, 10, "status", Some("accepted"), Some(2.0)),
+            // The same entry detected again by a later scan stays one entry
+            event(14, 5, 11, "detected", Some("untreated"), None),
+        ];
+        let d = |day: u32| NaiveDate::from_ymd_opt(2026, 3, day).unwrap();
+        let stats = timeline(&events, d(1), d(12));
+        assert_eq!(stats.len(), 12);
+        for (i, day) in stats.iter().enumerate() {
+            let state = state_at(&events, d(i as u32 + 1));
+            let open = |band: usize| state.iter().filter(|s| s.status == "untreated" && crate::deadlines::band(s.event.cvss) == band).count() as i64;
+            assert_eq!(day.open_by_severity, [open(0), open(1), open(2), open(3), open(4)], "{}", day.day);
+            assert_eq!(day.open_by_severity.iter().sum::<i64>(), day.open, "{}", day.day);
+            assert_eq!(day.accepted_total, state.iter().filter(|s| s.status == "accepted").count() as i64, "{}", day.day);
+        }
+        let by_severity: Vec<[i64; 5]> = stats.iter().map(|s| s.open_by_severity).collect();
+        assert_eq!(
+            by_severity,
+            [
+                [0, 0, 0, 0, 0], // 1: nothing yet
+                [1, 1, 0, 0, 0], // 2: a critical and a high one
+                [1, 1, 1, 1, 0], // 3: a medium and a low one
+                [2, 1, 1, 1, 1], // 4: one without a score, a second critical one
+                [1, 1, 1, 1, 1], // 5: a critical risk accepted
+                [1, 0, 0, 1, 1], // 6: the high one closed, the medium one not applicable
+                [1, 0, 0, 1, 1], // 7: a quiet day carries the stock
+                [1, 1, 0, 1, 1], // 8: the high one reopened
+                [0, 1, 0, 1, 1], // 9: the second critical one left with its application
+                [0, 1, 0, 0, 1], // 10: the low risk accepted
+                [0, 1, 0, 0, 1], // 11
+                [0, 1, 0, 0, 1], // 12
+            ]
+        );
+        assert_eq!(stats.iter().map(|s| s.accepted_total).collect::<Vec<_>>(), [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]);
+        // A window starting later starts from the stock carried so far, severity by severity
+        let late = timeline(&events, d(7), d(8));
+        assert_eq!((late[0].open_by_severity, late[0].open, late[0].accepted_total), ([1, 0, 0, 1, 1], 3, 1));
+        assert_eq!(late[1].open_by_severity, [1, 1, 0, 1, 1]);
+        assert_eq!(timeline(&events, d(20), d(20))[0].open_by_severity, [0, 1, 0, 0, 1]);
+        // In the JSON of a day: five counts in the order critical, high, medium, low, no score
+        assert_eq!(serde_json::to_value(&stats[3]).unwrap()["open_by_severity"], serde_json::json!([2, 1, 1, 1, 1]));
     }
 }
