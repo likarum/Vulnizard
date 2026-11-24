@@ -229,8 +229,10 @@ header.top .user a.invited { border: 1px solid var(--accent); color: var(--accen
 
 /* Two visibly separate sides: what I run (products) / reference information */
 header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--border); }
-.zone { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px 16px 9px 24px; }
-.zone a { padding: 5px 9px; border-radius: 6px; color: var(--text); font-size: 14px; white-space: nowrap; }
+/* Tight enough for the products side to hold on one row in a 1280 px window,
+   with both menus and every view */
+.zone { display: flex; flex-wrap: wrap; align-items: center; gap: 1px; padding: 6px 10px 9px 24px; }
+.zone a { padding: 5px 6px; border-radius: 6px; color: var(--text); font-size: 14px; white-space: nowrap; }
 .zone a:hover { text-decoration: none; background: var(--zone-hover); }
 .zone a.active { font-weight: 600; background: var(--zone-active); color: var(--zone-ink); }
 .zone-label {
@@ -239,7 +241,7 @@ header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--zone-ink);
-  margin-right: 10px;
+  margin-right: 8px;
 }
 .zone.product {
   flex: 1;
@@ -255,9 +257,10 @@ header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--
   background: var(--info-bg);
   border-left: 1px solid var(--border);
   box-shadow: inset 0 -3px 0 var(--info-ink);
+  padding-left: 14px;
 }
 
-details.menu { position: relative; margin-right: 8px; }
+details.menu { position: relative; margin-right: 6px; }
 details.menu summary {
   list-style: none;
   cursor: pointer;
@@ -266,7 +269,7 @@ details.menu summary {
   border-radius: 6px;
   font-weight: 600;
   font-size: 14px;
-  min-width: 130px;
+  min-width: 96px;
   position: relative;
 }
 details.menu summary::-webkit-details-marker { display: none; }

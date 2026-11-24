@@ -70,8 +70,14 @@ pub struct PageContext {
     /// Last completed sync, `YYYY-MM-DD HH:MM:SS` UTC
     pub last_sync: Option<String>,
     pub sync_running: bool,
-    /// (organization, project) the user can access
+    /// (organization, project) the user holds a role on, executive included
     pub projects: Vec<(String, String)>,
+    /// Those of `projects` the user is only executive of: their Overview and
+    /// nothing else, so no other view is offered for them
+    pub figures_only: Vec<(String, String)>,
+    /// The account is confined to the Overview (`Database::summary_only`):
+    /// nothing but it, the account settings and signing out is offered
+    pub confined: bool,
     /// Organization the lists of "all projects" are narrowed to. Always one
     /// of those of `projects`: it is checked on every request, and it only
     /// hides rows; it never gives access to anything.
@@ -88,6 +94,17 @@ impl PageContext {
         let mut orgs: Vec<&str> = self.projects.iter().map(|(org, _)| org.as_str()).collect();
         orgs.dedup();
         orgs
+    }
+
+    /// Whether the lists of a scope may be opened: the project is read
+    /// (viewer or more), or at the `*` scope one of the projects is. An
+    /// account without any project keeps the views, which invite it to start.
+    pub fn can_list(&self, scope: Option<(&str, &str)>) -> bool {
+        let only_figures = |org: &str, project: &str| self.figures_only.iter().any(|(o, p)| o == org && p == project);
+        match scope {
+            Some((org, project)) => !only_figures(org, project),
+            None => !self.confined && (self.projects.is_empty() || self.projects.iter().any(|(org, project)| !only_figures(org, project))),
+        }
     }
 }
 
@@ -231,19 +248,21 @@ fn project_menu(ctx: &PageContext, scope: Option<(&str, &str)>, view: &str) -> M
             }
             ul {
                 li {
-                    a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] {
+                    a href=(product_url(None, if ctx.can_list(None) { view } else { "overview" })) class=[scope.is_none().then_some("active")] {
                         "All projects" @if let Some(org) = &ctx.org { " of " (org) } " (*)"
                     }
                 }
                 @for (org, project) in listed() {
                     @let current = scope == Some((org.as_str(), project.as_str()));
+                    // A project the account is executive of only has its Overview
+                    @let view = if ctx.can_list(Some((org, project))) { view } else { "overview" };
                     li {
                         a href=(product_url(Some((org, project)), view)) class=[current.then_some("active")] {
                             (project) @if several_orgs { " " span.muted { (org) } }
                         }
                     }
                 }
-                li.sep { a href="/projects" { "Manage projects…" } }
+                @if !ctx.confined { li.sep { a href="/projects" { "Manage projects…" } } }
             }
         }
     }
@@ -328,18 +347,24 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                                 // shown; from any other page, back to that page
                                 (org_menu(&ctx, &if on_products && !view.is_empty() { product_url(None, view) } else { ctx.path.clone() }))
                                 (project_menu(&ctx, scope, if view.is_empty() { "overview" } else { view }))
+                                // Where the account is executive, the Overview is all there is
+                                @let lists = ctx.can_list(scope);
                                 @for (key, label) in PRODUCT_VIEWS {
-                                    a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }
+                                    @if lists || key == "overview" {
+                                        a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }
+                                    }
                                 }
-                                @if scope.is_some() {
+                                @if scope.is_some() && lists {
                                     a href=(product_url(scope, "settings")) class=[(view == "settings").then_some("active")] { "Settings" }
                                 }
                             }
-                            nav.zone.info {
-                                span.zone-label { "CVE database" }
-                                (info(ExploreTab::Cves, "/cve", "CVEs"))
-                                (info(ExploreTab::Vendors, "/vendors", "Vendors"))
-                                (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                            @if !ctx.confined {
+                                nav.zone.info {
+                                    span.zone-label { "CVE database" }
+                                    (info(ExploreTab::Cves, "/cve", "CVEs"))
+                                    (info(ExploreTab::Vendors, "/vendors", "Vendors"))
+                                    (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                                }
                             }
                         }
                     }

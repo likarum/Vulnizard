@@ -122,7 +122,7 @@ fn handle_line(db: &Database, allow_write: bool, line: &str) -> Option<Value> {
 impl Mcp<'_> {
 /// Handles one message. Notifications (no `id`) get no response.
 pub fn handle(&self, line: &str) -> Option<Value> {
-    let (db, allow_write) = (self.db, self.allow_write);
+    let db = self.db;
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return Some(error(Value::Null, -32700, "Parse error")),
@@ -156,11 +156,25 @@ pub fn handle(&self, line: &str) -> Option<Value> {
             })
         }
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tool_definitions(allow_write, self.inventory) }),
+        "tools/list" => match self.offered_tools() {
+            Ok(tools) => json!({ "tools": tools }),
+            Err(e) => {
+                tracing::error!("mcp tools/list failed: {e:#}");
+                return Some(error(id, -32603, "internal error"));
+            }
+        },
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            if !tool_definitions(allow_write, self.inventory).iter().any(|t| t["name"] == name) {
+            // A tool that is not offered to the caller answers as one that does not exist
+            let offered = match self.offered_tools() {
+                Ok(tools) => tools,
+                Err(e) => {
+                    tracing::error!("mcp tools/call failed: {e:#}");
+                    return Some(error(id, -32603, "internal error"));
+                }
+            };
+            if !offered.iter().any(|t| t["name"] == name) {
                 return Some(error(id, -32602, &format!("Unknown tool: {name}")));
             }
             // Tool failures are reported in the result so the model can react
@@ -190,8 +204,45 @@ pub fn handle(&self, line: &str) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
+/// Whether the caller is an account confined to the Overview: every role it
+/// holds is executive (`Database::summary_only`). The local operator never is.
+fn confined(&self) -> Result<bool> {
+    match &self.caller {
+        Caller::Local => Ok(false),
+        Caller::User(account) => self.db.summary_only(account.id),
+    }
+}
+
+/// The tools the caller may list and call. An account confined to the
+/// Overview is offered `CONFINED_TOOLS` and nothing else: the others are not
+/// named to it, and calling one answers "Unknown tool" like a write tool
+/// where writing is off.
+fn offered_tools(&self) -> Result<Vec<Value>> {
+    let mut tools = tool_definitions(self.allow_write, self.inventory);
+    if self.confined()? {
+        tools.retain(|t| CONFINED_TOOLS.iter().any(|name| t["name"] == *name));
+    }
+    Ok(tools)
+}
+
+/// The project the figures are asked of: one the caller holds a role on,
+/// executive included. Every other tool asks to read the project (`target`).
+fn summary_target(&self, args: &Value) -> Result<i64> {
+    let org = opt_str(args, "org").unwrap_or("default");
+    let project = req_str(args, "project")?;
+    let not_found = || anyhow!("project '{org}/{project}' not found (see list_projects)");
+    match &self.caller {
+        Caller::Local => self.db.find_project(org, project)?.ok_or_else(not_found),
+        Caller::User(account) => {
+            let held = self.db.get_project_for_summary(org, project, account.id)?;
+            Ok(held.filter(|(access, _)| access.can(Permission::Summary)).ok_or_else(not_found)?.1.id)
+        }
+    }
+}
+
 /// Resolves the `org` (default: `default`) and `project` arguments to a
-/// project the caller can access.
+/// project the caller can read (viewer or more): an executive of the project
+/// gets the answer of a stranger.
 fn target(&self, args: &Value) -> Result<Target> {
     let org = opt_str(args, "org").unwrap_or("default");
     let project = req_str(args, "project")?;
@@ -251,6 +302,10 @@ fn projects(&self) -> Result<Vec<(i64, String, String)>> {
     Ok(projects.into_iter().map(|p| (p.id, p.org, p.name)).collect())
 }
 }
+
+/// The tools an account confined to the Overview is offered: its figures,
+/// and the names of the projects they are about
+pub(crate) const CONFINED_TOOLS: [&str; 2] = ["get_summary", "list_projects"];
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
@@ -592,12 +647,21 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         "list_weaknesses" => json!(db.list_weaknesses(50, offset(args, 50))?),
         "list_projects" => {
             let mut out = Vec::new();
-            for (id, org, project) in self.projects()? {
+            let readable = self.projects()?;
+            for (id, org, project) in &readable {
                 out.push(json!({
                     "org": org,
                     "project": project,
-                    "subscriptions": db.list_subscriptions(id)?,
+                    "subscriptions": db.list_subscriptions(*id)?,
                 }));
+            }
+            // The projects the caller is only executive of: their names, for `get_summary`
+            if let Caller::User(account) = &self.caller {
+                for held in db.held_projects(account.id)? {
+                    if !readable.iter().any(|(id, _, _)| *id == held.id) {
+                        out.push(json!({ "org": held.org, "project": held.name, "summary_only": true }));
+                    }
+                }
             }
             json!(out)
         }
@@ -638,7 +702,7 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         }
         "get_summary" => {
             let project_id = match opt_str(args, "project") {
-                Some(_) => Some(self.target(args)?.id),
+                Some(_) => Some(self.summary_target(args)?),
                 None => None,
             };
             // Without a project, an organization narrows what the caller can read: it gives nothing more

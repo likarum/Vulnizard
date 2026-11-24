@@ -50,7 +50,7 @@ INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '12');
 "#;
 
 /// SQL expression turning a rank of the access views into a role name
-pub(super) const ROLE_OF_RANK: &str = "CASE {rank} WHEN 3 THEN 'owner' WHEN 2 THEN 'editor' ELSE 'viewer' END";
+pub(super) const ROLE_OF_RANK: &str = "CASE {rank} WHEN 3 THEN 'owner' WHEN 2 THEN 'editor' WHEN 1 THEN 'viewer' ELSE 'executive' END";
 
 pub(super) fn role_of(rank_column: &str) -> String {
     ROLE_OF_RANK.replace("{rank}", rank_column)
@@ -97,39 +97,11 @@ impl Database {
         Ok(())
     }
 
-    /// A project the user can access, looked up by names, with the user's
+    /// A project the user can read, looked up by names, with the user's
     /// effective role in it (returned in the `Org` for permission checks).
+    /// An executive reads its figures only: see `get_project_for_summary`.
     pub fn get_project_for_user(&self, org: &str, project: &str, user_id: i64) -> Result<Option<(Org, OrgProject)>> {
-        Ok(self
-            .conn()
-            .query_row(
-                &format!(
-                    "SELECT o.id, o.name, {role}, p.id, p.name, p.description,
-                            (SELECT COUNT(*) FROM subscriptions s WHERE s.project_id = p.id)
-                     FROM projects p
-                     JOIN organizations o ON o.id = p.organization_id
-                     JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?3
-                     WHERE o.name = ?1 AND p.name = ?2",
-                    role = role_of("pa.rank")
-                ),
-                params![org, project, user_id],
-                |r| {
-                    Ok((
-                        Org {
-                            id: r.get(0)?,
-                            name: r.get(1)?,
-                            role: r.get(2)?,
-                        },
-                        OrgProject {
-                            id: r.get(3)?,
-                            name: r.get(4)?,
-                            description: r.get(5)?,
-                            subscriptions: r.get(6)?,
-                        },
-                    ))
-                },
-            )
-            .optional()?)
+        self.project_reached(org, project, user_id, super::Reach::View)
     }
 
     /// Instance-wide role (None removes it). The administrator flag is separate.

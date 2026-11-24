@@ -377,7 +377,111 @@ impl FromRequestParts<Arc<AppState>> for ApiUser {
             }
             Ok(None)
         })?;
-        account.map(ApiUser).ok_or(ApiError(AppError::Unauthorized))
+        let account = account.ok_or(ApiError(AppError::Unauthorized))?;
+        // An account confined to the Overview reaches its figures and nothing else
+        let route = parts.extensions.get::<axum::extract::MatchedPath>().map(|p| p.as_str().to_string());
+        if !route.as_deref().is_some_and(|route| CONFINED_API.contains(&route)) {
+            let confined = blocking(|| -> Result<bool, AppError> { Ok(state.db()?.summary_only(account.id)?) })?;
+            if confined {
+                return Err(ApiError(AppError::Forbidden));
+            }
+        }
+        Ok(ApiUser(account))
+    }
+}
+
+// ==========================================
+// Accounts confined to the Overview
+// ==========================================
+
+/// Everything the web UI answers to an account confined to the Overview
+/// (`Database::summary_only`: every role it holds is executive): method and
+/// route, as the router names them. Any other route is refused before its
+/// handler runs, whatever it is asked about: the answer tells nothing.
+///
+/// A route added to the router is refused to these accounts until it is
+/// listed here (`an_executive_reaches_its_overview_and_nothing_else`).
+pub(crate) const CONFINED_ROUTES: &[(&str, &str)] = &[
+    // The Overview of what it holds, and the organization filter of its bar
+    ("GET", "/"),
+    ("GET", "/product"),
+    ("GET", "/product/{org}/{project}"),
+    ("POST", "/org-filter"),
+    // Its own settings: password, two-step sign-in, tokens, invitations
+    ("GET", "/settings"),
+    ("POST", "/settings/password"),
+    ("POST", "/settings/tokens"),
+    ("POST", "/settings/tokens/{id}/delete"),
+    ("GET", "/settings/mfa"),
+    ("POST", "/settings/mfa/totp"),
+    ("POST", "/settings/mfa/totp/confirm"),
+    ("POST", "/settings/mfa/totp/delete"),
+    ("POST", "/settings/mfa/recovery"),
+    ("POST", "/settings/mfa/passkeys/start"),
+    ("POST", "/settings/mfa/passkeys/finish"),
+    ("POST", "/settings/mfa/passkeys/{id}/delete"),
+    ("POST", "/invitations/{id}/accept"),
+    ("POST", "/invitations/{id}/decline"),
+    // Signing out, and in: these answer the same to everyone
+    ("POST", "/logout"),
+    ("GET", "/login"),
+    ("POST", "/login"),
+    ("GET", "/register"),
+    ("POST", "/register"),
+    ("GET", "/setup"),
+    ("POST", "/setup"),
+    ("GET", "/auth/oidc/{provider}/login"),
+    ("GET", "/auth/oidc/{provider}/callback"),
+    ("GET", "/login/mfa"),
+    ("POST", "/login/mfa"),
+    ("POST", "/login/mfa/passkey/start"),
+    ("POST", "/login/mfa/passkey/finish"),
+    ("POST", "/login/passkey/start"),
+    ("POST", "/login/passkey/finish"),
+    // Files of the page itself
+    ("GET", "/static/app.css"),
+    ("GET", "/static/logo.svg"),
+    ("GET", "/static/mfa.js"),
+    ("GET", "/static/filter.js"),
+    ("GET", "/static/theme.js"),
+    ("GET", "/favicon.ico"),
+];
+
+/// What the REST API answers to such an account: its figures and the names
+/// of the projects they are about. `/mcp` is in, the tools being narrowed by
+/// the server itself (`mcp::CONFINED_TOOLS`).
+pub(crate) const CONFINED_API: &[&str] = &[
+    "/api/summary",
+    "/api/summary/projects",
+    "/api/organizations/{org}/projects/{project}/summary",
+    "/mcp",
+];
+
+/// Refuses whatever is not in `CONFINED_ROUTES` to an account confined to
+/// the Overview, with the answer a missing permission gets. Each handler and
+/// each query still checks the rights on its own: this is what holds for the
+/// routes that never looked at a project (reference database, organizations
+/// to create, administration).
+async fn confined_gate(State(state): St, req: Request, next: Next) -> Response {
+    let method = if *req.method() == Method::HEAD { "GET" } else { req.method().as_str() };
+    let open = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|route| CONFINED_ROUTES.contains(&(method, route.as_str())));
+    if open {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let confined = blocking(|| -> Result<bool, AppError> {
+        match session_account(&parts, &state)? {
+            Some(account) => Ok(state.db()?.summary_only(account.id)?),
+            None => Ok(false),
+        }
+    });
+    match confined {
+        Ok(false) => next.run(Request::from_parts(parts, body)).await,
+        Ok(true) => AppError::Forbidden.into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -427,9 +531,17 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
         let account = lookup_session(&parts, &state)?;
         let db = state.db()?;
         let (last_sync, sync_running) = db.sync_status()?;
-        let projects: Vec<(String, String)> = match &account {
-            Some(a) => db.list_user_projects(a.id)?.into_iter().map(|p| (p.org, p.name)).collect(),
+        // The menus name what the account holds a role on, executive included
+        let held = match &account {
+            Some(a) => db.held_projects(a.id)?,
             None => Vec::new(),
+        };
+        let figures_only: Vec<(String, String)> =
+            held.iter().filter(|p| !p.can_view()).map(|p| (p.org.clone(), p.name.clone())).collect();
+        let projects: Vec<(String, String)> = held.into_iter().map(|p| (p.org, p.name)).collect();
+        let confined = match &account {
+            Some(a) => db.summary_only(a.id)?,
+            None => false,
         };
         let org = chosen_org(&parts, &projects);
         let invitations = match &account {
@@ -442,6 +554,8 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
                 last_sync,
                 sync_running,
                 projects,
+                figures_only,
+                confined,
                 org,
                 path,
                 invitations,
@@ -691,6 +805,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/static/logo.svg", get(pages::logo))
         .route("/favicon.ico", get(pages::logo))
         .fallback(|| async { AppError::NotFound })
+        .layer(middleware::from_fn_with_state(state.clone(), confined_gate))
         .layer(middleware::from_fn_with_state(state.clone(), mfa::gate))
         .layer(middleware::from_fn_with_state(state.clone(), page_context))
         .layer(middleware::from_fn(csrf_guard));
@@ -710,6 +825,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/organizations/{org}/projects/{project}/watchlist", get(api::watchlist))
         .route("/organizations/{org}/projects/{project}/summary", get(api::project_summary))
         .route("/summary", get(api::summary))
+        .route("/summary/projects", get(api::summary_projects))
         .route("/organizations/{org}/projects/{project}/reports", get(api::reports))
         .route("/organizations/{org}/projects/{project}/reports/{day}", get(api::report))
         .fallback(|| async { ApiError(AppError::NotFound) });
@@ -5123,5 +5239,550 @@ mod tests {
         let overview = app.get("/product/acme/infra", Some(&owner)).await.body;
         assert!(overview.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
         assert!(overview.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">worst lateness</div>")));
+    }
+
+    // ---------- the executive role ----------
+
+    fn id_of(app: &TestApp, username: &str) -> i64 {
+        Database::connect(&app.db_path).unwrap().get_credentials(username).unwrap().unwrap().0.id
+    }
+
+    /// Accepts, in the browser, the one invitation waiting for an account
+    async fn accept_in_settings(app: &TestApp, username: &str, session: &str) {
+        let db = Database::connect(&app.db_path).unwrap();
+        let waiting = db.received_invitations(id_of(app, username)).unwrap();
+        assert_eq!(waiting.len(), 1, "{username}");
+        let accepted = app.post(&format!("/invitations/{}/accept", waiting[0].id), Some(session), "").await;
+        assert_eq!(accepted.status, StatusCode::SEE_OTHER, "{}", accepted.body);
+    }
+
+    async fn api_token(app: &TestApp, session: &str) -> String {
+        tokens_of(&app.post("/settings/tokens", Some(session), "name=t&password=a-long-password").await.body).remove(0)
+    }
+
+    /// One message to the MCP server over HTTP, as a program sends it
+    async fn mcp(app: &TestApp, token: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let req = HttpRequest::post("/mcp")
+            .header(header::HOST, "127.0.0.1:8000")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        let reply = app.send(req.body(Body::from(message.to_string())).unwrap()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        serde_json::from_str(&reply.body).unwrap()
+    }
+
+    /// The result of a tool, and whether it is a failure
+    async fn mcp_tool(app: &TestApp, token: &str, name: &str, arguments: serde_json::Value) -> (bool, String) {
+        let answer = mcp(app, token, "tools/call", serde_json::json!({ "name": name, "arguments": arguments })).await;
+        if let Some(error) = answer.get("error") {
+            return (true, error["message"].as_str().unwrap().to_string());
+        }
+        (answer["result"]["isError"].as_bool().unwrap(), answer["result"]["content"][0]["text"].as_str().unwrap().to_string())
+    }
+
+    /// The first figure of an overview, without a link: what an executive reads
+    fn bare_figure(count: i64) -> String {
+        format!("<div class=\"tile\"><div class=\"value\">{count}</div><div class=\"label\">open vulnerabilities</div></div>")
+    }
+
+    struct Executives {
+        /// Administrator of the instance and owner of acme
+        owner: String,
+        viewer: String,
+        /// Owner of globex
+        other: String,
+        /// Executive of the project acme / infra
+        exec: String,
+        /// Executive of the organization acme
+        board: String,
+        /// Executive of the instance
+        chair: String,
+        /// Executive of acme / infra and viewer of globex / shop
+        mixed: String,
+    }
+
+    /// acme / infra holds 5 open vulnerabilities (3 overdue), acme / web 1 and
+    /// globex / shop 5. The executive role is given at each level, through the
+    /// forms that give the other roles.
+    async fn executives(app: &TestApp) -> Executives {
+        let (owner, viewer, other) = late_project(app).await;
+        assert_eq!(app.post("/projects", Some(&owner), "org=acme&name=web").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post("/orgs/acme/projects/web/applications", Some(&owner), "name=gadget&version=2.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+        app.post("/orgs", Some(&other), "name=globex").await;
+        app.post("/projects", Some(&other), "org=globex&name=shop").await;
+        assert_eq!(app.post("/orgs/globex/projects/shop/applications", Some(&other), "name=widget&version=1.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+
+        // On one project: invited by the owner, accepted from the settings
+        let exec = app.register("exec").await;
+        assert_eq!(app.post("/orgs/acme/projects/infra/members", Some(&owner), "username=exec&role=executive").await.status, StatusCode::SEE_OTHER);
+        let settings = app.get("/settings", Some(&exec)).await.body;
+        assert!(settings.contains("<td data-label=\"Role\">executive</td>"), "{settings}");
+        accept_in_settings(app, "exec", &exec).await;
+        // On an organization
+        let board = app.register("board").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&owner), "username=board&role=executive").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(app, "board", &board).await;
+        // On the instance: given by the administrator
+        let chair = app.register("chair").await;
+        let given = app.post(&format!("/admin/users/{}/assign", id_of(app, "chair")), Some(&owner), "scope=instance&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        // Executive in one place, viewer in another
+        let mixed = app.register("mixed").await;
+        let given = app.post(&format!("/admin/users/{}/assign", id_of(app, "mixed")), Some(&owner), "scope=project%3Aacme%2Finfra&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        assert_eq!(app.post("/orgs/globex/projects/shop/members", Some(&other), "username=mixed&role=viewer").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(app, "mixed", &mixed).await;
+
+        let db = Database::connect(&app.db_path).unwrap();
+        let project = |org: &str, name: &str| db.find_project(org, name).unwrap().unwrap();
+        use crate::rbac::Role;
+        assert_eq!(db.project_role(id_of(app, "exec"), project("acme", "infra")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "exec"), project("acme", "web")).unwrap(), None);
+        assert_eq!(db.project_role(id_of(app, "board"), project("acme", "web")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "chair"), project("globex", "shop")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "mixed"), project("globex", "shop")).unwrap(), Some(Role::Viewer));
+        Executives { owner, viewer, other, exec, board, chair, mixed }
+    }
+
+    /// Routes and MCP tools that were classified for an account confined to the
+    /// Overview: allowed (`CONFINED_ROUTES`, `CONFINED_API`, `mcp::CONFINED_TOOLS`)
+    /// or refused, which is what happens to anything not listed there
+    const CLASSIFIED_ROUTES: usize = 125;
+    const CLASSIFIED_TOOLS: usize = 26;
+
+    /// A route with its parameters filled: the project the executive holds, and 1 for the rest
+    fn filled(route: &str) -> String {
+        let mut out = String::new();
+        let mut rest = route;
+        while let Some(start) = rest.find('{') {
+            let end = start + rest[start..].find('}').unwrap();
+            out.push_str(&rest[..start]);
+            out.push_str(match &rest[start + 1..end] {
+                "org" => "acme",
+                "project" => "infra",
+                _ => "1",
+            });
+            rest = &rest[end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Nothing of the projects may be in an answer that refuses
+    fn tells_nothing(body: &str) -> bool {
+        !["CVE-2024", "widget", "gadget", "acme", "infra", "globex"].iter().any(|data| body.contains(data))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_executive_is_refused_every_route_tool_and_endpoint_but_those_of_its_overview() {
+        let app = app(with_inventory());
+        let world = executives(&app).await;
+        assert_eq!(app.post("/admin/mcp", Some(&world.owner), "http_enabled=1&allow_write=1").await.status, StatusCode::SEE_OTHER);
+        let token = api_token(&app, &world.exec).await;
+        let viewer_token = api_token(&app, &world.viewer).await;
+        let bearer = format!("Bearer {token}");
+
+        let routes = declared_routes();
+        assert!(routes.len() >= 110, "only {} routes found: the source is no longer read correctly", routes.len());
+        // Every route was looked at with an executive in mind. One more route: it is refused to an
+        // executive unless it is added to CONFINED_ROUTES or CONFINED_API; decide, then count it here.
+        assert_eq!(routes.len(), CLASSIFIED_ROUTES, "a route was added or removed: decide what an executive gets of it, then update CLASSIFIED_ROUTES");
+        // What is allowed names routes that exist: an entry cannot outlive its route
+        for (method, route) in CONFINED_ROUTES {
+            assert!(routes.iter().any(|r| r == route), "{method} {route} is allowed to an executive but is not a route");
+        }
+        for route in CONFINED_API {
+            assert!(routes.iter().any(|r| r == route), "{route} is allowed to an executive but is not a route");
+        }
+
+        // ---- The pages: every route of the UI, for GET and for POST ----
+        let mut refused = 0;
+        for route in routes.iter().filter(|r| !r.starts_with("/api") && !r.starts_with("/scim") && *r != "/mcp") {
+            let path = filled(route);
+            for method in ["GET", "POST"] {
+                if CONFINED_ROUTES.contains(&(method, route.as_str())) {
+                    continue;
+                }
+                let reply = if method == "GET" {
+                    app.get(&path, Some(&world.exec)).await
+                } else {
+                    app.post(&path, Some(&world.exec), "name=x&username=x&role=owner&status=treated&org=acme&project_id=1&scope=instance").await
+                };
+                // The refusal of a missing permission; a route that has no such method says so before
+                assert!(
+                    matches!(reply.status, StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED),
+                    "{method} {route} answered {} to an executive: classify it in CONFINED_ROUTES or leave it refused",
+                    reply.status
+                );
+                assert!(tells_nothing(&reply.body), "{method} {route}: {}", reply.body);
+                refused += 1;
+            }
+        }
+        assert!(refused >= 150, "only {refused} refusals: the sweep no longer covers the routes");
+        // A page that does not exist is refused the same way: nothing tells what exists
+        assert_eq!(app.get("/nothing-here", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // The sweep is about the role, not about the pages: a viewer of the same project opens them
+        for path in ["/cve", "/vendors", "/projects", "/orgs/acme", "/product/acme/infra?view=vulnerabilities", "/orgs/acme/audit/export"] {
+            assert_eq!(app.get(path, Some(&world.viewer)).await.status, StatusCode::OK, "{path}");
+        }
+        // What is allowed answers
+        for path in ["/product", "/product/acme/infra", "/settings", "/settings/mfa", "/static/app.css"] {
+            assert_eq!(app.get(path, Some(&world.exec)).await.status, StatusCode::OK, "{path}");
+        }
+        assert_eq!(app.get("/", Some(&world.exec)).await.location.as_deref(), Some("/product"));
+        // Nothing was changed by what was refused
+        let db = Database::connect(&app.db_path).unwrap();
+        assert!(db.get_org("x", id_of(&app, "exec")).unwrap().is_none() && db.list_orgs(id_of(&app, "exec")).unwrap().is_empty());
+        assert!(db.summary_only(id_of(&app, "exec")).unwrap());
+
+        // ---- The REST API: every endpoint ----
+        for route in routes.iter().filter(|r| r.starts_with("/api")) {
+            let path = filled(route);
+            for method in ["GET", "POST"] {
+                let req = HttpRequest::builder().method(method).uri(&path).header(header::HOST, "localhost").header(header::AUTHORIZATION, &bearer);
+                let reply = app.send(req.body(Body::empty()).unwrap()).await;
+                if method == "GET" && CONFINED_API.contains(&route.as_str()) {
+                    assert_eq!(reply.status, StatusCode::OK, "{route}: {}", reply.body);
+                    continue;
+                }
+                // The inventory endpoint takes the token of a source, never the one of an account
+                let expected: &[StatusCode] = if route == "/api/inventory" && method == "POST" {
+                    &[StatusCode::UNAUTHORIZED]
+                } else {
+                    &[StatusCode::FORBIDDEN, StatusCode::METHOD_NOT_ALLOWED]
+                };
+                assert!(expected.contains(&reply.status), "{method} {route} answered {} to an executive", reply.status);
+                assert!(tells_nothing(&reply.body), "{method} {route}: {}", reply.body);
+            }
+        }
+        assert_eq!(app.api("/api/nothing-here", Some(&bearer)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/cve", Some(&format!("Bearer {viewer_token}"))).await.status, StatusCode::OK);
+        // Provisioning has its own tokens
+        for route in routes.iter().filter(|r| r.starts_with("/scim")) {
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let req = HttpRequest::builder().method(method).uri(filled(route)).header(header::HOST, "localhost").header(header::AUTHORIZATION, &bearer);
+                let status = app.send(req.body(Body::empty()).unwrap()).await.status;
+                assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::METHOD_NOT_ALLOWED), "{method} {route}: {status}");
+            }
+        }
+        // The figures it may ask, and the names they go with
+        let figures: serde_json::Value = serde_json::from_str(&app.api("/api/summary", Some(&bearer)).await.body).unwrap();
+        assert_eq!((figures["open"]["total"].as_i64(), figures["overdue"]["total"].as_i64()), (Some(5), Some(3)), "{figures}");
+        let one: serde_json::Value = serde_json::from_str(&app.api("/api/organizations/acme/projects/infra/summary?days=30", Some(&bearer)).await.body).unwrap();
+        assert_eq!((one["open"]["total"].as_i64(), one["period_days"].as_i64()), (Some(5), Some(30)));
+        let names: serde_json::Value = serde_json::from_str(&app.api("/api/summary/projects", Some(&bearer)).await.body).unwrap();
+        assert_eq!(names, serde_json::json!([{ "org": "acme", "project": "infra", "role": "executive" }]));
+        // A project it does not hold answers as one that does not exist
+        let elsewhere = app.api("/api/organizations/acme/projects/web/summary", Some(&bearer)).await;
+        let nowhere = app.api("/api/organizations/acme/projects/nope/summary", Some(&bearer)).await;
+        assert_eq!((elsewhere.status, &elsewhere.body), (StatusCode::NOT_FOUND, &nowhere.body));
+        // An organization it holds nothing in narrows the figures to nothing
+        let none: serde_json::Value = serde_json::from_str(&app.api("/api/summary?org=globex", Some(&bearer)).await.body).unwrap();
+        assert_eq!(none["open"]["total"].as_i64(), Some(0));
+
+        // ---- MCP: every tool ----
+        let every: Vec<String> = crate::mcp::tool_catalog(true).into_iter().map(|(name, _, _)| name).collect();
+        assert_eq!(every.len(), CLASSIFIED_TOOLS, "a tool was added or removed: decide whether an executive is offered it (mcp::CONFINED_TOOLS), then update CLASSIFIED_TOOLS");
+        let names_of = |answer: &serde_json::Value| -> Vec<String> {
+            let mut names: Vec<String> = answer["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+            names.sort();
+            names
+        };
+        // A viewer is offered them all; the executive, its two
+        assert_eq!(names_of(&mcp(&app, &viewer_token, "tools/list", serde_json::json!({})).await).len(), every.len());
+        assert_eq!(names_of(&mcp(&app, &token, "tools/list", serde_json::json!({})).await), ["get_summary", "list_projects"]);
+        let arguments = serde_json::json!({ "org": "acme", "project": "infra", "id": "CVE-2024-5001", "vendor": "acme", "day": "2024-01-01" });
+        for name in &every {
+            let (failed, text) = mcp_tool(&app, &token, name, arguments.clone()).await;
+            if crate::mcp::CONFINED_TOOLS.contains(&name.as_str()) {
+                assert!(!failed, "{name}: {text}");
+            } else {
+                // The answer of a tool that does not exist
+                assert_eq!((failed, text.as_str()), (true, format!("Unknown tool: {name}").as_str()), "{name}");
+            }
+        }
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({})).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (failed, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "web" })).await;
+        assert!(failed && text.contains("project 'acme/web' not found"), "{text}");
+        let (_, text) = mcp_tool(&app, &token, "list_projects", serde_json::json!({})).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!([{ "org": "acme", "project": "infra", "summary_only": true }])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_executive_reads_the_figures_of_what_it_holds_and_nothing_else() {
+        let app = app(open_registration());
+        let world = executives(&app).await;
+        let stranger = app.register("nobody").await;
+        let project_entry = |org: &str, project: &str| format!("<a href=\"/product/{org}/{project}\"");
+        /// Everything of the page that could lead somewhere or tell something beyond the figures
+        fn only_figures(body: &str, scope: &str) {
+            for gone in [
+                "view=", "/cve", "/vendors", "/weaknesses", "/projects", "/orgs", "/admin", "/sync", "/applications", "/subscriptions",
+                "CVE database", "Manage projects", "Sync now", "CVE-2024", "widget", "gadget", "<form method=\"post\" action=\"/orgs",
+            ] {
+                assert!(!body.contains(gone), "{scope}: {gone}");
+            }
+            for kept in ["Database synced", "Database never synced"] {
+                if body.contains(kept) {
+                    return;
+                }
+            }
+            panic!("{scope}: the synchronization status is gone");
+        }
+
+        // ---- On one project ----
+        let page = app.get("/product/acme/infra", Some(&world.exec)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        let body = page.body;
+        assert!(body.contains(&bare_figure(5)), "{body}");
+        assert!(body.contains("<div class=\"tile alert\"><div class=\"value\">3</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        assert!(body.contains("<tr class=\"total\"><td>All</td><td>5</td><td>3</td>"), "{body}");
+        assert!(body.contains("<title>Overview · Vulnizard</title>") && body.contains("Your role: executive"));
+        only_figures(&body, "infra");
+        // The period is chosen, the menu names the project it holds and no other
+        assert!(body.contains("<a href=\"/product/acme/infra?period=30\">30 days</a>"));
+        assert_eq!(app.get("/product/acme/infra?period=30", Some(&world.exec)).await.status, StatusCode::OK);
+        assert!(body.contains(&project_entry("acme", "infra")) && !body.contains("web") && !body.contains("shop"), "{body}");
+        // All projects: the same figures, those of that project alone (the owner counts web too)
+        let all = app.get("/product", Some(&world.exec)).await.body;
+        assert!(all.contains(&bare_figure(5)), "{all}");
+        only_figures(&all, "*");
+        assert!(app.get("/product", Some(&world.owner)).await.body.contains(&open_figure("/product", 6)));
+        // Another project answers as it does to someone who holds nothing
+        let elsewhere = app.get("/product/acme/web", Some(&world.exec)).await;
+        let unknown = app.get("/product/acme/web", Some(&stranger)).await;
+        assert_eq!((elsewhere.status, &elsewhere.body), (StatusCode::NOT_FOUND, &unknown.body));
+        // Every other view of the Overview address is refused, at both scopes
+        for view in ["vulnerabilities", "review", "overdue", "applications", "subscriptions", "history", "evolution", "audit", "settings"] {
+            let one = app.get(&format!("/product/acme/infra?view={view}"), Some(&world.exec)).await;
+            assert_eq!(one.status, StatusCode::FORBIDDEN, "{view}");
+            assert!(tells_nothing(&one.body), "{view}");
+            if view != "settings" {
+                assert_eq!(app.get(&format!("/product?view={view}"), Some(&world.exec)).await.status, StatusCode::FORBIDDEN, "* {view}");
+            }
+        }
+        // A narrowing of a list is not a way in either
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&show=overdue&severity=critical", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // Its own settings: nothing of the organization, the invitations it has
+        let settings = app.get("/settings", Some(&world.exec)).await.body;
+        assert!(settings.contains("API tokens") && settings.contains("Change password") && !settings.contains("CVE database"));
+
+        // ---- On an organization: each of its projects, and "all projects" of it ----
+        let all = app.get("/product", Some(&world.board)).await.body;
+        assert!(all.contains(&bare_figure(6)), "{all}");
+        only_figures(&all, "board *");
+        assert!(all.contains(&project_entry("acme", "infra")) && all.contains(&project_entry("acme", "web")) && !all.contains("shop"));
+        let web = app.get("/product/acme/web", Some(&world.board)).await.body;
+        assert!(web.contains(&bare_figure(1)), "{web}");
+        only_figures(&web, "board web");
+        assert_eq!(app.get("/product/globex/shop", Some(&world.board)).await.status, StatusCode::NOT_FOUND);
+        // The organization itself stays closed: members, audit, projects
+        for path in ["/orgs/acme", "/orgs/acme/audit/export", "/orgs", "/projects", "/product/acme/web?view=history"] {
+            assert_eq!(app.get(path, Some(&world.board)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+
+        // ---- On the instance: every project of every organization ----
+        let all = app.get("/product", Some(&world.chair)).await.body;
+        assert!(all.contains(&bare_figure(11)), "{all}");
+        only_figures(&all, "chair *");
+        // The organization filter of the bar works on what it holds
+        assert!(all.contains(&org_entry("acme", "acme", false)) && all.contains(&org_entry("globex", "globex", false)), "{all}");
+        let chosen = app.post("/org-filter", Some(&world.chair), "org=globex&back=/product").await;
+        assert_eq!(chosen.status, StatusCode::SEE_OTHER);
+        let cookies = format!("{}; {}", world.chair, chosen.cookie.clone().unwrap());
+        let narrowed = app.get("/product", Some(&cookies)).await.body;
+        assert!(narrowed.contains(&bare_figure(5)) && narrowed.contains("All projects of globex"), "{narrowed}");
+        assert!(narrowed.contains(&project_entry("globex", "shop")) && !narrowed.contains(&project_entry("acme", "infra")));
+        assert!(app.get("/product/globex/shop", Some(&world.chair)).await.body.contains(&bare_figure(5)));
+        for path in ["/cve", "/cve/CVE-2024-5001", "/vendors", "/weaknesses", "/admin", "/admin/users", "/orgs/globex"] {
+            assert_eq!(app.get(path, Some(&world.chair)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+        // An executive of the instance does not start a synchronization
+        assert_eq!(app.post("/sync", Some(&world.chair), "back=/product").await.status, StatusCode::FORBIDDEN);
+        assert!(app.sync_rx.try_recv().is_err());
+
+        // ---- Executive of acme / infra, viewer of globex / shop ----
+        let mixed = &world.mixed;
+        // One role above executive: the reference database is there
+        for path in ["/cve", "/vendors", "/weaknesses", "/projects", "/settings"] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::OK, "{path}");
+        }
+        // Where it is a viewer, it is a viewer
+        let shop = app.get("/product/globex/shop", Some(mixed)).await.body;
+        assert!(shop.contains(&open_figure("/product/globex/shop", 5)) && shop.contains(&menu_entry("/product/globex/shop", "vulnerabilities", "Vulnerabilities", false)));
+        assert!(shop.contains("CVE database"));
+        let listed = app.get("/product/globex/shop?view=vulnerabilities", Some(mixed)).await;
+        assert!(listed.status == StatusCode::OK && listed.body.contains("CVE-2024-5001"));
+        // Where it is an executive, it is an executive: the figures, without a way to the lists
+        let infra = app.get("/product/acme/infra", Some(mixed)).await.body;
+        assert!(infra.contains(&bare_figure(5)) && infra.contains("Your role: executive"), "{infra}");
+        for gone in ["/product/acme/infra?view=", "CVE-2024", "widget"] {
+            assert!(!infra.contains(gone), "{gone}");
+        }
+        // From there the menu leads to the Overview of the other project, never to a view infra does not have
+        assert!(infra.contains("<a href=\"/product/globex/shop\""));
+        assert!(shop.contains("<a href=\"/product/acme/infra\"") && !shop.contains("/product/acme/infra?view="));
+        for path in [
+            "/product/acme/infra?view=vulnerabilities",
+            "/product/acme/infra?view=history",
+            "/product/acme/infra?view=settings",
+        ] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+        // Everything else of that project answers as it does to a stranger
+        for path in ["/orgs/acme/projects/infra/reports/2024-01-01", "/orgs/acme", "/orgs/acme/audit/export"] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let entry = {
+            let db = Database::connect(&app.db_path).unwrap();
+            db.project_entries_for_cve(db.find_project("acme", "infra").unwrap().unwrap(), "CVE-2024-5001").unwrap()[0].0
+        };
+        for (path, form) in [
+            (format!("/orgs/acme/projects/infra/watchlist/{entry}"), "status=treated"),
+            ("/orgs/acme/projects/infra/applications".to_string(), "name=x&version=1"),
+            ("/orgs/acme/projects/infra/members".to_string(), "username=mixed&role=owner"),
+            ("/orgs/acme/projects/infra/delete".to_string(), "name=infra"),
+        ] {
+            assert_eq!(app.post(&path, Some(mixed), form).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        // All projects: the figures count both, the lists show the one it reads
+        let all = app.get("/product", Some(mixed)).await.body;
+        assert!(all.contains(&open_figure("/product", 10)), "{all}");
+        let list = app.get("/product?view=vulnerabilities", Some(mixed)).await;
+        assert_eq!(list.status, StatusCode::OK);
+        assert!(list.body.contains("shop") && list.body.contains("CVE-2024-5001") && !list.body.contains("infra</") && !list.body.contains("CVE-2024-5006"), "{}", list.body);
+        for view in ["applications", "history", "audit", "overdue"] {
+            let page = app.get(&format!("/product?view={view}"), Some(mixed)).await;
+            assert_eq!(page.status, StatusCode::OK, "{view}");
+            assert!(!page.body.contains(">infra<") && !page.body.contains("gadget"), "{view}");
+        }
+        // (the menu of the bar names infra, for its Overview; the list of projects does not)
+        let managed = app.get("/projects", Some(mixed)).await.body;
+        assert!(managed.contains("shop") && !managed.split("<main>").nth(1).unwrap().contains("infra"));
+        // The same through the API and MCP
+        let token = api_token(&app, mixed).await;
+        let bearer = format!("Bearer {token}");
+        let figures: serde_json::Value = serde_json::from_str(&app.api("/api/summary", Some(&bearer)).await.body).unwrap();
+        assert_eq!(figures["open"]["total"].as_i64(), Some(10));
+        assert_eq!(app.api("/api/organizations/acme/projects/infra/summary", Some(&bearer)).await.status, StatusCode::OK);
+        assert_eq!(app.api("/api/organizations/globex/projects/shop/watchlist", Some(&bearer)).await.status, StatusCode::OK);
+        for path in ["/api/organizations/acme/projects/infra", "/api/organizations/acme/projects/infra/watchlist", "/api/organizations/acme/projects/infra/reports", "/api/organizations/acme/audit"] {
+            assert_eq!(app.api(path, Some(&bearer)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(app.api("/api/cve", Some(&bearer)).await.status, StatusCode::OK);
+        assert_eq!(app.post("/admin/mcp", Some(&world.owner), "http_enabled=1").await.status, StatusCode::SEE_OTHER);
+        let (failed, text) = mcp_tool(&app, &token, "list_watchlist", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert!(failed && text.contains("not found"), "{text}");
+        let (failed, text) = mcp_tool(&app, &token, "list_watchlist", serde_json::json!({})).await;
+        assert!(!failed && text.contains("CVE-2024-5001") && !text.contains("CVE-2024-5006"), "{text}");
+        let (failed, text) = mcp_tool(&app, &token, "get_evolution", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert!(failed && text.contains("not found"), "{text}");
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (_, text) = mcp_tool(&app, &token, "list_projects", serde_json::json!({})).await;
+        let projects: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(projects[0]["project"], "shop");
+        assert_eq!(projects[1], serde_json::json!({ "org": "acme", "project": "infra", "summary_only": true }));
+
+        // Nothing changed for the others: the viewer still reads, the owner still decides
+        assert!(app.get("/product/acme/infra", Some(&world.viewer)).await.body.contains(&open_figure("/product/acme/infra", 5)));
+        assert_eq!(app.get("/product/globex/shop?view=vulnerabilities", Some(&world.other)).await.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_executive_role_is_given_where_the_others_are_and_by_the_same_people() {
+        let app = app(open_registration());
+        let world = executives(&app).await;
+        let db = Database::connect(&app.db_path).unwrap();
+        use crate::rbac::Role;
+        let infra = db.find_project("acme", "infra").unwrap().unwrap();
+        let web = db.find_project("acme", "web").unwrap().unwrap();
+
+        // Every form that gives a role offers it, viewer staying the one offered first
+        let offered = "<option value=\"executive\">executive";
+        let first = "<option value=\"viewer\" selected>viewer";
+        for path in ["/orgs/acme", "/product/acme/infra?view=settings", &format!("/admin/users/{}", id_of(&app, "viewer")), "/admin/users?new=1", "/admin/sso?new=1"] {
+            let body = app.get(path, Some(&world.owner)).await.body;
+            assert!(body.contains(offered), "{path}");
+            if !path.starts_with("/admin/sso") {
+                assert!(body.contains(first), "{path}");
+            }
+        }
+        assert!(app.get("/orgs/acme", Some(&world.owner)).await.body.contains("<strong>executive</strong>: the figures of the Overview only."));
+        // The members of a project list who is executive there, as they list the others
+        let members = app.get("/product/acme/infra?view=settings", Some(&world.owner)).await.body;
+        assert!(members.contains("exec") && members.contains("executive"));
+
+        // Who may give viewer may give executive, and nobody else: an editor may not
+        let editor = app.register("editor").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=editor&role=editor").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(&app, "editor", &editor).await;
+        app.register("guest").await;
+        for role in ["viewer", "executive"] {
+            for path in ["/orgs/acme/members", "/orgs/acme/projects/infra/members"] {
+                let form = format!("username=guest&role={role}");
+                assert_eq!(app.post(path, Some(&editor), &form).await.status, StatusCode::FORBIDDEN, "{path} {role}");
+                assert_eq!(app.post(path, Some(&world.viewer), &form).await.status, StatusCode::FORBIDDEN, "{path} {role}");
+                assert_eq!(app.post(path, Some(&world.other), &form).await.status, StatusCode::NOT_FOUND, "{path} {role}");
+            }
+        }
+        assert!(db.received_invitations(id_of(&app, "guest")).unwrap().is_empty());
+        // A role nobody knows is still refused
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=guest&role=manager").await.status, StatusCode::BAD_REQUEST);
+        // Only an administrator gives it on the instance, or to anyone from the administration
+        let guest_id = id_of(&app, "guest");
+        for scope in ["instance", "organization%3Aacme", "project%3Aacme%2Finfra"] {
+            let form = format!("scope={scope}&role=executive");
+            assert_eq!(app.post(&format!("/admin/users/{guest_id}/assign"), Some(&editor), &form).await.status, StatusCode::FORBIDDEN, "{scope}");
+            assert_eq!(app.post(&format!("/admin/users/{guest_id}/assign"), Some(&world.owner), &form).await.status, StatusCode::SEE_OTHER, "{scope}");
+        }
+        let rights: Vec<(String, String)> = db.user_assignments(guest_id).unwrap().into_iter().map(|a| (a.level, a.role)).collect();
+        assert_eq!(rights.len(), 3);
+        assert!(rights.iter().all(|(_, role)| role == "executive"), "{rights:?}");
+        assert!(app.get(&format!("/admin/users/{guest_id}"), Some(&world.owner)).await.body.contains("executive"));
+        // An account created with it
+        let created = app.post("/admin/users", Some(&world.owner), "username=report&password=a-long-password&scope=organization%3Aacme&role=executive").await;
+        assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+        assert_eq!(db.org_role(id_of(&app, "report"), db.list_all_orgs().unwrap().iter().find(|(_, name)| name == "acme").unwrap().0).unwrap(), Some(Role::Executive));
+
+        // The role a provider gives at the first sign-in, and the one of a provisioned group
+        let form = "name=Board+SSO&slug=board-sso&issuer=https%3A%2F%2Fid.example.org&client_id=vulnizard&client_secret=s3cret&scopes=openid+email\
+                    &auto_create=1&scope=organization%3Aacme&default_role=executive";
+        let saved = app.post("/admin/sso", Some(&world.owner), form).await;
+        assert_eq!(saved.status, StatusCode::SEE_OTHER, "{}", saved.body);
+        assert_eq!(db.get_sso_provider("board-sso").unwrap().unwrap().default_role.as_deref(), Some("executive"));
+        let group = db.scim_create_group(crate::db::Scope::Instance, "board", None).unwrap();
+        let given = app.post(&format!("/admin/sso/scim/groups/{group}/roles"), Some(&world.owner), "scope=project%3Aacme%2Fweb&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        assert_eq!(db.list_group_roles(group).unwrap()[0].role, "executive");
+
+        // The highest role wins on a project; the others are not touched
+        let board_id = id_of(&app, "board");
+        assert_eq!(app.post("/orgs/acme/projects/web/members", Some(&world.owner), "username=board&role=viewer").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(&app, "board", &world.board).await;
+        assert_eq!(db.project_role(board_id, web).unwrap(), Some(Role::Viewer));
+        assert_eq!(db.project_role(board_id, infra).unwrap(), Some(Role::Executive));
+        assert_eq!(app.get("/product/acme/web?view=vulnerabilities", Some(&world.board)).await.status, StatusCode::OK);
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.board)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get("/cve", Some(&world.board)).await.status, StatusCode::OK);
+        // An executive of a project who is viewer of its organization reads it
+        assert_eq!(app.post(&format!("/admin/users/{}/assign", id_of(&app, "exec")), Some(&world.owner), "scope=organization%3Aacme&role=viewer").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(db.project_role(id_of(&app, "exec"), infra).unwrap(), Some(Role::Viewer));
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.exec)).await.status, StatusCode::OK);
+        // Taken back, the confinement is back
+        assert_eq!(app.post(&format!("/admin/users/{}/assign", id_of(&app, "exec")), Some(&world.owner), "scope=organization%3Aacme&role=none").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get("/cve", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // The owner changes an executive member into a viewer from the list of members
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=board&role=viewer").await.status, StatusCode::SEE_OTHER);
+        // (a member already there is not invited again: the change waits for nothing)
+        let _ = world.chair;
     }
 }

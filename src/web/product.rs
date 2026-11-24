@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
 use super::charts::{self, Segment};
-use super::pages::{load_project, nonempty, redirect, HtmlResult};
+use super::pages::{load_summary_project, nonempty, redirect, HtmlResult};
 use super::views::{self, enc, layout, product_url, Listing, Nav, SortKey, PAGE};
 use super::{blocking, AppError, St, User, SESSION_TTL_SECS};
 use crate::db::{
@@ -49,8 +49,15 @@ struct Scope {
     /// Organization "all projects" is narrowed to; never set with a project.
     /// It hides rows the user's rights give: no right ever comes from it.
     org: Option<String>,
-    /// The user's projects, of that organization only when one is chosen
+    /// The projects the user reads (viewer or more), of that organization
+    /// only when one is chosen: what the lists are about
     summaries: Vec<ProjectSummary>,
+    /// The account holds roles, and all of them are executive: at the `*`
+    /// scope too, the Overview is all there is
+    confined: bool,
+    /// Projects of the scope the user is only executive of: counted by the
+    /// figures, absent from every list
+    figures_only: usize,
     /// Color slot of each of the user's projects, whatever the organization chosen
     slots: HashMap<i64, usize>,
 }
@@ -61,6 +68,9 @@ impl Scope {
     /// choice was checked against the user's projects when the request came in.
     fn load(db: &Database, user: &Account, project: Option<(Org, OrgProject)>) -> Result<Self, AppError> {
         let mut summaries = db.project_summaries(user.id)?;
+        let held = db.held_projects(user.id)?;
+        // Confined by the roles it was given, or because none of the projects it holds is one it reads
+        let confined = db.summary_only(user.id)? || (!held.is_empty() && !held.iter().any(|p| p.can_view()));
         // By creation order, so a project keeps its color whatever the filter or the ranking
         let mut ids: Vec<i64> = summaries.iter().map(|p| p.id).collect();
         ids.sort_unstable();
@@ -72,10 +82,18 @@ impl Scope {
         if let Some(org) = &org {
             summaries.retain(|p| p.org == *org);
         }
+        let figures_only = held
+            .iter()
+            .filter(|p| !p.can_view())
+            .filter(|p| project.as_ref().is_none_or(|(_, selected)| selected.id == p.id))
+            .filter(|p| org.as_ref().is_none_or(|org| p.org == *org))
+            .count();
         Ok(Scope {
             project,
             org,
             summaries,
+            confined,
+            figures_only,
             slots,
         })
     }
@@ -119,9 +137,20 @@ impl Scope {
         Ok(db.entry_tracks(Some(user.id), self.project_id(), self.org.as_deref())?)
     }
 
-    /// The executive figures, the averages being taken over the last `period_days` days
+    /// The executive figures, the averages being taken over the last
+    /// `period_days` days. They count every project of the scope the user
+    /// holds a role on, those it is only executive of included.
     fn figures(&self, db: &Database, user: &Account, period_days: i64) -> Result<Figures, AppError> {
         Ok(db.figures(Some(user.id), self.project_id(), self.org.as_deref(), period_days)?)
+    }
+
+    /// Whether a view other than the Overview may be opened: the project is
+    /// read, or at the `*` scope the account is not confined to its figures
+    fn may_open_views(&self) -> bool {
+        match &self.project {
+            Some((org, _)) => org.can(Permission::View),
+            None => !self.confined,
+        }
     }
 
     /// May open the lists of entries a figure counts: the right to read the
@@ -189,7 +218,8 @@ pub struct OrgFilterForm {
 /// checked again on every page (`chosen_org`).
 pub async fn org_filter(State(st): St, User(user): User, Form(form): Form<OrgFilterForm>) -> Result<Response, AppError> {
     blocking(|| {
-        let visible = st.db()?.list_user_projects(user.id)?.iter().any(|p| p.org == form.org);
+        // The organizations of the bar are those of the projects the account holds a role on
+        let visible = st.db()?.held_projects(user.id)?.iter().any(|p| p.org == form.org);
         let (value, max_age) = if visible { (enc(&form.org), SESSION_TTL_SECS) } else { (String::new(), 0) };
         let cookie = format!(
             "{}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
@@ -222,7 +252,8 @@ pub async fn product_project(
 ) -> HtmlResult {
     blocking(|| {
         let db = st.db()?;
-        let selected = load_project(&db, &user, &org, &project)?;
+        // The Overview answers to an executive of the project; every other view asks to read it
+        let selected = load_summary_project(&db, &user, &org, &project)?;
         render(&db, &st, &st.effective_config(&db)?, &user, Some(selected), &q)
     })
 }
@@ -238,6 +269,11 @@ fn render(
     let scope = Scope::load(db, user, project)?;
     let view = nonempty(&q.view).unwrap_or_else(|| "overview".into());
     let view = views::canonical_view(&view);
+    // Anything that is not one of the other views shows the Overview
+    let other_view = views::PRODUCT_VIEWS.iter().any(|(key, _)| *key == view && *key != "overview") || (view == "settings" && !scope.all());
+    if other_view && !scope.may_open_views() {
+        return Err(AppError::Forbidden);
+    }
     let (title, body) = match view {
         "vulnerabilities" => ("Vulnerabilities", vulnerabilities(db, user, &scope, q)?),
         "overdue" => ("Overdue", overdue(db, user, &scope, q)?),
@@ -415,7 +451,8 @@ fn severity_label(label: &str, color: &str) -> Markup {
 }
 
 fn overview(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
-    if scope.applications(db, user)?.is_empty() && scope.subscriptions(db, user)?.is_empty() {
+    // Where the user is only executive, what is monitored is not its to see: the figures say it
+    if scope.figures_only == 0 && scope.applications(db, user)?.is_empty() && scope.subscriptions(db, user)?.is_empty() {
         return Ok(onboarding(scope));
     }
     let period = match nonempty(&q.period).as_deref() {
@@ -1610,7 +1647,7 @@ fn settings(db: &Database, config: &crate::config::Config, scope: &Scope, new_ki
             form.row method="post" action={ (base) "/members" } {
                 input type="text" name="username" placeholder="username" required;
                 select name="role" {
-                    @for role in Role::ALL.iter().rev() { option value=(role.as_str()) { (role.as_str()) } }
+                    @for role in Role::ALL.iter().rev() { option value=(role.as_str()) selected[*role == Role::Viewer] { (role.as_str()) } }
                 }
                 button type="submit" { "Invite to this project" }
             }

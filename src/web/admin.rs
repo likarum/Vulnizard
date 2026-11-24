@@ -223,8 +223,9 @@ fn scope_select(choices: &[(String, String)], with_none: bool) -> maud::Markup {
 fn role_select(with_remove: bool) -> maud::Markup {
     html! {
         select name="role" {
+            // Viewer stays the role offered first; executive, below it, is a choice to make
             @for role in crate::rbac::Role::ALL.iter().rev() {
-                option value=(role.as_str()) { (role.as_str()) " — " (role.description()) }
+                option value=(role.as_str()) selected[*role == crate::rbac::Role::Viewer] { (role.as_str()) " — " (role.description()) }
             }
             @if with_remove { option value="none" { "remove this right" } }
         }
@@ -1478,7 +1479,7 @@ fn scim_page(
                                         @for (value, label) in &choices { option value=(value) { (label) } }
                                     }
                                     select name="role" {
-                                        @for role in crate::rbac::Role::ALL.iter().rev() { option value=(role.as_str()) { (role.as_str()) } }
+                                        @for role in crate::rbac::Role::ALL.iter().rev() { option value=(role.as_str()) selected[*role == crate::rbac::Role::Viewer] { (role.as_str()) } }
                                     }
                                     button.small type="submit" { "Give" }
                                 }

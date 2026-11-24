@@ -106,8 +106,9 @@ database was last synchronized (administrators can start a sync from there):
   (a day, UTC), `days_left` (negative once overdue) and `overdue_days`, a decided one
   `resolved_in_days`, from its detection to the decision),
   `/api/summary` and `/api/organizations/{org}/projects/{project}/summary` (the figures of the
-  *Overview*, for every project the token can read — `?org=` keeps those of one organization —
-  or for one project; `?days=` sets the period of the resolution figures, 1 to 365, 90 by
+  *Overview*, for every project the account holds a role on, executive included — `?org=` keeps
+  those of one organization — or for one project; `/api/summary/projects` lists those projects
+  (`org`, `project`, `role`); `?days=` sets the period of the resolution figures, 1 to 365, 90 by
   default. Figures only, no CVE and no name:
   `{ as_of, open, overdue, overdue_days: { avg, max }, period_days, resolved, resolved_avg_days }`,
   where `open`, `overdue`, `resolved` and `resolved_avg_days` each hold `total`, `critical`,

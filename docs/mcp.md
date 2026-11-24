@@ -26,9 +26,12 @@ Read tools: `search_cves`, `get_cve`, `list_vendors`, `list_products`, `list_wea
 `get_security_log` (administrators), `database_status`.
 
 `get_summary` gives the figures of the *Overview* and nothing else — no CVE, no application, no
-name — for one project (`org`, `project`), for every project the caller can read (no argument), or
-for those of one organization (`org` alone; an organization the caller reads nothing of gives
-figures of nothing). As of today: `open` (entries to review) and `overdue` (those past their
+name — for one project (`org`, `project`), for every project the caller holds a role on (no
+argument), or for those of one organization (`org` alone; an organization the caller holds nothing
+in gives figures of nothing). An account that only holds the **executive** role is offered this
+tool and `list_projects` (the names of its projects, marked `summary_only`) and no other: the rest
+is neither listed nor callable. Where an account is executive of one project and reads others,
+`list_projects` marks the former `summary_only` and every other tool treats it as unknown. As of today: `open` (entries to review) and `overdue` (those past their
 remediation deadline), each with a `total` and a count per severity (`critical`, `high`, `medium`,
 `low`, `none` for CVEs without a score; the severity is the one the CVE has today), and
 `overdue_days` (`avg` and `max` days past the deadline). Over the last `period_days` days (`days`,

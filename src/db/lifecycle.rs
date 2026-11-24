@@ -394,7 +394,19 @@ impl Database {
 
     /// Same, for a user (`Some`) or without access filter (`None`: the local operator)
     pub fn lifecycle_events_for(&self, user_id: Option<i64>, project_id: Option<i64>) -> Result<Vec<LifecycleEvent>> {
-        let mut stmt = self.conn().prepare(
+        self.lifecycle_events_reaching(user_id, project_id, super::Reach::View)
+    }
+
+    /// The events the rights of a user reach. `Reach::Summary` also takes
+    /// those of the projects the user is only executive of: for counting
+    /// them (the figures), never for showing them.
+    pub(super) fn lifecycle_events_reaching(
+        &self,
+        user_id: Option<i64>,
+        project_id: Option<i64>,
+        reach: super::Reach,
+    ) -> Result<Vec<LifecycleEvent>> {
+        let mut stmt = self.conn().prepare(&format!(
             "SELECT e.id, e.entry_id, o.name, e.project_name, e.cve_id, e.app_name, e.app_version, e.at, e.kind,
                     e.status, e.previous, e.actor, e.comment, c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0),
                     e.user_id IS NULL, NOT EXISTS(SELECT 1 FROM projects p WHERE p.id = e.project_id)
@@ -405,10 +417,12 @@ impl Database {
                -- a role on the organization shows its whole history, deleted
                -- projects included; a project role shows that project only
                AND (?1 IS NULL
-                    OR EXISTS(SELECT 1 FROM org_access a WHERE a.organization_id = o.id AND a.user_id = ?1)
-                    OR EXISTS(SELECT 1 FROM project_access pa WHERE pa.project_id = e.project_id AND pa.user_id = ?1))
+                    OR EXISTS(SELECT 1 FROM {org_view} a WHERE a.organization_id = o.id AND a.user_id = ?1)
+                    OR EXISTS(SELECT 1 FROM {project_view} pa WHERE pa.project_id = e.project_id AND pa.user_id = ?1))
              ORDER BY e.id",
-        )?;
+            org_view = reach.org_view(),
+            project_view = reach.project_view(),
+        ))?;
         let rows = stmt
             .query_map(params![user_id, project_id], |r| {
                 Ok(LifecycleEvent {
