@@ -1,16 +1,14 @@
-//! Notification destinations (schema v13, settings on the destination since v27).
+//! Notification destinations (schema v13, settings on the destination since v27,
+//! browser notifications removed in v28).
 //!
 //! A **destination** is where messages go (an email address with its SMTP
-//! server, a webhook, a Slack or ntfy URL, the browsers of the members). It
+//! server, a webhook, a Slack or ntfy URL). It
 //! belongs to the instance, an organization or a single project, and that
 //! alone decides what it receives: a destination of the instance gets the
 //! notifications of every project, one of an organization those of its
 //! projects, one of a project those of that project. No project picks it.
 //! What it sends is set on the destination itself: the event types, a
 //! minimum CVSS, and whether it is enabled.
-//!
-//! Browser notifications use Web Push: subscriptions and the per-user inbox
-//! the service worker reads are stored here.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
@@ -26,7 +24,7 @@ CREATE TABLE IF NOT EXISTS destinations (
     -- organization or project id (NULL for the instance)
     scope_id INTEGER,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('webhook', 'slack', 'email', 'ntfy', 'browser')),
+    kind TEXT NOT NULL CHECK(kind IN ('webhook', 'slack', 'email', 'ntfy')),
     config TEXT NOT NULL DEFAULT '{}',
     -- instance destinations may also receive instance events (sync finished)
     system_events INTEGER NOT NULL DEFAULT 0,
@@ -63,33 +61,14 @@ CREATE TRIGGER IF NOT EXISTS destinations_organization_deleted AFTER DELETE ON o
     DELETE FROM destinations WHERE scope = 'organization' AND scope_id = OLD.id;
 END;
 
--- Web Push: browsers that asked for notifications, and what each user has to read
-CREATE TABLE IF NOT EXISTS push_subscriptions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    endpoint TEXT UNIQUE NOT NULL,
-    label TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS push_inbox (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    url TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_push_inbox_user ON push_inbox(user_id, id);
-
 INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '13');
 "#;
 
-pub const DESTINATION_KINDS: [(&str, &str); 5] = [
+pub const DESTINATION_KINDS: [(&str, &str); 4] = [
     ("email", "Email"),
     ("ntfy", "ntfy topic"),
     ("slack", "Slack incoming webhook"),
     ("webhook", "Webhook (JSON POST)"),
-    ("browser", "Browser notifications of the members"),
 ];
 
 #[derive(Debug, Clone)]
@@ -147,17 +126,8 @@ pub fn target_of(kind: &str, config: &Value) -> String {
                 None => to.to_string(),
             }
         }
-        "browser" => "browsers of the members".to_string(),
         _ => config.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
     }
-}
-
-/// A message waiting in a user's browser inbox
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PushItem {
-    pub title: String,
-    pub body: String,
-    pub url: String,
 }
 
 const DESTINATION_SELECT: &str = "
@@ -247,6 +217,59 @@ impl Database {
         tx.execute_batch(
             "DROP TABLE notifications;
              INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '27');",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// v28: browser notifications (Web Push) are removed. The destinations of
+    /// that kind go, with the browsers that had subscribed, the messages
+    /// waiting for them and the key that signed the requests to the push
+    /// services; the table is rebuilt so that the kind can no longer be stored.
+    pub(super) fn migrate_remove_browser_notifications(&self) -> Result<()> {
+        let tx = self.conn().unchecked_transaction()?;
+        tx.execute_batch(
+            "DELETE FROM destinations WHERE kind = 'browser';
+             DROP TABLE IF EXISTS push_inbox;
+             DROP TABLE IF EXISTS push_subscriptions;
+             DELETE FROM metadata WHERE key = 'push.vapid_private_key';
+
+             DROP TRIGGER IF EXISTS destinations_project_deleted;
+             DROP TRIGGER IF EXISTS destinations_organization_deleted;
+             CREATE TABLE destinations_v28 (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 scope TEXT NOT NULL CHECK(scope IN ('instance', 'organization', 'project')),
+                 -- organization or project id (NULL for the instance)
+                 scope_id INTEGER,
+                 name TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ('webhook', 'slack', 'email', 'ntfy')),
+                 config TEXT NOT NULL DEFAULT '{}',
+                 -- instance destinations may also receive instance events (sync finished)
+                 system_events INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 events TEXT NOT NULL DEFAULT '[]',
+                 min_cvss REAL,
+                 enabled INTEGER NOT NULL DEFAULT 1
+             );
+             INSERT INTO destinations_v28 (id, scope, scope_id, name, kind, config, system_events, created_at, events, min_cvss, enabled)
+             SELECT id, scope, scope_id, name, kind, config, system_events, created_at, events, min_cvss, enabled FROM destinations;
+             -- An identifier that was given once is never given again
+             INSERT INTO sqlite_sequence (name, seq)
+             SELECT 'destinations_v28', seq FROM sqlite_sequence
+             WHERE name = 'destinations' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'destinations_v28');
+             UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'destinations')
+             WHERE name = 'destinations_v28' AND EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'destinations');
+             DROP TABLE destinations;
+             ALTER TABLE destinations_v28 RENAME TO destinations;
+             CREATE INDEX idx_destinations_scope ON destinations(scope, scope_id);
+             CREATE TRIGGER destinations_project_deleted AFTER DELETE ON projects BEGIN
+                 DELETE FROM destinations WHERE scope = 'project' AND scope_id = OLD.id;
+             END;
+             CREATE TRIGGER destinations_organization_deleted AFTER DELETE ON organizations BEGIN
+                 DELETE FROM destinations WHERE scope = 'organization' AND scope_id = OLD.id;
+             END;
+
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '28');",
         )?;
         tx.commit()?;
         Ok(())
@@ -389,7 +412,6 @@ impl Database {
     ) -> Result<i64> {
         let config = match kind {
             "email" => serde_json::json!({ "to": target }),
-            "browser" => serde_json::json!({}),
             _ => serde_json::json!({ "url": target }),
         };
         let tx = self.conn().unchecked_transaction()?;
@@ -404,92 +426,6 @@ impl Database {
     /// per destination covering it (see `destinations_covering`)
     pub fn list_notifications(&self, project_id: i64) -> Result<Vec<Notification>> {
         Ok(self.destinations_covering(project_id)?.iter().map(Destination::notification).collect())
-    }
-
-    // ---------- Web Push ----------
-
-    pub fn add_push_subscription(&self, user_id: i64, endpoint: &str, label: Option<&str>) -> Result<()> {
-        // A browser belongs to the last user who subscribed with it
-        self.conn().execute(
-            "INSERT INTO push_subscriptions (user_id, endpoint, label) VALUES (?1, ?2, ?3)
-             ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, label = excluded.label",
-            params![user_id, endpoint, label],
-        )?;
-        Ok(())
-    }
-
-    pub fn remove_push_subscription(&self, user_id: i64, endpoint: &str) -> Result<()> {
-        self.conn().execute(
-            "DELETE FROM push_subscriptions WHERE user_id = ?1 AND endpoint = ?2",
-            params![user_id, endpoint],
-        )?;
-        Ok(())
-    }
-
-    /// Removes a subscription the push service reported as gone
-    pub fn forget_push_endpoint(&self, endpoint: &str) -> Result<()> {
-        self.conn()
-            .execute("DELETE FROM push_subscriptions WHERE endpoint = ?1", params![endpoint])?;
-        Ok(())
-    }
-
-    /// (endpoint, label) of the browsers of a user
-    pub fn list_push_subscriptions(&self, user_id: i64) -> Result<Vec<(String, Option<String>)>> {
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT endpoint, label FROM push_subscriptions WHERE user_id = ?1 ORDER BY id")?;
-        let rows = stmt
-            .query_map(params![user_id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Enabled users who can read the project
-    pub fn users_with_project_access(&self, project_id: i64) -> Result<Vec<i64>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT pa.user_id FROM project_access pa JOIN users u ON u.id = pa.user_id
-             WHERE pa.project_id = ?1 AND u.disabled = 0",
-        )?;
-        let rows = stmt
-            .query_map(params![project_id], |r| r.get(0))?
-            .collect::<std::result::Result<Vec<i64>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Queues a message for the browsers of a user (at most 50 kept)
-    pub fn push_enqueue(&self, user_id: i64, title: &str, body: &str, url: &str) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO push_inbox (user_id, title, body, url) VALUES (?1, ?2, ?3, ?4)",
-            params![user_id, title, body, url],
-        )?;
-        self.conn().execute(
-            "DELETE FROM push_inbox WHERE user_id = ?1 AND id NOT IN
-                (SELECT id FROM push_inbox WHERE user_id = ?1 ORDER BY id DESC LIMIT 50)",
-            params![user_id],
-        )?;
-        Ok(())
-    }
-
-    /// Returns the messages waiting for the user and removes them
-    pub fn push_take(&self, user_id: i64) -> Result<Vec<PushItem>> {
-        let tx = self.conn().unchecked_transaction()?;
-        let items = {
-            let mut stmt =
-                tx.prepare("SELECT title, body, url FROM push_inbox WHERE user_id = ?1 ORDER BY id LIMIT 20")?;
-            let rows = stmt
-                .query_map(params![user_id], |r| {
-                    Ok(PushItem {
-                        title: r.get(0)?,
-                        body: r.get(1)?,
-                        url: r.get(2)?,
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        tx.execute("DELETE FROM push_inbox WHERE user_id = ?1", params![user_id])?;
-        tx.commit()?;
-        Ok(items)
     }
 }
 
@@ -619,7 +555,7 @@ mod tests {
 
         // Opening it upgrades it
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 27);
+        assert_eq!(db.schema_version().unwrap(), 28);
         let settings = |id: i64| {
             let d = db.get_destination(id).unwrap().unwrap();
             (d.events, d.min_cvss, d.enabled)
@@ -645,26 +581,136 @@ mod tests {
         assert_eq!(db.get_destination(phone).unwrap().unwrap().events, ["created", "kev"]);
     }
 
-    #[test]
-    fn push_inbox_is_per_user_and_read_once() {
-        let db = Database::open_in_memory().unwrap();
-        let alice = db.create_account("alice", None, "h", false).unwrap();
-        let bob = db.create_account("bob", None, "h", false).unwrap();
-        db.add_push_subscription(alice, "https://push.example.org/a", Some("laptop")).unwrap();
-        db.add_push_subscription(bob, "https://push.example.org/a", None).unwrap(); // same browser, new user
-        assert!(db.list_push_subscriptions(alice).unwrap().is_empty());
-        assert_eq!(db.list_push_subscriptions(bob).unwrap().len(), 1);
+    /// A version 27 database, as one that used browser notifications was
+    fn back_to_v27(db: &Database) {
+        db.conn()
+            .execute_batch(
+                "DROP TRIGGER destinations_project_deleted;
+                 DROP TRIGGER destinations_organization_deleted;
+                 ALTER TABLE destinations RENAME TO destinations_new;
+                 CREATE TABLE destinations (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     scope TEXT NOT NULL CHECK(scope IN ('instance', 'organization', 'project')),
+                     scope_id INTEGER,
+                     name TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('webhook', 'slack', 'email', 'ntfy', 'browser')),
+                     config TEXT NOT NULL DEFAULT '{}',
+                     system_events INTEGER NOT NULL DEFAULT 0,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                     events TEXT NOT NULL DEFAULT '[]',
+                     min_cvss REAL,
+                     enabled INTEGER NOT NULL DEFAULT 1
+                 );
+                 INSERT INTO destinations SELECT * FROM destinations_new;
+                 DROP TABLE destinations_new;
+                 CREATE INDEX idx_destinations_scope ON destinations(scope, scope_id);
+                 CREATE TRIGGER destinations_project_deleted AFTER DELETE ON projects BEGIN
+                     DELETE FROM destinations WHERE scope = 'project' AND scope_id = OLD.id;
+                 END;
+                 CREATE TRIGGER destinations_organization_deleted AFTER DELETE ON organizations BEGIN
+                     DELETE FROM destinations WHERE scope = 'organization' AND scope_id = OLD.id;
+                 END;
+                 CREATE TABLE push_subscriptions (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                     endpoint TEXT UNIQUE NOT NULL,
+                     label TEXT,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 CREATE TABLE push_inbox (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                     title TEXT NOT NULL,
+                     body TEXT NOT NULL,
+                     url TEXT NOT NULL,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 CREATE INDEX idx_push_inbox_user ON push_inbox(user_id, id);
+                 INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '27');",
+            )
+            .unwrap();
+    }
 
-        db.push_enqueue(bob, "Sync finished", "nvd: 3 added", "/admin/sources").unwrap();
-        assert!(db.push_take(alice).unwrap().is_empty());
-        assert_eq!(db.push_take(bob).unwrap()[0].title, "Sync finished");
-        assert!(db.push_take(bob).unwrap().is_empty());
-        for i in 0..60 {
-            db.push_enqueue(bob, &format!("m{i}"), "", "/").unwrap();
+    #[test]
+    fn version_27_browser_notifications_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v27.db");
+        let (hook, ops, instance_browsers, project_browsers, infra);
+        let raw_hook: String;
+        {
+            let db = Database::open(&path).unwrap();
+            let alice = db.create_account("alice", None, "h", true).unwrap();
+            let org = db.create_org("acme", alice).unwrap();
+            infra = db.create_org_project(org, alice, "infra", None).unwrap();
+            hook = db
+                .create_destination("project", Some(infra), "hook", "webhook", &json!({ "url": "https://hooks.example.org/x" }), false)
+                .unwrap();
+            db.update_destination_settings(hook, &["kev".to_string()], Some(7.5), false, None).unwrap();
+            back_to_v27(&db);
+            let events = serde_json::to_string(&all_events()).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO destinations (scope, scope_id, name, kind, config, system_events, events)
+                     VALUES ('instance', NULL, 'Everyone', 'browser', '{}', 1, ?1), ('project', ?2, 'Team browsers', 'browser', '{}', 0, ?1)",
+                    params![events, infra],
+                )
+                .unwrap();
+            let id_of = |name: &str| -> i64 { db.conn().query_row("SELECT id FROM destinations WHERE name = ?1", [name], |r| r.get(0)).unwrap() };
+            (instance_browsers, project_browsers) = (id_of("Everyone"), id_of("Team browsers"));
+            // Created after the browser ones, then one more that was deleted: the rebuilt table must keep counting from there
+            ops = db.create_destination("instance", None, "ops", "ntfy", &json!({ "url": "https://ntfy.example.org/ops" }), true).unwrap();
+            let deleted = db.create_destination("instance", None, "gone", "browser", &json!({}), false).unwrap();
+            assert_eq!(deleted, ops + 1);
+            db.delete_destination(deleted).unwrap();
+            db.conn()
+                .execute_batch(&format!(
+                    "INSERT INTO push_subscriptions (user_id, endpoint, label) VALUES ({alice}, 'https://push.example.org/a', 'laptop');
+                     INSERT INTO push_inbox (user_id, title, body, url) VALUES ({alice}, 'Synchronization finished', 'nvd: 3 added', '/admin/sources');"
+                ))
+                .unwrap();
+            db.set_secret("push.vapid_private_key", "00ff").unwrap();
+            db.set_secret("setting.nvd_api_key", "NVDKEY").unwrap();
+            raw_hook = db.conn().query_row("SELECT quote(config) || created_at FROM destinations WHERE id = ?1", [hook], |r| r.get(0)).unwrap();
         }
-        let kept: i64 = db.conn().query_row("SELECT COUNT(*) FROM push_inbox", [], |r| r.get(0)).unwrap();
-        assert_eq!(kept, 50);
-        db.forget_push_endpoint("https://push.example.org/a").unwrap();
-        assert!(db.list_push_subscriptions(bob).unwrap().is_empty());
+
+        // Opening it upgrades it
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 28);
+        let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+        // The browser destinations are gone, of the instance and of the project alike
+        assert!(db.get_destination(instance_browsers).unwrap().is_none() && db.get_destination(project_browsers).unwrap().is_none());
+        assert_eq!(count("SELECT COUNT(*) FROM destinations WHERE kind = 'browser'"), 0);
+        // With the subscriptions, the inbox and the signing key
+        assert_eq!(count("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%push%' OR tbl_name LIKE '%push%'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM sqlite_sequence WHERE name LIKE '%push%' OR name LIKE '%v28%'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM metadata WHERE key LIKE 'push%'"), 0);
+        assert_eq!(db.get_secret("setting.nvd_api_key").unwrap().as_deref(), Some("NVDKEY"));
+
+        // The others are untouched: same identifier, same stored settings, same content
+        let kept = db.get_destination(hook).unwrap().unwrap();
+        assert_eq!((kept.scope.as_str(), kept.scope_id, kept.name.as_str(), kept.kind.as_str()), ("project", Some(infra), "hook", "webhook"));
+        assert_eq!(kept.target(), "https://hooks.example.org/x");
+        assert_eq!((kept.events, kept.min_cvss, kept.enabled, kept.system_events), (vec!["kev".to_string()], Some(7.5), false, false));
+        let raw_now: String = db.conn().query_row("SELECT quote(config) || created_at FROM destinations WHERE id = ?1", [hook], |r| r.get(0)).unwrap();
+        assert_eq!(raw_now, raw_hook);
+        let ops_now = db.get_destination(ops).unwrap().unwrap();
+        assert_eq!((ops_now.target().as_str(), ops_now.system_events, ops_now.events), ("https://ntfy.example.org/ops", true, all_events()));
+        assert_eq!(db.list_all_destinations().unwrap().len(), 2);
+        assert_eq!(db.destinations_covering(infra).unwrap().len(), 2);
+
+        // The kind can no longer be stored, and identifiers go on from where they were
+        assert!(db.create_destination("instance", None, "again", "browser", &json!({}), false).is_err());
+        let next = db.create_destination("instance", None, "next", "ntfy", &json!({ "url": "https://ntfy.example.org/n" }), false).unwrap();
+        assert_eq!(next, ops + 2);
+        // A destination still goes with its project
+        assert_eq!(count("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_destinations_scope'"), 1);
+        db.conn().execute("DELETE FROM projects WHERE id = ?1", [infra]).unwrap();
+        assert!(db.get_destination(hook).unwrap().is_none());
+
+        // And opening it again changes nothing
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 28);
+        assert_eq!(db.list_all_destinations().unwrap().len(), 2);
     }
 }

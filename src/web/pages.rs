@@ -1031,8 +1031,6 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
                 button type="submit" { "Create token" }
             }
 
-            (super::notifications::settings_section(db, user)?)
-
             (super::mfa::settings_summary(db, user)?)
 
             h2 { "Change password" }

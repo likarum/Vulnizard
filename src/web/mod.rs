@@ -268,17 +268,6 @@ fn session_account(parts: &Parts, state: &AppState) -> Result<Option<Account>, A
     }
 }
 
-/// Optional web session
-pub struct MaybeUser(pub Option<Account>);
-
-impl FromRequestParts<Arc<AppState>> for MaybeUser {
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, AppError> {
-        Ok(MaybeUser(session_account(parts, state)?))
-    }
-}
-
 /// Required web session (redirects to /login otherwise)
 pub struct User(pub Account);
 
@@ -498,8 +487,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            // Scripts: only the two same-origin files of the browser notifications
-            "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            // Scripts are same-origin files only; connect-src is for their fetch (filter.js, mfa.js)
+            "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -614,13 +603,6 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/destinations/{id}/delete",
             post(notifications::project_destination_delete),
         )
-        // Browser notifications
-        .route("/push/key", get(notifications::push_key))
-        .route("/push/subscribe", post(notifications::push_subscribe))
-        .route("/push/unsubscribe", post(notifications::push_unsubscribe))
-        .route("/push/inbox", get(notifications::push_inbox))
-        .route("/static/push.js", get(notifications::push_script))
-        .route("/sw.js", get(notifications::service_worker))
         .route("/orgs/{org}/projects/{project}/reports/{day}", get(projects::report_detail))
         .route("/subscriptions", post(pages::subscription_update))
         // Reference database
@@ -1894,9 +1876,9 @@ mod tests {
             app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
         }
         for form in [
-            "owner=instance&kind=browser&name=Everyone&system_events=1",
-            "owner=organization%3Aacme&kind=browser&name=Team",
-            "owner=project%3Aacme%2Finfra&kind=browser&name=Solo",
+            "owner=instance&kind=ntfy&name=Everyone&url=https%3A%2F%2F8.8.8.8%2Feveryone&system_events=1",
+            "owner=organization%3Aacme&kind=ntfy&name=Team&url=https%3A%2F%2F8.8.8.8%2Fteam",
+            "owner=project%3Aacme%2Finfra&kind=ntfy&name=Solo&url=https%3A%2F%2F8.8.8.8%2Fsolo",
         ] {
             assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
         }
@@ -2105,129 +2087,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_browser_test_offers_to_enable_notifications() {
+    async fn browser_notifications_are_gone() {
         let app = app(open_registration());
         let admin = app.register("root").await;
-        for form in ["owner=instance&kind=browser&name=Browsers", "owner=instance&kind=ntfy&name=ops&url=https%3A%2F%2F8.8.8.8%2Fops"] {
-            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
-        }
-        let db = Database::connect(&app.db_path).unwrap();
-        let id_of = |kind: &str| db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == kind).unwrap().id;
-        let (browsers, ops) = (id_of("browser"), id_of("ntfy"));
-        let list = "/admin/notifications?tab=destinations";
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        app.post("/projects", Some(&admin), "org=acme&name=infra").await;
 
-        // No browser registered: the test is not reported as failed, the administrator is sent to the offer
-        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
-        assert_eq!(tested.status, StatusCode::SEE_OTHER);
-        assert_eq!(tested.location, Some(format!("{list}&enable={browsers}")));
-        assert!(!tested.cookie.unwrap_or_default().contains("failed"));
-
-        // The offer: a button for the script (hidden until it runs), the form that sends the test,
-        // and the way through the Settings page for a browser without JavaScript
-        let page = app.get(&format!("{list}&enable={browsers}"), Some(&admin)).await.body;
-        let offer = page.split("id=\"push-test\"").nth(1).expect("the offer is shown").split("</form>").next().unwrap().to_string();
-        assert!(offer.contains("Test through “Browsers”: none of your browsers is registered."), "{offer}");
-        assert!(offer.contains("<p data-fallback>Enable notifications for this browser first, in <a href=\"/settings\">Settings → Browser notifications</a>"), "{offer}");
-        assert!(offer.contains("<p data-status hidden></p>"), "{offer}");
-        assert!(offer.contains(&format!("<form method=\"post\" action=\"/admin/notifications/destinations/{browsers}\"><input type=\"hidden\" name=\"action\" value=\"test\">")), "{offer}");
-        assert!(offer.contains("<button type=\"button\" data-enable hidden>Enable notifications on this browser and send the test</button>"), "{offer}");
-        // Same-origin script only, as the content security policy demands
-        assert!(page.contains("<script src=\"/static/push.js\" defer></script>"));
-        assert!(!page.contains("<script>") && !page.contains("onclick"));
-
-        // The script registers the browser the way the Settings page does, then sends the form
-        let script = app.get("/static/push.js", None).await.body;
-        for needle in ["push-test", "push-box", "requestPermission", "/push/key", "/push/subscribe", "form.submit()"] {
-            assert!(script.contains(needle), "{needle}");
-        }
-        assert_eq!(script.matches("\"/push/subscribe\"").count(), 1);
-
-        // Nothing is offered without the request, for another type of destination or for an unknown one
-        for path in [list.to_string(), format!("{list}&enable={ops}"), format!("{list}&enable=9999")] {
-            let body = app.get(&path, Some(&admin)).await.body;
-            assert!(!body.contains("push-test") && !body.contains("push.js"), "{path}");
-        }
-
-        // Once a browser is registered there is nothing left to offer
-        let subscription = serde_json::json!({ "endpoint": "https://8.8.8.8/push/abc", "label": "laptop" });
-        let request = HttpRequest::post("/push/subscribe")
-            .header(header::HOST, "localhost")
-            .header(header::ORIGIN, "http://localhost")
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::COOKIE, admin.clone())
-            .body(Body::from(subscription.to_string()))
-            .unwrap();
-        assert_eq!(app.send(request).await.status, StatusCode::OK);
-        assert!(!app.get(&format!("{list}&enable={browsers}"), Some(&admin)).await.body.contains("push-test"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn browser_notifications_are_per_user() {
-        let app = app(open_registration());
-        let alice = app.register("alice").await;
-        let bob = app.register("bob").await;
-        let json = |path: &'static str, cookie: Option<String>, body: serde_json::Value| {
+        // Their addresses answer like any address that never existed, signed in or not
+        let unknown = |cookie: Option<String>, post: bool| {
             let app = &app;
             async move {
-                let mut req = HttpRequest::post(path)
-                    .header(header::HOST, "localhost")
-                    .header(header::ORIGIN, "http://localhost")
-                    .header(header::CONTENT_TYPE, "application/json");
-                if let Some(c) = cookie {
-                    req = req.header(header::COOKIE, c);
-                }
-                app.send(req.body(Body::from(body.to_string())).unwrap()).await
+                let r = if post { app.post("/no/such/page", cookie.as_deref(), "").await } else { app.get("/no/such/page", cookie.as_deref()).await };
+                (r.status, r.location, r.body)
             }
         };
-
-        // The page offers the feature with same-origin scripts only
-        let settings = app.get("/settings", Some(&alice)).await;
-        assert!(settings.body.contains("id=\"push-box\"") && settings.body.contains("src=\"/static/push.js\""));
-        assert!(!settings.body.contains("<script>"));
-        for (path, needle) in [("/static/push.js", "pushManager"), ("/sw.js", "showNotification")] {
-            let script = app.get(path, None).await;
-            assert_eq!(script.status, StatusCode::OK);
-            assert!(script.body.contains(needle));
+        for cookie in [Some(admin.clone()), None] {
+            for path in ["/push/key", "/push/inbox", "/static/push.js", "/sw.js"] {
+                let r = app.get(path, cookie.as_deref()).await;
+                assert_eq!((r.status, r.location, r.body), unknown(cookie.clone(), false).await, "GET {path}");
+            }
+            for path in ["/push/subscribe", "/push/unsubscribe"] {
+                let r = app.post(path, cookie.as_deref(), "").await;
+                assert_eq!((r.status, r.location, r.body), unknown(cookie.clone(), true).await, "POST {path}");
+            }
         }
-        let key = app.get("/push/key", Some(&alice)).await;
-        assert!(serde_json::from_str::<serde_json::Value>(&key.body).unwrap()["key"].as_str().unwrap().len() > 80);
-        assert_eq!(app.get("/push/key", None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/sw.js", Some(&admin)).await.status, StatusCode::NOT_FOUND);
 
-        // Subscribing needs a session and a public https push service
-        let good = serde_json::json!({ "endpoint": "https://8.8.8.8/push/abc", "label": "laptop" });
-        assert_eq!(json("/push/subscribe", None, good.clone()).await.status, StatusCode::SEE_OTHER);
-        for bad in ["http://8.8.8.8/push", "https://127.0.0.1/push", "https://10.0.0.1/x", "nonsense"] {
-            let r = json("/push/subscribe", Some(alice.clone()), serde_json::json!({ "endpoint": bad })).await;
-            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+        // No page offers them or loads their script
+        let pages = [
+            "/settings",
+            "/admin/notifications",
+            "/admin/notifications?tab=destinations",
+            "/admin/notifications?tab=destinations&new=browser",
+            "/admin/notifications?tab=destinations&enable=1",
+            "/product/acme/infra?view=settings",
+            "/product/acme/infra?view=settings&new=browser",
+        ];
+        for path in pages {
+            let page = app.get(path, Some(&admin)).await;
+            assert_eq!(page.status, StatusCode::OK, "{path}");
+            let body = page.body.to_lowercase();
+            // (the address asked for is repeated by the filter of a list: only what is offered counts)
+            for gone in ["browser notification", "new destination", "name=\"kind\"", "push", "sw.js", "serviceworker"] {
+                assert!(!body.contains(gone), "{path}: {gone}");
+            }
         }
-        assert_eq!(json("/push/subscribe", Some(alice.clone()), good.clone()).await.status, StatusCode::OK);
+
+        // And such a destination can no longer be created, by the administration or by a project
+        for (path, form) in [
+            ("/admin/notifications/destinations", "owner=instance&kind=browser&name=Browsers"),
+            ("/orgs/acme/projects/infra/destinations", "kind=browser&name=Browsers"),
+        ] {
+            assert_eq!(app.post(path, Some(&admin), form).await.status, StatusCode::BAD_REQUEST, "{path}");
+        }
         let db = Database::connect(&app.db_path).unwrap();
-        let alice_id = db.get_credentials("alice").unwrap().unwrap().0.id;
-        assert_eq!(db.list_push_subscriptions(alice_id).unwrap().len(), 1);
-        assert!(app.get("/settings", Some(&alice)).await.body.contains("laptop"));
-
-        // A test through a browser destination with nobody to receive it is not sent: the page offers to enable this browser
-        let admin = app.register("zadmin").await; // not the first account: grant it below
-        db.set_admin(db.get_credentials("zadmin").unwrap().unwrap().0.id, true).unwrap();
-        let admin = app.post("/login", None, "username=zadmin&password=a-long-password").await.cookie.unwrap_or(admin);
-        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Browsers").await;
-        let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
-        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
-        assert_eq!(tested.location, Some(format!("/admin/notifications?tab=destinations&enable={browsers}")));
-        // The list tells what it covers and sends, without any project picking it
-        let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
-        assert!(listed.contains("<td>all projects</td><td>every event</td>") && !listed.contains("until a project picks it"));
-
-        // The inbox is read once, by its owner only; signed out, nothing answers
-        db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
-        assert_eq!(app.get("/push/inbox", None).await.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(app.get("/push/inbox", Some(&bob)).await.body, "[]");
-        let inbox = app.get("/push/inbox", Some(&alice)).await.body;
-        assert!(inbox.contains("Synchronization finished"));
-        assert_eq!(app.get("/push/inbox", Some(&alice)).await.body, "[]");
-
-        assert_eq!(json("/push/unsubscribe", Some(alice.clone()), good).await.status, StatusCode::OK);
-        assert!(db.list_push_subscriptions(alice_id).unwrap().is_empty());
+        assert!(db.list_all_destinations().unwrap().is_empty());
+        assert!(db.create_destination("instance", None, "Browsers", "browser", &serde_json::json!({}), false).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2583,17 +2498,33 @@ mod tests {
         // And it only delivers: it is not an API credential
         assert_eq!(app.api("/api/cve", bearer().as_deref()).await.status, StatusCode::UNAUTHORIZED);
 
-        // A project rule receives the announcement of new probable services in the browser inbox
-        app.post("/orgs/acme/projects/infra/destinations", Some(&admin), "kind=browser&name=browsers&notify=1").await;
+        // A destination of the project receives the announcement of new probable services
+        let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook = format!("http://{}/hook", listener.local_addr().unwrap());
+        let sink = received.clone();
+        let receiver = Router::new().route(
+            "/hook",
+            post(move |Json(body): Json<serde_json::Value>| async move {
+                sink.lock().unwrap().push(body);
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+        app.post("/admin/notifications/delivery", Some(&admin), "allow_private=1").await;
+        let form = format!("kind=webhook&name=hook&url={}", percent_encoding::utf8_percent_encode(&hook, percent_encoding::NON_ALPHANUMERIC));
+        assert_eq!(app.post("/orgs/acme/projects/infra/destinations", Some(&admin), &form).await.status, StatusCode::SEE_OTHER);
         let delivered = push(bearer(), inventory.clone()).await;
         assert_eq!(delivered.status, StatusCode::OK, "{}", delivered.body);
         let outcome: serde_json::Value = serde_json::from_str(&delivered.body).unwrap();
         assert_eq!((outcome["added"].as_i64(), outcome["new_probable_services"].as_array().map(Vec::len)), (Some(3), Some(2)));
-        let inbox = app.get("/push/inbox", Some(&viewer)).await.body;
-        assert!(inbox.contains("2 new probable service(s)") && inbox.contains("nginx 1.30.6"));
+        let announced = received.lock().unwrap().clone();
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!((announced[0]["event"].as_str(), announced[0]["title"].as_str()), (Some("service"), Some("acme/infra: 2 new probable service(s)")));
+        assert!(announced[0]["message"].as_str().unwrap().contains("nginx 1.30.6"));
         // Delivering the same list again announces nothing
         push(bearer(), inventory.clone()).await;
-        assert_eq!(app.get("/push/inbox", Some(&viewer)).await.body, "[]");
+        assert_eq!(received.lock().unwrap().len(), 1);
+        app.post("/admin/notifications/delivery", Some(&admin), "").await;
         assert_eq!(push(bearer(), "not json".into()).await.status, StatusCode::BAD_REQUEST);
 
         // The checklist ranks exposed components and known services first
@@ -3203,7 +3134,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 19] = [
+    const PUBLIC_ROUTES: [&str; 17] = [
         "/login",
         "/register",
         "/setup",
@@ -3220,8 +3151,6 @@ mod tests {
         "/static/mfa.js",
         "/static/filter.js",
         "/static/theme.js",
-        "/static/push.js",
-        "/sw.js",
         "/favicon.ico",
     ];
 
@@ -3234,7 +3163,7 @@ mod tests {
         let token = tokens_of(&app.post("/settings/tokens", Some(&admin), "name=t&password=a-long-password").await.body).remove(0);
 
         let routes = declared_routes();
-        assert!(routes.len() >= 120, "only {} routes found: the source is no longer read correctly", routes.len());
+        assert!(routes.len() >= 110, "only {} routes found: the source is no longer read correctly", routes.len());
         for expected in ["/cve", "/admin/users", "/api/cve", "/api/security-log", "/mcp", "/scim/v2/Users", "/setup"] {
             assert!(routes.iter().any(|r| r == expected), "{expected} is not among the routes found");
         }
@@ -4079,7 +4008,7 @@ mod tests {
             // The policy is the one of before the themes, word for word
             assert_eq!(
                 page.csp.as_deref(),
-                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
             );
         }
         // The script is served like the others, and holds what the page relies on
@@ -4087,7 +4016,7 @@ mod tests {
         assert_eq!(script.status, StatusCode::OK);
         assert_eq!(script.cache.as_deref(), Some("no-cache"));
         // Kept by the browser, which asks each time whether it is still the one of this release
-        for path in ["/static/theme.js", "/static/filter.js", "/static/push.js", "/static/mfa.js", "/static/app.css"] {
+        for path in ["/static/theme.js", "/static/filter.js", "/static/mfa.js", "/static/app.css"] {
             let first = app.router.clone().oneshot(HttpRequest::get(path).body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(first.status(), StatusCode::OK, "{path}");
             let etag = first.headers().get(header::ETAG).expect("an ETag").clone();

@@ -230,7 +230,7 @@ pub fn announce(db: &Database, config: &Config, source: &InventorySource, outcom
     }
     body.push_str(". Choose whether to monitor them.");
     let title = format!("{} new probable service(s)", outcome.new_probable_services.len());
-    if let Err(e) = crate::notify::project_event(config, db, source.project_id, "service", &title, &body, "applications") {
+    if let Err(e) = crate::notify::project_event(config, db, source.project_id, "service", &title, &body) {
         tracing::warn!("inventory: notification failed: {e:#}");
     }
 }

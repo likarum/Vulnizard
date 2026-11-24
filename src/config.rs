@@ -107,10 +107,6 @@ pub struct WebConfig {
     /// Minutes before a source that just ran can be synchronized again on
     /// request (web, MCP). 0 = no limit. The periodic cycle is not concerned.
     pub min_manual_sync_minutes: u64,
-    /// Contact given to browser push services with each notification
-    /// (`mailto:someone@example.org` or an https URL). Defaults to the public
-    /// URL when it is https.
-    pub push_contact: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -124,7 +120,6 @@ impl Default for WebConfig {
             allow_private_webhooks: false,
             trusted_proxies: Vec::new(),
             min_manual_sync_minutes: 5,
-            push_contact: None,
         }
     }
 }

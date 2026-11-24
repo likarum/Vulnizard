@@ -371,7 +371,6 @@ pub struct WeaknessInfo {
 #[derive(Debug, Clone)]
 pub struct Dispatch {
     pub notification: Notification,
-    pub project_id: i64,
     pub org: String,
     pub project: String,
     pub changes: Vec<ChangeRow>,
@@ -1085,7 +1084,6 @@ impl Database {
                 if !matching.is_empty() {
                     dispatches.push(Dispatch {
                         notification,
-                        project_id,
                         org: org.clone(),
                         project: project.clone(),
                         changes: matching,
@@ -1558,7 +1556,7 @@ mod tests {
             ]
         );
         // Never twice through the same destination for the same project
-        let mut pairs: Vec<(i64, i64)> = dispatches.iter().map(|d| (d.project_id, d.notification.id)).collect();
+        let mut pairs: Vec<(String, i64)> = dispatches.iter().map(|d| (format!("{}/{}", d.org, d.project), d.notification.id)).collect();
         pairs.sort();
         pairs.dedup();
         assert_eq!(pairs.len(), dispatches.len());
