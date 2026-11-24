@@ -1607,7 +1607,7 @@ mod tests {
         // Pages are never kept by a cache; static files set their own lifetime
         assert_eq!(app.get("/settings", Some(&alice)).await.cache.as_deref(), Some("no-store"));
         assert_eq!(app.api("/api/cve", Some("Bearer nope")).await.cache.as_deref(), Some("no-store"));
-        assert!(app.get("/static/app.css", None).await.cache.unwrap().contains("max-age"));
+        assert!(app.get("/static/app.css", None).await.cache.as_deref() == Some("no-cache"));
 
         let page = app.post("/settings/tokens", Some(&alice), "name=ci&password=a-long-password").await;
         let token = page
@@ -1712,9 +1712,11 @@ mod tests {
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("Not in this release"));
         // The page says how often each source downloads and what, and that "Sync now" does not wait
         let sources = app.get("/admin/sources", Some(&admin)).await.body;
-        for shown in ["at every cycle: only the CVEs changed", "at most every 12 h: only the advisories changed", "at most every 24 h: the whole file of scores", "at most every 6 h", "downloads at once, without waiting"] {
+        for shown in ["At every cycle: only the CVEs changed", "At most every 12 h: only the advisories changed", "At most every 24 h: the whole file of scores", "At most every 6 h", "downloads at once, without waiting"] {
             assert!(sources.contains(shown), "{shown}");
         }
+        // It says so in a bubble opened by a small "i", reachable from the keyboard, without script
+        assert!(sources.contains("<span class=\"info\" tabindex=\"0\"><span class=\"i\" aria-hidden=\"true\">i</span><span class=\"bubble\" role=\"note\">At every cycle"));
         let requested = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
         assert_eq!(requested.status, StatusCode::SEE_OTHER);
         let order = app.sync_rx.try_recv().unwrap();
@@ -3902,7 +3904,18 @@ mod tests {
         // The script is served like the others, and holds what the page relies on
         let script = app.get("/static/theme.js", None).await;
         assert_eq!(script.status, StatusCode::OK);
-        assert!(script.cache.unwrap().contains("max-age"));
+        assert_eq!(script.cache.as_deref(), Some("no-cache"));
+        // Kept by the browser, which asks each time whether it is still the one of this release
+        for path in ["/static/theme.js", "/static/filter.js", "/static/push.js", "/static/mfa.js", "/static/app.css"] {
+            let first = app.router.clone().oneshot(HttpRequest::get(path).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(first.status(), StatusCode::OK, "{path}");
+            let etag = first.headers().get(header::ETAG).expect("an ETag").clone();
+            assert!(etag.to_str().unwrap().contains(env!("CARGO_PKG_VERSION")), "{path}");
+            let again = app.router.clone().oneshot(HttpRequest::get(path).header(header::IF_NONE_MATCH, etag).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
+            let other = app.router.clone().oneshot(HttpRequest::get(path).header(header::IF_NONE_MATCH, "\"0.0.0-1\"").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(other.status(), StatusCode::OK, "{path}");
+        }
         assert!(script.body.contains("prefers-color-scheme: dark") && script.body.contains("localStorage"));
         assert!(script.body.contains("data-theme-choice") && script.body.contains("data-mode-toggle"));
         // Without the script the controls are hidden, and the system setting still picks day or night

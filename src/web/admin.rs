@@ -842,10 +842,10 @@ pub async fn sources(
                                 td {
                                     @if enabled { "enabled" } @else { span.muted { "disabled" } }
                                     @let hours = crate::sources::min_hours(key);
-                                    div.muted {
-                                        @if hours == 0 { "at every cycle" } @else { "at most every " (hours) " h" }
-                                        ": " (crate::sources::fetches(key))
-                                    }
+                                    (views::info(html! {
+                                        @if hours == 0 { "At every cycle" } @else { "At most every " (hours) " h" }
+                                        ": " (crate::sources::fetches(key)) "."
+                                    }))
                                 }
                                 td.nowrap { @if let Some(r) = run { (r.started_at) } @else { span.muted { "never" } } }
                                 td {

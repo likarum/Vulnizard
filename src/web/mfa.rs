@@ -854,14 +854,8 @@ pub async fn org_leave(State(st): St, User(user): User, Path(org): Path<String>)
     })
 }
 
-pub async fn script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("mfa.js"),
-    )
+pub async fn script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    super::pages::asset(&headers, "text/javascript; charset=utf-8", include_str!("mfa.js"))
 }
 
 // ==========================================

@@ -103,6 +103,17 @@ pub fn product_url(scope: Option<(&str, &str)>, view: &str) -> String {
     }
 }
 
+/// A small "i" in a circle: the note shows in a bubble under the pointer, on
+/// keyboard focus and on touch. No script.
+pub fn info(note: Markup) -> Markup {
+    html! {
+        span.info tabindex="0" {
+            span.i aria-hidden="true" { "i" }
+            span.bubble role="note" { (note) }
+        }
+    }
+}
+
 /// "12 min ago" from a UTC `YYYY-MM-DD HH:MM:SS` timestamp
 pub fn time_ago(timestamp: &str) -> String {
     let Ok(then) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") else {

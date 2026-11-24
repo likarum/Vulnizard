@@ -838,24 +838,26 @@ pub(super) fn auth_page(
     )
 }
 
-pub async fn filter_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("filter.js"),
-    )
+/// A script or the stylesheet. The browser keeps it but asks at each use
+/// whether it is still the one of this release: after an upgrade a page is
+/// never run with the script of the release before.
+pub fn asset(headers: &axum::http::HeaderMap, content_type: &'static str, body: &'static str) -> axum::response::Response {
+    let etag = format!("\"{}-{}\"", env!("CARGO_PKG_VERSION"), body.len());
+    let cached = [(header::CACHE_CONTROL, "no-cache".to_string()), (header::ETAG, etag.clone())];
+    if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+        return (axum::http::StatusCode::NOT_MODIFIED, cached).into_response();
+    }
+    (cached, [(header::CONTENT_TYPE, content_type)], body).into_response()
 }
 
-pub async fn theme_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("theme.js"),
-    )
+const JAVASCRIPT: &str = "text/javascript; charset=utf-8";
+
+pub async fn filter_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, JAVASCRIPT, include_str!("filter.js"))
+}
+
+pub async fn theme_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, JAVASCRIPT, include_str!("theme.js"))
 }
 
 pub async fn login_form(State(st): St) -> ActionResult {
@@ -1413,12 +1415,6 @@ pub async fn logo() -> impl IntoResponse {
     )
 }
 
-pub async fn stylesheet() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        views::STYLESHEET,
-    )
+pub async fn stylesheet(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, "text/css; charset=utf-8", views::STYLESHEET)
 }

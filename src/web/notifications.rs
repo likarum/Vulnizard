@@ -952,14 +952,8 @@ pub async fn push_inbox(State(st): St, headers: axum::http::HeaderMap, MaybeUser
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(items)).into_response())
 }
 
-pub async fn push_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("push.js"),
-    )
+pub async fn push_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    super::pages::asset(&headers, "text/javascript; charset=utf-8", include_str!("push.js"))
 }
 
 pub async fn service_worker() -> impl IntoResponse {

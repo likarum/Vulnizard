@@ -17,6 +17,10 @@
   const post = (path, body) =>
     fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
+  // Tells the server which push address reaches this browser for the account
+  const register = (subscription) =>
+    post("/push/subscribe", { endpoint: subscription.endpoint, label: navigator.userAgent.slice(0, 80) });
+
   // Asks the permission, subscribes this browser and registers it for the
   // account. Answers nothing when done, or the reason it could not be.
   const subscribe = async (registration) => {
@@ -30,10 +34,7 @@
         userVisibleOnly: true,
         applicationServerKey: toBytes(key),
       });
-      const response = await post("/push/subscribe", {
-        endpoint: subscription.endpoint,
-        label: navigator.userAgent.slice(0, 80),
-      });
+      const response = await register(subscription);
       if (!response.ok) {
         await subscription.unsubscribe();
         return "The server refused this browser's subscription.";
@@ -64,6 +65,15 @@
 
     const refresh = async () => {
       const subscription = await registration.pushManager.getSubscription();
+      // The browser may be subscribed while the server no longer knows it
+      // (database restored, account created again): tell it again each time.
+      if (subscription) {
+        try {
+          await register(subscription);
+        } catch (e) {
+          // offline: the next visit tells it
+        }
+      }
       enable.hidden = Boolean(subscription);
       disable.hidden = !subscription;
       status.textContent = subscription
