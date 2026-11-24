@@ -41,6 +41,22 @@ configuration file and apply without restart.
   The decision history (audit) is append-only and survives the deletion of a project; only deleting
   the whole organization removes it.
 
+- **Members are invited.** Whoever manages the members of an organization or of a project types a
+  name and a role. Nothing is granted then: an **invitation** is recorded, and the page answers the
+  same thing whether an account bears the name or not. The person finds the invitation after signing
+  in (a mark in the page header, and *Settings → Invitations*), sees who invites them, to what and
+  with which role, and **accepts or declines**. Accepting gives exactly that role, at that level.
+  - The organization's page and the project's settings list the pending invitations — the name as
+    typed, the role, who invited, the dates — and cancel them. An invitation that is declined, or
+    that expired, is simply no longer in the list.
+  - An invitation lasts **14 days**; an organization or a project holds at most 50 pending ones.
+    Inviting the same name again replaces the former invitation.
+  - It is void — not shown to the invited person, not acceptable — as soon as whoever made it is
+    disabled or no longer manages the members there, and it goes with its organization or project.
+  - The name of someone already in the list of members changes their role at once, as it shows them
+    anyway.
+  - Administrators, who see every account, still give rights directly in *Admin → Users*.
+
 - **SSO (OpenID Connect)**: any number of providers, added by an administrator in
   *Admin → Single sign-on* — your own identity provider (Pocket-ID, Keycloak, Authentik, Entra ID…)
   or a public one such as Google or GitLab.com. Each provider gets a button on the login page and
@@ -72,6 +88,19 @@ a password revokes sessions and API tokens.
 
 Behind a reverse proxy with HTTPS, set `web.secure_cookies = true` and
 `web.base_url`; the proxy must forward the original `Host` header.
+
+**Usernames and invitations.** Adding a member does not tell whether a username exists: the
+answer, the page and the work done are the same for an account, for a disabled account and for a
+name nobody bears, and the security log records the name as typed, not an account. An invitation
+belongs to the account that bore the name **when it was made**, by its identifier: an account
+created afterwards with that name — by registration, single sign-on or SCIM — never sees it and
+cannot accept it, and an invitation to a name nobody bore is never claimable; it expires. (Usernames
+are never renamed; a SCIM `userName` change does not change the name used here.) An account that
+comes from a project or an organization cannot accept a role outside it, and the invitation
+says nothing of that either. What a manager can still learn: an invitation that is **accepted**
+shows the new member, and one that is **declined** leaves the list before its expiry — both are
+decisions of the invited person. And where self-registration is open, the registration form tells
+anybody whether a name is taken.
 
 ## Passwords
 
@@ -120,7 +149,8 @@ It can be **required**:
   `vulnizard user reset-mfa <username>` on the server.
 - Every change is recorded (*Admin → Security log*, and on the account's own page): factor set up or
   removed, recovery codes generated or used, lock after too many wrong answers, reset, change of
-  the requirement. Entries cannot be changed or removed.
+  the requirement. Invitations are recorded there too: sent, accepted, declined, cancelled.
+  Entries cannot be changed or removed.
 
 ## Logs that show tampering
 

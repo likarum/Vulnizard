@@ -8,6 +8,7 @@ mod admin;
 mod api;
 mod charts;
 mod inventory;
+mod invitations;
 mod mfa;
 mod notifications;
 mod oidc;
@@ -430,6 +431,10 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
             None => Vec::new(),
         };
         let org = chosen_org(&parts, &projects);
+        let invitations = match &account {
+            Some(a) => db.received_invitations(a.id)?.len(),
+            None => 0,
+        };
         Ok((
             account,
             views::PageContext {
@@ -438,6 +443,7 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
                 projects,
                 org,
                 path,
+                invitations,
             },
         ))
     });
@@ -562,6 +568,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/orgs/{org}/delete", post(pages::org_delete))
         .route("/orgs/{org}/members", post(pages::member_add))
         .route("/orgs/{org}/members/{user_id}/delete", post(pages::member_remove))
+        .route("/orgs/{org}/invitations/{id}/cancel", post(invitations::org_cancel))
+        .route("/orgs/{org}/projects/{project}/invitations/{id}/cancel", post(invitations::project_cancel))
+        .route("/invitations/{id}/accept", post(invitations::accept))
+        .route("/invitations/{id}/decline", post(invitations::decline))
         .route("/orgs/{org}/projects", post(projects::project_create))
         .route("/orgs/{org}/projects/{project}", get(project_redirect))
         .route("/orgs/{org}/projects/{project}/delete", post(projects::project_delete))
@@ -895,6 +905,18 @@ mod tests {
             self.state.login_guard.record(&auth::ThrottleKey::second_step(id), true);
         }
 
+        /// Accepts every invitation waiting for an account: what follows a
+        /// name typed in a member form, when the tests are about something else
+        fn accept_invitations(&self, username: &str) {
+            let db = Database::connect(&self.db_path).unwrap();
+            let id = db.get_credentials(username).unwrap().unwrap().0.id;
+            let waiting = db.received_invitations(id).unwrap();
+            assert!(!waiting.is_empty(), "no invitation waiting for {username}");
+            for invitation in waiting {
+                assert!(db.accept_invitation(id, invitation.id).unwrap().is_some());
+            }
+        }
+
         /// The setup code of an instance without accounts
         fn setup_code(&self) -> Option<String> {
             Database::connect(&self.db_path).unwrap().setup_code().unwrap()
@@ -1080,6 +1102,7 @@ mod tests {
                 .post("/orgs/acme/members", Some(&owner), &format!("username={name}&role={role}"))
                 .await;
             assert_eq!(added.status, StatusCode::SEE_OTHER);
+            app.accept_invitations(name);
         }
         // The legacy role name is refused
         let legacy = app.post("/orgs/acme/members", Some(&owner), "username=viewer&role=member").await;
@@ -1970,6 +1993,7 @@ mod tests {
             cookies.insert(name, app.register(name).await);
             if !role.is_empty() {
                 app.post("/orgs/acme/members", Some(&admin), &format!("username={name}&role={role}")).await;
+                app.accept_invitations(name);
             }
         }
         let (editor, viewer, stranger) = (&cookies["editor"], &cookies["viewer"], &cookies["stranger"]);
@@ -2212,6 +2236,7 @@ mod tests {
         app.post("/admin/users", Some(&admin), "username=mate&password=a-long-password").await;
         let given = app.post("/orgs/acme/projects/infra/members", Some(&dev), "username=mate&role=viewer").await;
         assert_eq!(given.status, StatusCode::SEE_OTHER);
+        app.accept_invitations("mate");
         let mate_id = db.get_credentials("mate").unwrap().unwrap().0.id;
         let infra = db.find_project("acme", "infra").unwrap().unwrap();
         let web = db.find_project("acme", "web").unwrap().unwrap();
@@ -2339,9 +2364,11 @@ mod tests {
         assert_eq!(app.post(&format!("/admin/users/{user_id}"), Some(&admin), "action=grant_admin").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&assign, Some(&admin), "scope=project%3Aacme%2Finfra&role=viewer").await.status, StatusCode::SEE_OTHER);
         assert_eq!(
+            // An invitation says nothing of the account it names; this one can never be accepted
             app.post("/orgs/acme/projects/web/members", Some(&admin), "username=jane.doe.p2&role=viewer").await.status,
-            StatusCode::BAD_REQUEST
+            StatusCode::SEE_OTHER
         );
+        assert!(db.received_invitations(user_id).unwrap().is_empty());
         assert_eq!(db.project_role(user_id, web).unwrap(), None);
 
         // Filters and pagination
@@ -2451,6 +2478,7 @@ mod tests {
         app.post("/orgs", Some(&admin), "name=acme").await;
         app.post("/projects", Some(&admin), "org=acme&name=infra").await;
         app.post("/orgs/acme/members", Some(&admin), "username=viewer&role=viewer").await;
+        app.accept_invitations("viewer");
         let db = Database::connect(&app.db_path).unwrap();
         let project = db.find_project("acme", "infra").unwrap().unwrap();
         let base = "/orgs/acme/projects/infra/inventory";
@@ -3106,6 +3134,203 @@ mod tests {
         assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), ops).await.status, StatusCode::SEE_OTHER);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adding_a_member_is_an_invitation_that_tells_nothing_of_the_name() {
+        let app = app(open_registration());
+        let root = app.register("root").await;
+        let bob = app.register("bob").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.register("gone").await;
+        app.post("/orgs", Some(&root), "name=acme").await;
+        app.post("/projects", Some(&root), "org=acme&name=infra").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        let id = |name: &str| db.list_accounts().unwrap().into_iter().find(|a| a.username == name).unwrap().id;
+        let (org, infra) = (db.get_org("acme", id("root")).unwrap().unwrap().id, db.find_project("acme", "infra").unwrap().unwrap());
+        db.set_org_member(org, id("viewer"), crate::rbac::Role::Viewer).unwrap();
+        db.set_disabled(id("gone"), true).unwrap();
+        let (org_form, project_form) = ("/orgs/acme/members", "/orgs/acme/projects/infra/members");
+        let (org_page, project_page) = ("/orgs/acme", "/product/acme/infra?view=settings");
+        let answer = |r: &Reply| (r.status, r.location.clone(), r.body.clone(), r.cookies.clone());
+        let cancel_link = regex::Regex::new(r"/invitations/(\d+)/cancel").unwrap();
+
+        // An account, a name nobody bears and a disabled account: one answer, to the letter,
+        // and a row that only differs by the name typed
+        for (form, page) in [(org_form, org_page), (project_form, project_page)] {
+            let mut answers = Vec::new();
+            for name in ["bob", "ghost", "gone"] {
+                let reply = app.post(form, Some(&root), &format!("username=+{name}+&role=viewer")).await;
+                assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+                let shown = app.get(reply.location.as_deref().unwrap(), Some(&root)).await;
+                assert_eq!(shown.status, StatusCode::OK);
+                assert!(shown.body.contains("Invitation recorded.") && shown.body.contains("nothing here tells whether the name is one of an account"));
+                let row = shown.body.split("<tr>").find(|row| row.starts_with(&format!("<td>{name}</td>"))).expect("the row of the name").to_string();
+                let row = cancel_link.replace(row.split("</tr>").next().unwrap(), "/invitations/N/cancel").replace(name, "NAME");
+                assert!(row.contains("<td data-label=\"Invited by\">root</td>") && row.contains(">Cancel</button>"), "{row}");
+                answers.push((answer(&reply), row));
+            }
+            let location = answers[0].0.1.clone().unwrap();
+            assert!(location.starts_with(page) && location.ends_with("notice=invited#invitations"), "{location}");
+            assert!(answers.iter().all(|a| *a == answers[0]), "{form}");
+            // The words only show after an invitation, and the list is sized like every other
+            let plain = app.get(page, Some(&root)).await.body;
+            assert!(!plain.contains("Invitation recorded.") && plain.contains("Pending invitations"));
+            assert!(plain.contains("<table class=\"list fit\"><colgroup><col><col class=\"kind\"><col class=\"who\"><col class=\"day\"><col class=\"day\"><col class=\"act\"></colgroup>"));
+        }
+        // A name that could not be a username is refused on its spelling, a role that is none on its name
+        for name in ["bob%40example.org", "a+b", ""] {
+            assert_eq!(app.post(org_form, Some(&root), &format!("username={name}&role=viewer")).await.status, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(app.post(project_form, Some(&root), "username=bob&role=admin").await.status, StatusCode::BAD_REQUEST);
+
+        // Nothing is granted
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), None);
+        assert!(db.list_members(org).unwrap().iter().all(|m| m.username != "bob"));
+
+        // Managing members is what gives the form, the list and the cancellation
+        let pending = db.pending_invitations(crate::db::Scope::Organization(org)).unwrap();
+        let on_project = db.pending_invitations(crate::db::Scope::Project(infra)).unwrap();
+        let (ghost_org, ghost_project) = (pending[1].id, on_project[1].id);
+        assert_eq!((pending[1].name.as_str(), on_project[1].name.as_str()), ("ghost", "ghost"));
+        for (who, refused) in [(&viewer, StatusCode::FORBIDDEN), (&stranger, StatusCode::NOT_FOUND)] {
+            assert_eq!(app.post(org_form, Some(who), "username=bob&role=viewer").await.status, refused);
+            assert_eq!(app.post(project_form, Some(who), "username=bob&role=viewer").await.status, refused);
+            assert_eq!(app.post(&format!("/orgs/acme/invitations/{ghost_org}/cancel"), Some(who), "").await.status, refused);
+            assert_eq!(app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"), Some(who), "").await.status, refused);
+        }
+        for page in [org_page, project_page] {
+            let seen = app.get(page, Some(&viewer)).await;
+            assert_eq!(seen.status, StatusCode::OK);
+            assert!(!seen.body.contains("Pending invitations") && !seen.body.contains("ghost") && !seen.body.contains("/invitations/"), "{page}");
+        }
+        assert_eq!(db.pending_invitations(crate::db::Scope::Organization(org)).unwrap().len(), 3);
+
+        // Without a session: the sign-in page; from another site: refused
+        for path in [
+            "/invitations/1/accept".to_string(), "/invitations/1/decline".to_string(),
+            format!("/orgs/acme/invitations/{ghost_org}/cancel"), format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"),
+            org_form.to_string(), project_form.to_string(),
+        ] {
+            assert_eq!(app.post(&path, None, "username=bob&role=viewer").await.location.as_deref(), Some("/login"), "{path}");
+            for session in [None, Some(root.as_str()), Some(bob.as_str())] {
+                let mut foreign = HttpRequest::post(path.as_str())
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://elsewhere.example")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                if let Some(cookie) = session {
+                    foreign = foreign.header(header::COOKIE, cookie);
+                }
+                assert_eq!(app.send(foreign.body(Body::from("username=bob&role=owner")).unwrap()).await.status, StatusCode::FORBIDDEN, "{path}");
+            }
+        }
+        assert_eq!(db.pending_invitations(crate::db::Scope::Organization(org)).unwrap().len(), 3);
+
+        // The invited account is told in the header of every page, and answers in its settings
+        let home = app.get("/projects", Some(&bob)).await.body;
+        assert!(home.contains("<a class=\"invited\" href=\"/settings#invitations\"") && home.contains(">2 invitations</a>"));
+        let settings = app.get("/settings", Some(&bob)).await.body;
+        assert!(settings.contains("<table class=\"list fit\"><colgroup><col><col class=\"kind\"><col class=\"who\"><col class=\"day\"><col class=\"actions\"></colgroup>"));
+        assert!(settings.contains("<td>organization acme</td>") && settings.contains("<td>project acme / infra</td>"));
+        assert!(settings.contains("<td data-label=\"Invited by\">root</td>") && settings.contains("<td data-label=\"Role\">viewer</td>"));
+        let mine = db.received_invitations(id("bob")).unwrap();
+        let (to_org, to_project) = (mine[0].id, mine[1].id);
+        for other in [&root, &viewer, &stranger] {
+            let page = app.get("/settings", Some(other)).await.body;
+            assert!(!page.contains("class=\"invited\"") && !page.contains("id=\"invitations\"") && !page.contains("/accept"));
+        }
+
+        // An account created afterwards with an invited name neither sees the invitation nor takes it,
+        // and an invitation of someone else answers like one that does not exist
+        let ghost = app.register("ghost").await;
+        let page = app.get("/settings", Some(&ghost)).await.body;
+        assert!(!page.contains("class=\"invited\"") && !page.contains("id=\"invitations\"") && !page.contains("acme"));
+        let unknown = app.post("/invitations/99999/accept", Some(&ghost), "").await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        for (who, invitation) in [(&ghost, ghost_org), (&ghost, ghost_project), (&ghost, to_org), (&stranger, to_project), (&root, to_org)] {
+            for action in ["accept", "decline"] {
+                let reply = app.post(&format!("/invitations/{invitation}/{action}"), Some(who), "").await;
+                assert_eq!(answer(&reply), answer(&unknown), "{invitation} {action}");
+            }
+        }
+        assert_eq!(app.get(org_page, Some(&ghost)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.project_role(id("ghost"), infra).unwrap(), None);
+        assert_eq!(db.received_invitations(id("bob")).unwrap().len(), 2);
+
+        // Declining removes the invitation; accepting gives exactly the role offered, where it was offered
+        let declined = app.post(&format!("/invitations/{to_org}/decline"), Some(&bob), "").await;
+        assert_eq!((declined.status, declined.location.as_deref()), (StatusCode::SEE_OTHER, Some("/settings")));
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>bob</td>"));
+        let accepted = app.post(&format!("/invitations/{to_project}/accept"), Some(&bob), "").await;
+        assert_eq!((accepted.status, accepted.location.as_deref()), (StatusCode::SEE_OTHER, Some("/product/acme/infra")));
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), Some(crate::rbac::Role::Viewer));
+        assert_eq!(app.get("/product/acme/infra", Some(&bob)).await.status, StatusCode::OK);
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get("/projects", Some(&bob)).await.body.contains("class=\"invited\""));
+        assert_eq!(answer(&app.post(&format!("/invitations/{to_project}/accept"), Some(&bob), "").await), answer(&unknown));
+        // Now a member the list shows: its name changes its role at once, as before
+        let changed = app.post(project_form, Some(&root), "username=Bob&role=editor").await;
+        assert_eq!(changed.location.as_deref(), Some(project_page));
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), Some(crate::rbac::Role::Editor));
+
+        // Cancelling: at the level the invitation was made, by who manages its members
+        assert_eq!(app.post(&format!("/orgs/acme/invitations/{ghost_project}/cancel"), Some(&root), "").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_org}/cancel"), Some(&root), "").await.status, StatusCode::NOT_FOUND);
+        let cancelled = app.post(&format!("/orgs/acme/invitations/{ghost_org}/cancel"), Some(&root), "").await;
+        assert_eq!((cancelled.status, cancelled.location.as_deref()), (StatusCode::SEE_OTHER, Some("/orgs/acme#invitations")));
+        let cancelled = app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"), Some(&root), "").await;
+        assert_eq!(cancelled.location.as_deref(), Some("/product/acme/infra?view=settings#invitations"));
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>ghost</td>"));
+        assert!(!app.get(project_page, Some(&root)).await.body.contains("<td>ghost</td>"));
+
+        // Expiry: after fourteen days the invitation is nowhere, and cannot be accepted
+        app.post(org_form, Some(&root), "username=stranger&role=editor").await;
+        let waiting = db.received_invitations(id("stranger")).unwrap()[0].id;
+        db.conn().execute("UPDATE invitations SET expires_at = datetime('now', '-1 minute') WHERE id = ?1", [waiting]).unwrap();
+        assert!(!app.get("/settings", Some(&stranger)).await.body.contains("id=\"invitations\""));
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>stranger</td>"));
+        assert_eq!(answer(&app.post(&format!("/invitations/{waiting}/accept"), Some(&stranger), "").await), answer(&unknown));
+        assert_eq!(app.get(org_page, Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+
+        // Whoever invited is demoted, or disabled, before the answer: the invitation is void
+        let second = app.register("second").await;
+        db.set_org_member(org, id("second"), crate::rbac::Role::Owner).unwrap();
+        for void in ["demoted", "disabled"] {
+            assert_eq!(app.post(org_form, Some(&second), "username=stranger&role=owner").await.status, StatusCode::SEE_OTHER, "{void}");
+            let waiting = db.received_invitations(id("stranger")).unwrap()[0].id;
+            assert!(app.get("/settings", Some(&stranger)).await.body.contains("<td data-label=\"Invited by\">second</td>"));
+            match void {
+                "demoted" => db.set_org_member(org, id("second"), crate::rbac::Role::Editor).unwrap(),
+                _ => db.set_disabled(id("second"), true).unwrap(),
+            }
+            assert!(!app.get("/settings", Some(&stranger)).await.body.contains("id=\"invitations\""), "{void}");
+            assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>stranger</td>"), "{void}");
+            assert_eq!(answer(&app.post(&format!("/invitations/{waiting}/accept"), Some(&stranger), "").await), answer(&unknown), "{void}");
+            assert_eq!(app.get(org_page, Some(&stranger)).await.status, StatusCode::NOT_FOUND, "{void}");
+            db.set_org_member(org, id("second"), crate::rbac::Role::Owner).unwrap();
+        }
+
+        // The cap: the same refusal for an account and for a name nobody bears
+        let taken = db.pending_invitations(crate::db::Scope::Project(infra)).unwrap().len() as i64;
+        for i in taken..crate::db::MAX_PENDING_INVITATIONS {
+            db.invite(crate::db::Scope::Project(infra), &format!("name-{i}"), crate::rbac::Role::Viewer, &crate::db::Actor::user(id("root"), "root")).unwrap();
+        }
+        let full = app.post(project_form, Some(&root), "username=stranger&role=viewer").await;
+        assert_eq!(full.status, StatusCode::BAD_REQUEST);
+        assert!(full.body.contains("Too many pending invitations"));
+        assert_eq!(answer(&app.post(project_form, Some(&root), "username=nobody-at-all&role=viewer").await), answer(&full));
+        assert!(db.received_invitations(id("stranger")).unwrap().is_empty());
+
+        // Everything is on the security trail; what is recorded when a name is typed names the level, not an account
+        let trail = db.list_security_events(None, 500).unwrap();
+        for event in ["invitation_sent", "invitation_accepted", "invitation_declined", "invitation_cancelled"] {
+            assert!(trail.iter().any(|e| e.event == event), "{event}");
+        }
+        assert!(trail.iter().filter(|e| e.event == "invitation_sent").all(|e| e.username.is_empty()));
+        assert!(trail.iter().any(|e| e.event == "invitation_accepted" && e.username == "bob" && e.detail.as_deref() == Some("project acme / infra as viewer, invited by root")));
+    }
+
     /// Every route declared in the routers, as (path, public). Read from the
     /// source, so that a route added tomorrow is swept without anyone
     /// remembering to list it here.
@@ -3504,6 +3729,7 @@ mod tests {
         let carol = app.register("carol").await;
         app.post("/orgs", Some(&root), "name=acme").await;
         app.post("/orgs/acme/members", Some(&root), "username=bob&role=viewer").await;
+        app.accept_invitations("bob");
         assert_eq!(app.post("/orgs/acme/mfa", Some(&bob), "required=1").await.status, StatusCode::FORBIDDEN);
         assert_eq!(app.post("/orgs/acme/mfa", Some(&root), "required=1").await.status, StatusCode::SEE_OTHER);
         assert!(app.get("/orgs/acme", Some(&root)).await.body.contains("checked"));
@@ -3805,7 +4031,7 @@ mod tests {
         assert!(lists >= 34 && dense >= 6, "{lists} lists, {dense} dense");
         // No list of the interface is left to the width of its content
         for source in [
-            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
+            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("invitations.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
             include_str!("pages.rs"), include_str!("product.rs"), include_str!("projects.rs"), include_str!("views.rs"),
         ] {
             let plain = regex::Regex::new(r"(?m)^\s*table\.list \{").unwrap();
@@ -3902,6 +4128,7 @@ mod tests {
                 .post(&format!("/orgs/acme/projects/{project}/members"), Some(&owner), &format!("username={user}&role={role}"))
                 .await;
             assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+            app.accept_invitations(user);
         }
         let db = Database::connect(&app.db_path).unwrap();
         let id = |project: &str| db.find_project("acme", project).unwrap().unwrap();
@@ -4279,6 +4506,7 @@ mod tests {
         // Who is given a project elsewhere sees two organizations, and gets the menu without being an administrator
         let given = app.post("/orgs/globex/projects/shop/members", Some(&bob), "username=alice&role=viewer").await;
         assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        app.accept_invitations("alice");
         let both = app.get("/product?view=applications", Some(&alice)).await.body;
         assert!(both.contains(&org_entry("acme", "acme", false)) && both.contains(&org_entry("globex", "globex", false)));
         assert!(both.contains("widget") && both.contains("gadget"));

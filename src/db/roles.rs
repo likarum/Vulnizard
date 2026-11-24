@@ -78,6 +78,17 @@ pub struct ProjectMember {
     pub level: String,
 }
 
+/// Gives (or changes) a role on one project: the one way a member form or an
+/// accepted invitation gives one.
+pub(super) fn grant_project_role(conn: &rusqlite::Connection, project_id: i64, user_id: i64, role: Role) -> Result<()> {
+    conn.execute(
+        "INSERT INTO project_memberships (project_id, user_id, role) VALUES (?1, ?2, ?3)
+         ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role",
+        params![project_id, user_id, role.as_str()],
+    )?;
+    Ok(())
+}
+
 impl Database {
     pub(super) fn migrate_roles(&self) -> Result<()> {
         let tx = self.write_tx()?;
@@ -135,12 +146,7 @@ impl Database {
 
     /// Gives (or changes) a role on one project
     pub fn set_project_member(&self, project_id: i64, user_id: i64, role: Role) -> Result<()> {
-        self.conn().execute(
-            "INSERT INTO project_memberships (project_id, user_id, role) VALUES (?1, ?2, ?3)
-             ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role",
-            params![project_id, user_id, role.as_str()],
-        )?;
-        Ok(())
+        grant_project_role(self.conn(), project_id, user_id, role)
     }
 
     pub fn remove_project_member(&self, project_id: i64, user_id: i64) -> Result<bool> {
@@ -231,26 +237,6 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         out.extend(rows);
         Ok(out)
-    }
-
-    /// Account by username, whether it signs in with a password or through SSO
-    pub fn get_credentials_or_sso(&self, username: &str) -> Result<Option<crate::db::Account>> {
-        Ok(self
-            .conn()
-            .query_row(
-                "SELECT id, username, is_admin FROM users
-                 WHERE username = ?1 COLLATE NOCASE
-                   AND (password_hash IS NOT NULL OR oidc_subject IS NOT NULL OR provisioned != 0)",
-                params![username],
-                |r| {
-                    Ok(crate::db::Account {
-                        id: r.get(0)?,
-                        username: r.get(1)?,
-                        is_admin: r.get::<_, i64>(2)? != 0,
-                    })
-                },
-            )
-            .optional()?)
     }
 
     /// Every organization (administration UI)

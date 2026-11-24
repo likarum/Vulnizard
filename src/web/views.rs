@@ -77,6 +77,8 @@ pub struct PageContext {
     pub org: Option<String>,
     /// Path and query of the current page (to come back after an action)
     pub path: String,
+    /// Invitations waiting for the answer of the signed-in account
+    pub invitations: usize,
 }
 
 impl PageContext {
@@ -302,6 +304,11 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                             @if let Some(u) = user {
                                 @if u.is_admin {
                                     a href="/admin" class=[(nav == Nav::Admin).then_some("active")] { "Admin" }
+                                }
+                                @if ctx.invitations > 0 {
+                                    a.invited href="/settings#invitations" title="You were invited to an organization or a project: accept or decline in your settings" {
+                                        (ctx.invitations) @if ctx.invitations == 1 { " invitation" } @else { " invitations" }
+                                    }
                                 }
                                 a href="/settings" { (u.username) }
                                 form.inline method="post" action="/logout" {

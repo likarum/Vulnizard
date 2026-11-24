@@ -222,6 +222,8 @@ header.top .user { display: flex; flex-wrap: wrap; justify-content: flex-end; ga
 header.top .user a { padding: 4px 10px; border-radius: 6px; color: var(--text); }
 header.top .user a:hover { background: var(--bg); text-decoration: none; }
 header.top .user a.active { background: var(--bg); font-weight: 600; color: var(--accent); }
+/* Invitations waiting for an answer */
+header.top .user a.invited { border: 1px solid var(--accent); color: var(--accent); font-size: 13px; padding: 2px 9px; }
 
 .sync { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 
