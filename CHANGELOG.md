@@ -3,7 +3,7 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
-## 0.3.0 (in preparation)
+## 0.3.0
 
 ### Added
 
