@@ -134,20 +134,27 @@ impl Database {
     /// given, and of the organization named `org` when one is. The
     /// organization only narrows what the rights of the reader give.
     pub fn entry_tracks(&self, reader: Option<i64>, project_id: Option<i64>, org: Option<&str>) -> Result<Vec<EntryTrack>> {
-        let mut events = self.lifecycle_events_for(reader, project_id)?;
+        self.tracks_reaching(reader, project_id, org, super::Reach::View)
+    }
+
+    fn tracks_reaching(&self, reader: Option<i64>, project_id: Option<i64>, org: Option<&str>, reach: super::Reach) -> Result<Vec<EntryTrack>> {
+        let mut events = self.lifecycle_events_reaching(reader, project_id, reach)?;
         if let Some(org) = org {
             events.retain(|e| e.org == org);
         }
         Ok(crate::deadlines::tracks(&events, &self.deadline_policies()?))
     }
 
-    /// The executive figures of a scope (the one of [`Database::entry_tracks`]:
-    /// one project, everything the reader may read, or that narrowed to an
-    /// organization) as of today, the resolution averages being taken over
-    /// the last `period_days` days. What the overview shows, and what the
-    /// REST API and the MCP server answer: see [`crate::deadlines::figures`].
+    /// The executive figures of a scope (one project, every project the
+    /// reader holds a role on, or those narrowed to an organization) as of
+    /// today, the resolution averages being taken over the last `period_days`
+    /// days. What the overview shows, and what the REST API and the MCP
+    /// server answer: see [`crate::deadlines::figures`].
+    ///
+    /// The one reading that counts the projects the reader is only executive
+    /// of (`Reach::Summary`): the entries counted never leave this function.
     pub fn figures(&self, reader: Option<i64>, project_id: Option<i64>, org: Option<&str>, period_days: i64) -> Result<Figures> {
-        let tracks = self.entry_tracks(reader, project_id, org)?;
+        let tracks = self.tracks_reaching(reader, project_id, org, super::Reach::Summary)?;
         Ok(crate::deadlines::figures(&tracks, chrono::Utc::now().date_naive(), period_days))
     }
 

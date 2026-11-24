@@ -524,7 +524,8 @@ fn resolve_account(st: &AppState, config: &Provider, identity: &Identity) -> Res
                     }
                 }
                 Scope::Organization(org) => {
-                    if !db.list_orgs(account.id)?.iter().any(|o| o.id == org) {
+                    // Any role held there, executive included, stands: the default never replaces it
+                    if db.org_role(account.id, org)?.is_none() {
                         db.set_org_member(org, account.id, role)?;
                     }
                 }

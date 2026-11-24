@@ -644,11 +644,11 @@ impl Database {
         Ok((last, running))
     }
 
-    /// Every project the user can access, with its counters
+    /// Every project the user can read (viewer or more), with its counters
     pub fn project_summaries(&self, user_id: i64) -> Result<Vec<ProjectSummary>> {
-        let mut stmt = self.conn().prepare(
+        let mut stmt = self.conn().prepare(&format!(
             "SELECT p.id, o.name, p.name, p.description,
-                    CASE pa.rank WHEN 3 THEN 'owner' WHEN 2 THEN 'editor' ELSE 'viewer' END,
+                    {role},
                     (SELECT COUNT(*) FROM applications a WHERE a.project_id = p.id),
                     (SELECT COUNT(*) FROM subscriptions s WHERE s.project_id = p.id),
                     (SELECT COUNT(*) FROM watchlist_entries w JOIN applications a ON a.id = w.app_id
@@ -658,7 +658,8 @@ impl Database {
              JOIN organizations o ON o.id = p.organization_id
              JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
              ORDER BY o.name, p.name",
-        )?;
+            role = super::roles::role_of("pa.rank")
+        ))?;
         let rows = stmt
             .query_map(params![user_id], |r| {
                 Ok(ProjectSummary {
@@ -730,6 +731,7 @@ mod tests {
         db.conn()
             .execute_batch(
                 "DROP VIEW project_access; DROP VIEW org_access;
+                 DROP VIEW project_summary_access; DROP VIEW org_summary_access;
                  DROP INDEX idx_users_oidc; DROP TABLE oidc_states;
                  DROP TRIGGER identity_project_deleted; DROP TRIGGER identity_organization_deleted;
                  ALTER TABLE users DROP COLUMN disabled; ALTER TABLE users DROP COLUMN oidc_subject;

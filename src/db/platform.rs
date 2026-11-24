@@ -847,13 +847,15 @@ impl Database {
             .optional()?)
     }
 
-    /// Effective role of the user on the project (instance, organization or project level)
+    /// Effective role of the user on the project (instance, organization or
+    /// project level), executive included: what it allows is asked of the
+    /// role (`Role::allows`), holding one is not reading the project.
     pub fn project_role(&self, user_id: i64, project_id: i64) -> Result<Option<Role>> {
         let role: Option<String> = self
             .conn()
             .query_row(
                 &format!(
-                    "SELECT {role} FROM project_access pa WHERE pa.project_id = ?1 AND pa.user_id = ?2",
+                    "SELECT {role} FROM project_summary_access pa WHERE pa.project_id = ?1 AND pa.user_id = ?2",
                     role = super::roles::role_of("pa.rank")
                 ),
                 params![project_id, user_id],

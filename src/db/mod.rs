@@ -9,6 +9,7 @@ mod admin_ops;
 mod deadlines;
 mod destinations;
 mod distro;
+mod executive;
 mod inventory;
 mod invitations;
 mod lifecycle;
@@ -23,6 +24,7 @@ mod trail;
 pub use access::*;
 pub use destinations::*;
 pub use distro::*;
+pub use executive::*;
 pub use inventory::*;
 pub use invitations::*;
 pub use lifecycle::*;
@@ -670,6 +672,12 @@ impl Database {
             self.migrate_invitations()?;
         }
 
+        // Migration -> v31: the executive role, which reads the figures and nothing else
+        if schema_version < 31 {
+            tracing::info!("Upgrading database schema to v31 (executive role)");
+            self.migrate_executive()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -821,6 +829,7 @@ impl Database {
         self.migrate_remove_browser_notifications()?;
         self.migrate_deadlines()?;
         self.migrate_invitations()?;
+        self.migrate_executive()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1749,14 +1758,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 30
+        // Check schema version is 31
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "30");
+        assert_eq!(version, "31");
     }
 
     #[test]

@@ -1117,7 +1117,7 @@ pub(super) fn load_org(db: &Database, user: &Account, org: &str) -> Result<Org, 
     Ok(org)
 }
 
-/// Project the user can access, by names. The returned `Org` carries the
+/// Project the user can read (viewer or more), by names. The returned `Org` carries the
 /// user's effective role *on this project* (instance, organization or
 /// project level), which the permission checks of project pages use.
 pub fn load_project(
@@ -1127,6 +1127,15 @@ pub fn load_project(
     project: &str,
 ) -> Result<(Org, OrgProject), AppError> {
     db.get_project_for_user(org, project, user.id)?.ok_or(AppError::NotFound)
+}
+
+/// Project the user may read the figures of, by names: any role on it,
+/// executive included. Only the Overview and the summary of the API load a
+/// project this way; everything else reads it (`load_project`).
+pub fn load_summary_project(db: &Database, user: &Account, org: &str, project: &str) -> Result<(Org, OrgProject), AppError> {
+    db.get_project_for_summary(org, project, user.id)?
+        .filter(|(org, _)| org.can(Permission::Summary))
+        .ok_or(AppError::NotFound)
 }
 
 /// Permission check against the user's role in the organization
@@ -1313,7 +1322,7 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                         input type="text" name="username" placeholder="username" required;
                         select name="role" {
                             @for role in Role::ALL.iter().rev() {
-                                option value=(role.as_str()) { (role.as_str()) }
+                                option value=(role.as_str()) selected[*role == Role::Viewer] { (role.as_str()) }
                             }
                         }
                         button type="submit" { "Invite" }

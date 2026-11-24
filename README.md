@@ -27,8 +27,8 @@ It is also meant for AI assistants: the same data and the same rights through MC
 
 ## Web interface
 
-- **Projects** grouped in organizations, with roles (owner, editor, viewer) at instance,
-  organization or project level
+- **Projects** grouped in organizations, with roles (owner, editor, viewer, and executive: the
+  figures of the Overview only) at instance, organization or project level
 - **Applications** you run, with their version: the CVEs affecting that version are listed
 - **Triage**: close, accept the risk with a justification, or mark not applicable
 - **Subscriptions** to vendors and products, with daily reports of what changed

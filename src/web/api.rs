@@ -148,9 +148,19 @@ fn summary_period(days: Option<&str>) -> Result<i64, AppError> {
     }
 }
 
-/// Executive figures of every project the caller can read, or of those of
-/// one organization: figures only (see `crate::deadlines::Figures`). An
-/// organization the caller reads nothing of answers as one without anything.
+/// The projects the caller may ask the figures of: every project it holds a
+/// role on, executive included. Names and role only.
+pub async fn summary_projects(State(st): St, ApiUser(user): ApiUser) -> ApiResult {
+    blocking(|| {
+        let held = st.db()?.held_projects(user.id)?;
+        Ok(Json(json!(held.iter().map(|p| json!({ "org": p.org, "project": p.name, "role": p.role })).collect::<Vec<_>>())))
+    })
+}
+
+/// Executive figures of every project the caller holds a role on (executive
+/// or more), or of those of one organization: figures only (see
+/// `crate::deadlines::Figures`). An organization the caller holds nothing in
+/// answers as one without anything.
 pub async fn summary(State(st): St, ApiUser(user): ApiUser, Query(q): Query<SummaryQuery>) -> ApiResult {
     blocking(|| {
         let days = summary_period(q.days.as_deref())?;
@@ -168,7 +178,7 @@ pub async fn project_summary(
 ) -> ApiResult {
     blocking(|| {
         let db = st.db()?;
-        let (_, project) = load_project(&db, &user, &org, &project)?;
+        let (_, project) = super::pages::load_summary_project(&db, &user, &org, &project)?;
         let days = summary_period(q.days.as_deref())?;
         Ok(Json(json!(db.figures(Some(user.id), Some(project.id), None, days)?)))
     })

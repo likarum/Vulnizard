@@ -36,13 +36,39 @@ configuration file and apply without restart.
   for the rights at once), disable/enable, reset passwords, act on several users at a time. A disabled
   account loses its sessions, API tokens and logins at once; the last enabled administrator cannot be removed.
 - **Rights exist at three levels** — the whole instance, an organization (all its projects) or a single
-  project — with the same three roles; the highest one applies:
+  project — with the same four roles; the highest one applies:
 
-  | Role | Read | Decide on CVEs | Manage applications, subscriptions, notifications, inventory | Manage members, delete |
-  |---|---|---|---|---|
-  | owner | ✓ | ✓ | ✓ | ✓ |
-  | editor | ✓ | ✓ | ✓ | |
-  | viewer | ✓ | | | |
+  | Role | Figures of the Overview | Read | Decide on CVEs | Manage applications, subscriptions, notifications, inventory | Manage members, delete |
+  |---|---|---|---|---|---|
+  | owner | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | editor | ✓ | ✓ | ✓ | ✓ | |
+  | viewer | ✓ | ✓ | | | |
+  | executive | ✓ | | | | |
+
+  **Executive** gives the *Overview* of what it is held on — a project, every project of an
+  organization and "all projects" of it, or the whole instance — and nothing else: the figures
+  without a link to a list, the choice of the period, and the project and organization menus
+  limited to what is held. Vulnerabilities, Overdue, Applications, Subscriptions, History, Audit,
+  the settings of a project, its members, notifications, reports and exports, the pages of an
+  organization and every form are refused, as they are to someone without the right; so is every
+  address of them typed by hand. It is given where the other roles are (*Admin → Users*, the member
+  forms through an invitation, the default role of a sign-on provider, the role of a provisioned
+  group), by who may give viewer there.
+
+  - An account **whose every role is executive** is confined to the Overview: it also loses the
+    *CVE database* (CVEs, vendors, weaknesses), cannot create an organization or a project, and
+    keeps its own *Settings* (password, two-step sign-in, API tokens, invitations) and signing out.
+    The header still says when the database was last synchronized. An administrator is never
+    confined.
+  - An account that is executive in one place and **viewer or more in another** keeps there what
+    that role gives there, and has the CVE database as soon as one role above executive exists. Where
+    it is executive it only has the Overview. At "all projects", the figures count every project it
+    holds a role on; the lists show those it reads.
+  - Through the **REST API**, a confined account gets `/api/summary`,
+    `/api/organizations/{org}/projects/{project}/summary` and `/api/summary/projects` (the names
+    those figures go with); every other endpoint answers 403. Through **MCP** over HTTP it is
+    offered `get_summary` and `list_projects` (names only) — the other tools are not listed to it
+    and answer "Unknown tool".
 
   A right on one project gives nothing outside it: its holder does not see the other projects of the
   organization, and a project owner only manages the members of that project.
