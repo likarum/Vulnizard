@@ -686,6 +686,20 @@ pub fn triage_key(item: &TriageItem, column: &str) -> Option<SortKey> {
     }
 }
 
+/// Columns of a list of vulnerabilities to decide on. Their widths are set
+/// by the stylesheet (`table.fit`): the table is as wide as its box at any
+/// window width, and it is the long texts that wrap.
+pub fn triage_columns(show_project: bool, middle: &str) -> Markup {
+    html! {
+        colgroup {
+            col.cve; col.cvss; col.app;
+            @if show_project { col.project; }
+            col class=(middle); col.actions;
+        }
+    }
+}
+
+/// Vulnerabilities to review, with the buttons deciding on each
 pub fn triage_table(
     items: &[TriageItem],
     show_project: bool,
@@ -693,7 +707,8 @@ pub fn triage_table(
     actions: impl Fn(&TriageItem) -> Markup,
 ) -> Markup {
     html! {
-        table.list.triage {
+        table.list.triage.fit {
+            (triage_columns(show_project, "desc"))
             thead {
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
@@ -703,21 +718,23 @@ pub fn triage_table(
             }
             tbody {
                 @for item in items {
+                    @let description = item.description.as_deref().unwrap_or("");
                     tr {
-                        td.nowrap.cve {
+                        td.cve {
                             a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                             @if item.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
                             @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                         }
                         td.nowrap.cvss { (cvss_badge(item.cvss)) }
-                        td.nowrap.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
+                        td.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
                         @if show_project {
-                            td.nowrap.project {
-                                a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } { (item.project) }
+                            td.project {
+                                a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } title=(item.project) { (item.project) }
                             }
                         }
-                        td.desc { (truncate(item.description.as_deref().unwrap_or(""), 160)) }
-                        td.right.nowrap.actions { (actions(item)) }
+                        // The title gives the text back where a narrow window cuts it after a few lines
+                        td.desc { @if !description.is_empty() { div.clamp title=(truncate(description, 160)) { (truncate(description, 160)) } } }
+                        td.right.actions { (actions(item)) }
                     }
                 }
                 @if items.is_empty() {
@@ -751,6 +768,55 @@ mod tests {
         let evil = Listing::parse("/x?q=%22%3E%3Cscript%3E&tab=%22%3E", "a", false);
         let html = format!("{}{}", evil.th("a", "A").into_string(), evil.filter_box("f", 0, 0).into_string());
         assert!(!html.contains("<script>") && html.contains("&quot;&gt;&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_vulnerabilities_table_is_sized_by_the_stylesheet() {
+        let item = TriageItem {
+            entry_id: 1,
+            cve_id: "CVE-2024-6387".into(),
+            status: "untreated".into(),
+            priority: None,
+            app_name: "org.apache.logging.log4j:log4j-core-enterprise-distribution".into(),
+            app_version: Some("2.17.1".into()),
+            org: "acme".into(),
+            project: "customer-facing-payment-platform".into(),
+            cvss: Some(8.1),
+            kev: true,
+            description: Some("A race condition. ".repeat(30)),
+            group: "web".into(),
+            version_unknown: true,
+        };
+        let all = triage_table(std::slice::from_ref(&item), true, None, |_| html! { button { "Close" } }).into_string();
+        // The columns are named for the stylesheet, which gives each its width
+        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        // Only the score is kept on one line: names, tags and buttons wrap inside their column
+        assert_eq!(all.matches("nowrap").count(), 1, "{all}");
+        assert!(all.contains("title=\"customer-facing-payment-platform\">customer-facing-payment-platform</a>"));
+        for cell in ["<td class=\"cve\">", "<td class=\"nowrap cvss\">", "<td class=\"app\">", "<td class=\"project\">", "<td class=\"right actions\">"] {
+            assert!(all.contains(cell), "{cell}");
+        }
+        // The description is cut at 160 characters, and its title keeps that text where the window cuts further
+        let shown = format!("{}…", "A race condition. ".repeat(30).chars().take(160).collect::<String>());
+        assert!(all.contains(&format!("<td class=\"desc\"><div class=\"clamp\" title=\"{shown}\">{shown}</div></td>")), "{all}");
+
+        // One project: no project column, in the column group as in the rows
+        let one = triage_table(&[item], false, None, |_| html! {}).into_string();
+        assert!(one.contains("<col class=\"app\"><col class=\"desc\">") && !one.contains("class=\"project\""));
+        let empty = triage_table(&[], false, None, |_| html! {}).into_string();
+        assert!(empty.contains("colspan=\"5\"") && empty.contains("Nothing to review."));
+        assert!(triage_columns(true, "decision").into_string().contains("<col class=\"project\"><col class=\"decision\"><col class=\"actions\">"));
+
+        // The stylesheet fixes the layout, sizes every named column and lets long words break
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let css = comments.replace_all(STYLESHEET, "").into_owned();
+        assert!(css.contains("table.list.fit { table-layout: fixed; }") && css.contains("table.fit td { overflow-wrap: anywhere; }"));
+        for column in ["cve", "cvss", "app", "project", "desc", "decision", "actions"] {
+            // The description is the one column left without a width: it takes what remains
+            assert_eq!(css.contains(&format!("table.fit col.{column} {{ width:")), column != "desc", "{column}");
+        }
+        // On a phone the rows are cards: the column group must not take part in them
+        assert!(css.contains("table.list colgroup { display: none; }"));
     }
 
     #[test]

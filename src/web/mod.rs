@@ -3506,6 +3506,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_lists_fit_the_window() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        // Both lists name their columns for the stylesheet; the project column only exists for all projects
+        for (scope, project) in [("/product", "<col class=\"project\">"), ("/product/acme/infra", "")] {
+            let review = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
+            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
+            let decided = app.get(&format!("{scope}?view=vulnerabilities&show=handled"), Some(&alice)).await.body;
+            assert!(decided.contains(&format!("<table class=\"list fit decided\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"decision\"><col class=\"actions\"></colgroup>")), "{scope}");
+            let columns = if project.is_empty() { 5 } else { 6 };
+            assert!(decided.contains(&format!("colspan=\"{columns}\"")) && decided.contains("No decision yet."), "{scope}");
+        }
+        let css = app.get("/static/app.css", None).await.body;
+        assert!(css.contains("table.list.fit { table-layout: fixed; }"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_vulnerabilities_view_keeps_its_old_address() {
         let app = app(open_registration());
         let alice = app.register("alice").await;

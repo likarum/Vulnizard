@@ -443,7 +443,8 @@ fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuer
         }
         (listing.filter_box("Filter: CVE, application, project, text…", items.len(), total))
         @if handled {
-            table.list {
+            table.list.fit.decided {
+                (views::triage_columns(scope.all(), "decision"))
                 thead {
                     tr {
                         (listing.th("cve", "CVE")) (listing.th("cvss", "CVSS")) (listing.th("app", "Application"))
@@ -454,21 +455,21 @@ fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuer
                 tbody {
                     @for item in &items {
                         tr {
-                            td.nowrap {
+                            td.cve {
                                 a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                                 @if item.kev { " " span.tag.kev { "KEV" } }
-                            @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
+                                @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                             }
-                            td.nowrap { (views::cvss_badge(item.cvss)) }
-                            td.nowrap { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
-                            @if scope.all() { td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "vulnerabilities")) { (item.project) } } }
+                            td.nowrap.cvss { (views::cvss_badge(item.cvss)) }
+                            td.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
+                            @if scope.all() { td.project { a href=(product_url(Some((&item.org, &item.project)), "vulnerabilities")) title=(item.project) { (item.project) } } }
                             td { (status_badge(&item.status)) }
-                            td.right.nowrap {
+                            td.right.actions {
                                 @if scope.can_in(&item.org, &item.project, Permission::Triage) { (triage_actions(item)) }
                             }
                         }
                     }
-                    @if items.is_empty() { tr { td colspan="6" .muted { "No decision yet." } } }
+                    @if items.is_empty() { tr { td colspan=(if scope.all() { "6" } else { "5" }) .muted { "No decision yet." } } }
                 }
             }
             p.muted { "Who decided what, and why: see " a href=(scope.url("audit")) { "Audit" } "." }

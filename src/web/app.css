@@ -322,6 +322,44 @@ table.list th, table.list td {
 table.list th { font-size: 13px; color: var(--muted); font-weight: 600; }
 table.list tr:last-child td { border-bottom: none; }
 
+/* A list whose columns are sized here (its colgroup names them) rather than
+   by their content: the table is exactly as wide as its box at any window
+   width, and long names and texts wrap inside their column. The page never
+   scrolls sideways because of it. */
+table.list.fit { table-layout: fixed; }
+table.fit td { overflow-wrap: anywhere; }
+table.fit td.cve a { white-space: nowrap; }
+table.fit td.app .tag { white-space: normal; }
+table.fit col.cve { width: 162px; }
+table.fit col.cvss { width: 122px; }
+table.fit col.app { width: 16%; }
+table.fit col.project { width: 11%; }
+table.fit col.decision { width: 150px; }
+/* The decisions on two lines; a single button once the decision is taken */
+table.fit col.actions { width: 190px; }
+table.fit td.actions button, table.fit td.actions .btn { margin-bottom: 4px; white-space: nowrap; }
+table.fit td.actions input[type="text"] { width: 100%; }
+/* Decided: no description, the application takes what is left */
+table.decided col.app { width: auto; }
+table.decided col.actions { width: 110px; }
+/* Between the phone layout and a wide window: tighter cells, the decisions
+   one under the other, a project name kept on one line and a description cut
+   after four lines (their title attribute holds the whole text) */
+@media (min-width: 761px) and (max-width: 1199px) {
+  table.fit th, table.fit td { padding: 8px; }
+  table.fit col.cve { width: 154px; }
+  table.fit col.cvss { width: 114px; }
+  table.fit col.app { width: 15%; }
+  table.fit col.project { width: 10%; }
+  table.fit col.decision { width: 138px; }
+  table.fit col.actions { width: 134px; }
+  table.decided col.app { width: auto; }
+  table.decided col.actions { width: 90px; }
+  table.fit td.actions form.inline, table.fit td.actions details.inline { display: block; }
+  table.fit td.project a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.fit .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+}
+
 dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 0; }
 dl.meta dt { color: var(--muted); }
 dl.meta dd { margin: 0; overflow-wrap: anywhere; }
@@ -628,6 +666,7 @@ footer.bottom a:hover { color: var(--accent); }
      line, each one named after its column (data-label, set by filter.js);
      the header only keeps its sort links. */
   table.list, table.list tbody { display: block; }
+  table.list colgroup { display: none; }
   table.list thead { display: none; }
   table.list thead:has(a.sort) { display: block; border-bottom: 1px solid var(--border); }
   table.list thead tr { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 4px 10px; }
@@ -672,6 +711,7 @@ footer.bottom a:hover { color: var(--accent); }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
   table.triage td.actions { margin-top: 4px; }
   table.list.triage td[data-label]::before { content: none; }
+  table.fit td.actions button, table.fit td.actions .btn { margin-bottom: 0; }
 
   form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
   form.filters > *, form.row > * { width: 100%; }
