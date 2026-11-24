@@ -460,7 +460,7 @@ fn read_tool_definitions() -> Vec<Value> {
             "get_audit_log",
             "Decisions taken on tracked CVEs, most recent first: who accepted a risk, closed or reopened a CVE, when, on which version of the application and with which justification. With `event`, also the entries a scan added (`detected`) or that left with their application (`removed`). Answers one page (`events`) with the `total`; ask for the next with `offset`.",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
-                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default: accepted risks)" },
+                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default `all`: every decision)" },
                     "event": { "type": "string", "enum": ["status", "detected", "removed", "all"], "description": "Kind of event (default `status`: decisions only). `decision` only filters the decisions" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Events returned (default 100); refused outside 1 to 500" },
                     "offset": { "type": "integer", "minimum": 0, "description": "Events skipped (default 0)" } }),
@@ -670,7 +670,10 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                     json!({ "date": date.to_string(), "entries": items })
                 }
                 _ => {
-                    let wanted = opt_str(args, "decision").unwrap_or("accepted");
+                    let wanted = opt_str(args, "decision").unwrap_or("all");
+                    if !["accepted", "treated", "not_applicable", "untreated", "all"].contains(&wanted) {
+                        return Err(anyhow!("invalid decision '{wanted}'"));
+                    }
                     let kind = opt_str(args, "event").unwrap_or("status");
                     if !["status", "detected", "removed", "all"].contains(&kind) {
                         return Err(anyhow!("invalid event '{kind}'"));
@@ -1251,6 +1254,10 @@ mod tests {
         assert_eq!((audit[0]["by"].as_str(), audit[0]["justification"].as_str()), (Some("alice"), Some("isolated network")));
         // Each event carries the version it was decided on; entries a scan added are asked for by name
         assert!(audit[0].get("version").is_some() && audit[0]["event"] == "status");
+        // Asked without a filter, the log gives every decision, not only the accepted risks
+        let decisions = run(&alice_mcp, "get_audit_log", with(json!({ "decision": "all" }))).unwrap()["total"].clone();
+        assert_eq!(run(&alice_mcp, "get_audit_log", scope.clone()).unwrap()["total"], decisions);
+        assert!(run(&alice_mcp, "get_audit_log", with(json!({ "decision": "bogus" }))).is_err());
         let detected = run(&alice_mcp, "get_audit_log", with(json!({ "event": "detected" }))).unwrap();
         assert!(detected["total"].as_u64().unwrap() >= 1 && detected["events"][0]["event"] == "detected");
         let everything = run(&alice_mcp, "get_audit_log", with(json!({ "event": "all", "decision": "all" }))).unwrap();

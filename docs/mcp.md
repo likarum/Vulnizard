@@ -30,7 +30,7 @@ Read tools: `search_cves`, `get_cve`, `list_vendors`, `list_products`, `list_wea
 the next page. In the list, a CVE description is cut after 200 characters (`get_cve` gives it whole).
 A `limit` outside 1 to 500 is refused. The `application` filter of `list_watchlist` matches the name
 whatever its case.
-`get_audit_log` lists decisions by default; `event: detected`, `removed` or `all` adds the entries a
+`get_audit_log` lists every decision by default (`decision: accepted` keeps the accepted risks only); `event: detected`, `removed` or `all` adds the entries a
 scan brought in and those that left with their application. `database_status` gives the version of
 the software and of the database schema. In `list_applications`, `source` is `manual` for an
 application added by hand and `inventory` for one brought by an inventory source.
