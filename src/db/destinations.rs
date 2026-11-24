@@ -1,10 +1,13 @@
-//! Notification destinations and rules (schema v13).
+//! Notification destinations (schema v13, settings on the destination since v27).
 //!
 //! A **destination** is where messages go (an email address with its SMTP
 //! server, a webhook, a Slack or ntfy URL, the browsers of the members). It
-//! belongs to the instance, an organization or a single project, so each
-//! project can have its own. A **rule** (`notifications` table) connects a
-//! project to a destination, with the events and the minimum CVSS it wants.
+//! belongs to the instance, an organization or a single project, and that
+//! alone decides what it receives: a destination of the instance gets the
+//! notifications of every project, one of an organization those of its
+//! projects, one of a project those of that project. No project picks it.
+//! What it sends is set on the destination itself: the event types, a
+//! minimum CVSS, and whether it is enabled.
 //!
 //! Browser notifications use Web Push: subscriptions and the per-user inbox
 //! the service worker reads are stored here.
@@ -13,6 +16,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 
+use crate::changes::EVENT_TYPES;
 use crate::db::{Database, Notification};
 
 const DESTINATIONS_SCHEMA: &str = r#"
@@ -101,8 +105,10 @@ pub struct Destination {
     /// Kind-specific settings; may hold an SMTP password: never rendered
     pub config: Value,
     pub system_events: bool,
-    /// Number of project rules using it
-    pub rules: i64,
+    /// Event types it sends; none = it sends nothing about CVEs and projects
+    pub events: Vec<String>,
+    pub min_cvss: Option<f64>,
+    pub enabled: bool,
 }
 
 impl Destination {
@@ -110,6 +116,26 @@ impl Destination {
     pub fn target(&self) -> String {
         target_of(&self.kind, &self.config)
     }
+
+    /// The destination as the delivery pipeline takes it
+    pub fn notification(&self) -> Notification {
+        Notification {
+            id: self.id,
+            name: self.name.clone(),
+            kind: self.kind.clone(),
+            target: self.target(),
+            events: self.events.clone(),
+            min_cvss: self.min_cvss,
+            enabled: self.enabled,
+            scope: self.scope.clone(),
+            config: self.config.clone(),
+        }
+    }
+}
+
+/// Every event type: what a new destination sends
+pub fn all_events() -> Vec<String> {
+    EVENT_TYPES.iter().map(|(kind, _)| kind.to_string()).collect()
 }
 
 pub fn target_of(kind: &str, config: &Value) -> String {
@@ -142,9 +168,16 @@ const DESTINATION_SELECT: &str = "
                                            LEFT JOIN organizations o ON o.id = p.organization_id
                                            WHERE p.id = d.scope_id), '?')
              ELSE '' END,
-           d.name, d.kind, d.config, d.system_events,
-           (SELECT COUNT(*) FROM notifications n WHERE n.destination_id = d.id)
+           d.name, d.kind, d.config, d.system_events, d.events, d.min_cvss, d.enabled
     FROM destinations d";
+
+/// The destinations whose scope holds the project `?1`: its own, those of its
+/// organization, those of the instance. The only place deciding what a
+/// destination receives.
+const COVERS_PROJECT: &str = "(d.scope = 'instance'
+    OR (d.scope = 'project' AND d.scope_id = ?1)
+    OR (d.scope = 'organization'
+        AND d.scope_id = (SELECT organization_id FROM projects WHERE id = ?1)))";
 
 /// Settings of a destination as stored (encrypted: they hold URLs that are
 /// secrets, and SMTP passwords). Unreadable settings leave the destination
@@ -169,29 +202,11 @@ fn destination_row(db: &Database, r: &rusqlite::Row) -> rusqlite::Result<Destina
         kind: r.get(5)?,
         config: stored_config(db, &r.get::<_, String>(6)?),
         system_events: r.get::<_, i64>(7)? != 0,
-        rules: r.get(8)?,
+        events: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+        min_cvss: r.get(9)?,
+        enabled: r.get::<_, i64>(10)? != 0,
     })
 }
-
-fn notification_row(db: &Database, r: &rusqlite::Row) -> rusqlite::Result<Notification> {
-    let kind: String = r.get(2)?;
-    let config: Value = stored_config(db, &r.get::<_, String>(3)?);
-    Ok(Notification {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        target: target_of(&kind, &config),
-        kind,
-        events: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or_default(),
-        min_cvss: r.get(5)?,
-        enabled: r.get::<_, i64>(6)? != 0,
-        destination_id: r.get(7)?,
-        config,
-    })
-}
-
-const NOTIFICATION_SELECT: &str = "
-    SELECT n.id, d.name, d.kind, d.config, n.events, n.min_cvss, n.enabled, d.id
-    FROM notifications n JOIN destinations d ON d.id = n.destination_id";
 
 impl Database {
     pub(super) fn migrate_destinations(&self) -> Result<()> {
@@ -201,8 +216,45 @@ impl Database {
         Ok(())
     }
 
+    /// v27: what a destination sends is set on the destination, and its
+    /// scope alone decides which projects it receives. Destinations of the
+    /// instance and of an organization start sending everything for every
+    /// project they cover; a destination of a project keeps what the rule of
+    /// its project said ("no event" meant all of them then), and one that no
+    /// rule used sends nothing. The rules are gone.
+    pub(super) fn migrate_destination_settings(&self) -> Result<()> {
+        let all = serde_json::to_string(&all_events())?;
+        let tx = self.conn().unchecked_transaction()?;
+        tx.execute_batch(
+            "ALTER TABLE destinations ADD COLUMN events TEXT NOT NULL DEFAULT '[]';
+             ALTER TABLE destinations ADD COLUMN min_cvss REAL;
+             ALTER TABLE destinations ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;",
+        )?;
+        tx.execute("UPDATE destinations SET events = ?1 WHERE scope IN ('instance', 'organization')", params![all])?;
+        tx.execute(
+            "UPDATE destinations SET
+                events = (SELECT CASE WHEN json_valid(n.events) AND json_array_length(n.events) > 0 THEN n.events ELSE ?1 END
+                          FROM notifications n WHERE n.destination_id = destinations.id AND n.project_id = destinations.scope_id),
+                min_cvss = (SELECT n.min_cvss FROM notifications n
+                            WHERE n.destination_id = destinations.id AND n.project_id = destinations.scope_id),
+                enabled = (SELECT n.enabled FROM notifications n
+                           WHERE n.destination_id = destinations.id AND n.project_id = destinations.scope_id)
+             WHERE scope = 'project'
+               AND EXISTS (SELECT 1 FROM notifications n
+                           WHERE n.destination_id = destinations.id AND n.project_id = destinations.scope_id)",
+            params![all],
+        )?;
+        tx.execute_batch(
+            "DROP TABLE notifications;
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '27');",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---------- destinations ----------
 
+    /// A new destination sends every event type, without a minimum CVSS, and is enabled
     pub fn create_destination(
         &self,
         scope: &str,
@@ -222,9 +274,17 @@ impl Database {
         }
         self.conn()
             .execute(
-                "INSERT INTO destinations (scope, scope_id, name, kind, config, system_events)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![scope, scope_id, name, kind, self.seal(&config.to_string()), (system_events && scope == "instance") as i32],
+                "INSERT INTO destinations (scope, scope_id, name, kind, config, system_events, events)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    scope,
+                    scope_id,
+                    name,
+                    kind,
+                    self.seal(&config.to_string()),
+                    (system_events && scope == "instance") as i32,
+                    serde_json::to_string(&all_events())?
+                ],
             )
             .map_err(|e| match e {
                 rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {
@@ -253,15 +313,42 @@ impl Database {
         Ok(rows)
     }
 
-    /// Destinations a project may use: its own, those of its organization
-    /// and those of the instance.
+    /// What a destination sends: event types (none = nothing), minimum CVSS,
+    /// enabled or not, and for a destination of the instance the instance events
+    pub fn update_destination_settings(
+        &self,
+        id: i64,
+        events: &[String],
+        min_cvss: Option<f64>,
+        enabled: bool,
+        system_events: Option<bool>,
+    ) -> Result<bool> {
+        let changed = self.conn().execute(
+            "UPDATE destinations SET events = ?2, min_cvss = ?3, enabled = ?4,
+                    system_events = CASE WHEN scope = 'instance' THEN COALESCE(?5, system_events) ELSE 0 END
+             WHERE id = ?1",
+            params![id, serde_json::to_string(events)?, min_cvss, enabled as i32, system_events.map(|s| s as i32)],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// The destinations belonging to a project, the only ones it manages
     pub fn list_project_destinations(&self, project_id: i64) -> Result<Vec<Destination>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{DESTINATION_SELECT}
-             WHERE d.scope = 'instance'
-                OR (d.scope = 'project' AND d.scope_id = ?1)
-                OR (d.scope = 'organization'
-                    AND d.scope_id = (SELECT organization_id FROM projects WHERE id = ?1))
+            "{DESTINATION_SELECT} WHERE d.scope = 'project' AND d.scope_id = ?1 ORDER BY d.name"
+        ))?;
+        let rows = stmt
+            .query_map(params![project_id], |r| destination_row(self, r))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every destination that receives the notifications of a project: its
+    /// own, then those of its organization, then those of the instance. Each
+    /// destination is there once.
+    pub fn destinations_covering(&self, project_id: i64) -> Result<Vec<Destination>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "{DESTINATION_SELECT} WHERE {COVERS_PROJECT}
              ORDER BY CASE d.scope WHEN 'project' THEN 0 WHEN 'organization' THEN 1 ELSE 2 END, d.name"
         ))?;
         let rows = stmt
@@ -270,15 +357,15 @@ impl Database {
         Ok(rows)
     }
 
-    /// Deletes a destination and the rules using it
+    /// Deletes a destination
     pub fn delete_destination(&self, id: i64) -> Result<bool> {
         Ok(self.conn().execute("DELETE FROM destinations WHERE id = ?1", params![id])? > 0)
     }
 
-    /// Instance destinations that receive instance events (sync finished…)
+    /// Enabled instance destinations that receive instance events (sync finished…)
     pub fn list_system_destinations(&self) -> Result<Vec<Destination>> {
         let mut stmt = self.conn().prepare(&format!(
-            "{DESTINATION_SELECT} WHERE d.scope = 'instance' AND d.system_events = 1 ORDER BY d.name"
+            "{DESTINATION_SELECT} WHERE d.scope = 'instance' AND d.system_events = 1 AND d.enabled = 1 ORDER BY d.name"
         ))?;
         let rows = stmt
             .query_map([], |r| destination_row(self, r))?
@@ -286,32 +373,10 @@ impl Database {
         Ok(rows)
     }
 
-    // ---------- rules ----------
+    // ---------- what notifies a project ----------
 
-    /// Connects a project to a destination it may use
-    pub fn create_rule(&self, project_id: i64, destination_id: i64, events: &[String], min_cvss: Option<f64>) -> Result<i64> {
-        let usable = self
-            .list_project_destinations(project_id)?
-            .iter()
-            .any(|d| d.id == destination_id);
-        if !usable {
-            return Err(anyhow!("This destination is not available to the project"));
-        }
-        self.conn()
-            .execute(
-                "INSERT INTO notifications (project_id, destination_id, events, min_cvss) VALUES (?1, ?2, ?3, ?4)",
-                params![project_id, destination_id, serde_json::to_string(events)?, min_cvss],
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {
-                    anyhow!("The project already notifies this destination")
-                }
-                e => e.into(),
-            })?;
-        Ok(self.conn().last_insert_rowid())
-    }
-
-    /// Creates a destination of the project and its rule in one step
+    /// Creates a destination of the project sending the given events
+    /// (none = every event, as a new destination does)
     #[cfg(test)]
     pub fn create_notification(
         &self,
@@ -321,7 +386,7 @@ impl Database {
         target: &str,
         events: &[String],
         min_cvss: Option<f64>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let config = match kind {
             "email" => serde_json::json!({ "to": target }),
             "browser" => serde_json::json!({}),
@@ -329,36 +394,16 @@ impl Database {
         };
         let tx = self.conn().unchecked_transaction()?;
         let destination = self.create_destination("project", Some(project_id), name, kind, &config, false)?;
-        self.create_rule(project_id, destination, events, min_cvss)?;
+        let events = if events.is_empty() { all_events() } else { events.to_vec() };
+        self.update_destination_settings(destination, &events, min_cvss, true, None)?;
         tx.commit()?;
-        Ok(())
+        Ok(destination)
     }
 
+    /// What notifies a project, as the delivery pipeline takes it: one entry
+    /// per destination covering it (see `destinations_covering`)
     pub fn list_notifications(&self, project_id: i64) -> Result<Vec<Notification>> {
-        let mut stmt = self
-            .conn()
-            .prepare(&format!("{NOTIFICATION_SELECT} WHERE n.project_id = ?1 ORDER BY d.name"))?;
-        let rows = stmt
-            .query_map(params![project_id], |r| notification_row(self, r))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Every rule of the instance: (organization, project, rule)
-    pub fn list_all_rules(&self) -> Result<Vec<(String, String, Notification)>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT n.id, d.name, d.kind, d.config, n.events, n.min_cvss, n.enabled, d.id,
-                    COALESCE(o.name, ''), p.name
-             FROM notifications n
-             JOIN destinations d ON d.id = n.destination_id
-             JOIN projects p ON p.id = n.project_id
-             LEFT JOIN organizations o ON o.id = p.organization_id
-             ORDER BY o.name, p.name, d.name",
-        )?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(8)?, r.get(9)?, notification_row(self, r)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        Ok(self.destinations_covering(project_id)?.iter().map(Destination::notification).collect())
     }
 
     // ---------- Web Push ----------
@@ -454,7 +499,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn destinations_are_scoped_and_rules_connect_projects_to_them() {
+    fn a_destination_receives_by_its_scope_and_holds_what_it_sends() {
         let db = Database::open_in_memory().unwrap();
         let alice = db.create_account("alice", None, "h", false).unwrap();
         let org = db.create_org("acme", alice).unwrap();
@@ -475,35 +520,129 @@ mod tests {
         assert!(db.create_destination("project", Some(infra), "phone", "ntfy", &json!({}), false).is_err());
         assert!(db.create_destination("project", Some(infra), "x", "pager", &json!({}), false).is_err());
 
-        // What each project may use
-        let ids = |project| -> Vec<i64> { db.list_project_destinations(project).unwrap().into_iter().map(|d| d.id).collect() };
+        // A new destination sends everything: every event, no minimum CVSS, enabled
+        for id in [ntfy, team, ops] {
+            let d = db.get_destination(id).unwrap().unwrap();
+            assert_eq!((d.events, d.min_cvss, d.enabled), (all_events(), None, true));
+        }
+
+        // What notifies each project, without anyone picking anything; each destination once
+        let ids = |project| -> Vec<i64> { db.list_notifications(project).unwrap().into_iter().map(|n| n.id).collect() };
         assert_eq!(ids(infra), [ntfy, team, ops]);
         assert_eq!(ids(web), [team, ops]);
         assert_eq!(ids(misc), [ops]);
-
-        // A rule only on a usable destination, once
-        db.create_rule(infra, ntfy, &["kev".into()], Some(7.0)).unwrap();
-        assert!(db.create_rule(infra, ntfy, &[], None).is_err());
-        assert!(db.create_rule(web, ntfy, &[], None).is_err());
-        assert!(db.create_rule(misc, team, &[], None).is_err());
-        db.create_rule(misc, ops, &[], None).unwrap();
+        // What a project manages: its own only
+        let own = |project| -> Vec<i64> { db.list_project_destinations(project).unwrap().into_iter().map(|d| d.id).collect() };
+        assert_eq!((own(infra), own(web), own(misc)), (vec![ntfy], vec![], vec![]));
 
         let rules = db.list_notifications(infra).unwrap();
         assert_eq!((rules[0].name.as_str(), rules[0].kind.as_str(), rules[0].target.as_str()), ("phone", "ntfy", "https://ntfy.example.org/infra"));
+        assert_eq!((rules[0].scope.as_str(), rules[1].scope.as_str(), rules[2].scope.as_str()), ("project", "organization", "instance"));
         // The displayed target never contains the SMTP secret
-        let ops_rule = &db.list_notifications(misc).unwrap()[0];
-        assert_eq!(ops_rule.target, "ops@example.org (via smtp.example.org)");
-        assert_eq!(db.list_all_rules().unwrap().len(), 2);
-        assert_eq!(db.list_system_destinations().unwrap().len(), 1);
-        assert_eq!(db.get_destination(ntfy).unwrap().unwrap().rules, 1);
+        assert_eq!(rules[2].target, "ops@example.org (via smtp.example.org)");
 
-        // Deleting a destination removes its rules; deleting a project removes its destinations
+        // Its settings are its own; instance events only for a destination of the instance
+        assert!(db.update_destination_settings(ntfy, &["kev".into()], Some(7.0), false, Some(true)).unwrap());
+        let d = db.get_destination(ntfy).unwrap().unwrap();
+        assert_eq!((d.events, d.min_cvss, d.enabled, d.system_events), (vec!["kev".to_string()], Some(7.0), false, false));
+        assert_eq!(db.list_system_destinations().unwrap().len(), 1);
+        // Left alone when the form does not hold them, and a disabled destination gets no instance event either
+        db.update_destination_settings(ops, &[], None, true, None).unwrap();
+        assert_eq!(db.list_system_destinations().unwrap().len(), 1);
+        db.update_destination_settings(ops, &[], None, false, None).unwrap();
+        assert!(db.list_system_destinations().unwrap().is_empty());
+        assert!(!db.update_destination_settings(9999, &[], None, true, None).unwrap());
+
+        // Deleting a destination stops it; deleting a project or an organization removes its destinations
         assert!(db.delete_destination(ops).unwrap());
         assert!(db.list_notifications(misc).unwrap().is_empty());
         db.delete_project_by_id(infra, &crate::db::Actor::system("test")).unwrap();
         assert!(db.get_destination(ntfy).unwrap().is_none());
         db.delete_org(org).unwrap();
         assert!(db.get_destination(team).unwrap().is_none());
+    }
+
+    /// A database as version 26 left it: the settings on the rules, in `notifications`
+    fn back_to_v26(db: &Database) {
+        db.conn()
+            .execute_batch(
+                "ALTER TABLE destinations DROP COLUMN events;
+                 ALTER TABLE destinations DROP COLUMN min_cvss;
+                 ALTER TABLE destinations DROP COLUMN enabled;
+                 CREATE TABLE notifications (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                     destination_id INTEGER NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
+                     events TEXT NOT NULL DEFAULT '[]',
+                     min_cvss REAL,
+                     enabled INTEGER NOT NULL DEFAULT 1,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                     UNIQUE (project_id, destination_id)
+                 );
+                 INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '26');",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn version_26_rules_become_the_settings_of_the_destinations() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("v26.db");
+        let (ops, team, phone, everything, unused);
+        {
+            let db = Database::open(&path).unwrap();
+            let alice = db.create_account("alice", None, "h", false).unwrap();
+            let org = db.create_org("acme", alice).unwrap();
+            let infra = db.create_org_project(org, alice, "infra", None).unwrap();
+            let web = db.create_org_project(org, alice, "web", None).unwrap();
+            let hook = json!({ "url": "https://example.org/h" });
+            ops = db.create_destination("instance", None, "ops", "webhook", &hook, true).unwrap();
+            team = db.create_destination("organization", Some(org), "team", "webhook", &hook, false).unwrap();
+            phone = db.create_destination("project", Some(infra), "phone", "webhook", &hook, false).unwrap();
+            everything = db.create_destination("project", Some(infra), "everything", "webhook", &hook, false).unwrap();
+            unused = db.create_destination("project", Some(web), "unused", "webhook", &hook, false).unwrap();
+            back_to_v26(&db);
+            let rule = |project: i64, destination: i64, events: &str, min_cvss: Option<f64>, enabled: bool| {
+                db.conn()
+                    .execute(
+                        "INSERT INTO notifications (project_id, destination_id, events, min_cvss, enabled) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![project, destination, events, min_cvss, enabled],
+                    )
+                    .unwrap();
+            };
+            // One project had picked the instance destination, narrowly and disabled; nobody the organization one
+            rule(web, ops, r#"["kev"]"#, Some(9.0), false);
+            rule(infra, phone, r#"["created","kev"]"#, Some(7.0), false);
+            // No event meant every event
+            rule(infra, everything, "[]", None, true);
+        }
+
+        // Opening it upgrades it
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 27);
+        let settings = |id: i64| {
+            let d = db.get_destination(id).unwrap().unwrap();
+            (d.events, d.min_cvss, d.enabled)
+        };
+        // Instance and organization: everything, for every project they cover, whatever a rule said
+        assert_eq!(settings(ops), (all_events(), None, true));
+        assert_eq!(settings(team), (all_events(), None, true));
+        assert!(db.get_destination(ops).unwrap().unwrap().system_events);
+        // A destination of a project keeps exactly what its rule said
+        assert_eq!(settings(phone), (vec!["created".to_string(), "kev".to_string()], Some(7.0), false));
+        assert_eq!(settings(everything), (all_events(), None, true));
+        // One that no rule used sent nothing, and still sends nothing
+        assert_eq!(settings(unused), (vec![], None, true));
+        // The rules are gone
+        let rules: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notifications'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rules, 0);
+        // And opening it again changes nothing
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.get_destination(phone).unwrap().unwrap().events, ["created", "kev"]);
     }
 
     #[test]

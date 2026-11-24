@@ -8,9 +8,15 @@ configuration file and apply without restart.
 - **Vulnerability sources**: enable or disable NVD, CISA KEV, EPSS, Vulnrichment, OSV, Exploit-DB,
   Metasploit and Nuclei templates; see the last run of each and sync one on demand — the page shows which sources are
   waiting, running or done, and refreshes until the sync ends; set the sync interval and the NVD API key
-- **Notifications**, in three tabs: *Enabled per project* (every rule of the instance: test, disable,
-  delete), *Destinations* (every destination, of the instance, an organization or a project) and
-  *Delivery* (whether targets may be on a private network). Whoever starts a manual sync is told when
+- **Notifications**, in three tabs: *Per project* (for each project, the destinations receiving its
+  notifications, with a test), *Destinations* (every destination, of the instance, an
+  organization or a project) and *Delivery* (whether targets may be on a private network).
+  What a destination belongs to decides what it receives, by itself: a destination of the
+  **instance** gets the notifications of every project, one of an **organization** those of its
+  projects, one of a **project** those of that project. No project has to pick it. The **gear** of
+  a destination opens what it sends: the event types (all checked on a new destination), a minimum
+  CVSS (none by default), enabled or not, and for a destination of the instance the instance
+  events (a manual synchronization finished). Whoever starts a manual sync is told when
   it ends. **Browser notifications** use Web Push: enable them per browser in *Settings*
   (requires HTTPS, or localhost)
 - **MCP**: turn on the MCP endpoint of the server, choose whether assistants may modify data, and see

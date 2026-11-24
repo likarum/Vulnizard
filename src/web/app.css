@@ -778,3 +778,17 @@ footer.bottom a:hover { color: var(--accent); }
   .head { align-items: flex-start; }
   code.token { overflow-wrap: anywhere; }
 }
+
+/* Notifications of a project: one narrow column per event type, its name
+   written upwards in the header, a checkbox in each cell. On a phone each
+   cell carries its name (data-label), like any list. */
+@media (min-width: 761px) {
+  table.events th.up { vertical-align: bottom; text-align: center; padding-left: 0; padding-right: 0; }
+  table.events th.up span { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
+  table.events td.tick { text-align: center; padding-left: 0; padding-right: 0; }
+}
+table.events td input[type="number"] { width: 100%; }
+table.events td.tick input { margin: 0; vertical-align: middle; }
+/* The gear opening the configuration of a destination */
+a.gear { font-size: 15px; line-height: 1.2; padding: 1px 7px; }
+a.gear:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }

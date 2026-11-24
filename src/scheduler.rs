@@ -198,7 +198,7 @@ fn notify_sync_finished(db: &Database, config: &Config, user_id: i64, sources: &
     if let Err(e) = crate::push::deliver(db, config, user_id, &title, &body, "/admin/sources") {
         tracing::warn!("scheduler: browser notification failed: {e:#}");
     }
-    // Instance destinations that want instance events
+    // Enabled instance destinations that want instance events
     for destination in db.list_system_destinations().unwrap_or_default() {
         if let Err(e) = notify::send_system(config, &destination, &title, &body) {
             tracing::warn!("scheduler: notification to '{}' failed: {e:#}", destination.name);

@@ -186,16 +186,17 @@ pub struct Subscription {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Notification {
+    /// Id of the destination
     pub id: i64,
     pub name: String,
     pub kind: String,
     pub target: String,
-    /// Event types to notify; empty = all
+    /// Event types to notify; empty = none
     pub events: Vec<String>,
     pub min_cvss: Option<f64>,
     pub enabled: bool,
-    /// Destination the rule sends to
-    pub destination_id: i64,
+    /// What the destination belongs to: instance | organization | project
+    pub scope: String,
     /// Settings of the destination (may hold an SMTP password): never serialized
     #[serde(skip)]
     pub config: serde_json::Value,
@@ -912,22 +913,6 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-
-    pub fn delete_notification(&self, project_id: i64, id: i64) -> Result<()> {
-        self.conn().execute(
-            "DELETE FROM notifications WHERE id = ?1 AND project_id = ?2",
-            params![id, project_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn toggle_notification(&self, project_id: i64, id: i64) -> Result<()> {
-        self.conn().execute(
-            "UPDATE notifications SET enabled = 1 - enabled WHERE id = ?1 AND project_id = ?2",
-            params![id, project_id],
-        )?;
-        Ok(())
-    }
 }
 
 // ==========================================
@@ -1087,6 +1072,7 @@ impl Database {
                 params![project_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            // Each destination covering the project, once: a change leaves once per destination
             for notification in self.list_notifications(project_id)? {
                 if !notification.enabled {
                     continue;
@@ -1112,8 +1098,8 @@ impl Database {
 }
 
 fn notification_matches(n: &Notification, change: &ChangeRow) -> bool {
-    let event_ok = n.events.is_empty()
-        || change.events.iter().any(|e| n.events.iter().any(|k| k == e.kind()));
+    // No event type chosen: the destination sends nothing
+    let event_ok = change.events.iter().any(|e| n.events.iter().any(|k| k == e.kind()));
     let cvss_ok = match n.min_cvss {
         Some(min) if min > 0.0 => change.cvss.is_some_and(|s| s >= min),
         _ => true,
@@ -1531,6 +1517,74 @@ mod tests {
         assert_eq!(orgs.len(), 1);
         assert_eq!(orgs[0].name, "default");
         assert_eq!(db.list_org_projects(orgs[0].id).unwrap()[0].name, "default");
+    }
+
+    /// (organization/project, destination, CVEs) of each batch, in the order they leave
+    fn sent(dispatches: &[Dispatch]) -> Vec<(String, String, Vec<String>)> {
+        dispatches
+            .iter()
+            .map(|d| (format!("{}/{}", d.org, d.project), d.notification.name.clone(), d.changes.iter().map(|c| c.cve_id.clone()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn destinations_receive_the_changes_of_the_projects_they_cover_without_any_rule() {
+        let db = Database::open_in_memory().unwrap();
+        let alice = db.create_account("alice", None, "hash", false).unwrap();
+        let acme = db.create_org("acme", alice).unwrap();
+        let infra = db.create_org_project(acme, alice, "infra", None).unwrap();
+        let beta = db.create_org("beta", alice).unwrap();
+        let edge = db.create_org_project(beta, alice, "edge", None).unwrap();
+        db.subscribe(infra, "apache", "").unwrap();
+        db.subscribe(edge, "apache", "").unwrap();
+        let hook = serde_json::json!({ "url": "https://example.org/h" });
+        let everyone = db.create_destination("instance", None, "everyone", "webhook", &hook, false).unwrap();
+        let team = db.create_destination("organization", Some(acme), "team", "webhook", &hook, false).unwrap();
+        let solo = db.create_destination("project", Some(edge), "solo", "webhook", &hook, false).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+
+        // One change, two projects of two organizations: the instance destination gets it for
+        // both, the organization one for its organization only, the project one for its project only
+        db.upsert_cve(&cve("CVE-2024-0201", Some(5.0))).unwrap();
+        let dispatches = db.process_changes().unwrap();
+        let one = |name: &str| vec![name.to_string()];
+        assert_eq!(
+            sent(&dispatches),
+            [
+                ("acme/infra".to_string(), "team".to_string(), one("CVE-2024-0201")),
+                ("acme/infra".to_string(), "everyone".to_string(), one("CVE-2024-0201")),
+                ("beta/edge".to_string(), "solo".to_string(), one("CVE-2024-0201")),
+                ("beta/edge".to_string(), "everyone".to_string(), one("CVE-2024-0201")),
+            ]
+        );
+        // Never twice through the same destination for the same project
+        let mut pairs: Vec<(i64, i64)> = dispatches.iter().map(|d| (d.project_id, d.notification.id)).collect();
+        pairs.sort();
+        pairs.dedup();
+        assert_eq!(pairs.len(), dispatches.len());
+        // Nothing is left to send again
+        assert!(db.process_changes().unwrap().is_empty());
+
+        // What each destination says it sends is obeyed: event types, minimum CVSS, enabled
+        db.update_destination_settings(everyone, &["created".into()], Some(7.0), true, None).unwrap();
+        db.update_destination_settings(team, &crate::db::all_events(), None, false, None).unwrap();
+        db.update_destination_settings(solo, &[], None, true, None).unwrap();
+        // Under the minimum CVSS: nobody; a disabled destination and one without any event send nothing
+        db.upsert_cve(&cve("CVE-2024-0202", Some(5.0))).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+        db.upsert_cve(&cve("CVE-2024-0203", Some(9.0))).unwrap();
+        assert_eq!(
+            sent(&db.process_changes().unwrap()),
+            [
+                ("acme/infra".to_string(), "everyone".to_string(), one("CVE-2024-0203")),
+                ("beta/edge".to_string(), "everyone".to_string(), one("CVE-2024-0203")),
+            ]
+        );
+        // A score change is not a new CVE: the event type is not one it sends
+        db.upsert_cve(&cve("CVE-2024-0203", Some(9.5))).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+        // The reports of the projects hold every change all the same
+        assert_eq!(db.list_reports(edge, 10).unwrap()[0].changes, 4);
     }
 
     #[test]
