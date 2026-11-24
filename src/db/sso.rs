@@ -128,7 +128,7 @@ const PROVIDER_COLUMNS: &str =
 
 impl Database {
     pub(super) fn migrate_sso(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(SSO_SCHEMA)?;
         tx.commit()?;
         Ok(())

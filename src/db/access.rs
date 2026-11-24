@@ -147,7 +147,7 @@ const CAN_LOG_IN: &str = "(password_hash IS NOT NULL OR oidc_subject IS NOT NULL
 
 impl Database {
     pub(super) fn migrate_access(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(ACCESS_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -192,7 +192,7 @@ impl Database {
     /// Runs an account change and refuses it (rolled back) if it leaves the
     /// instance without any enabled administrator.
     fn guarded_account_change(&self, sql: &str, user_id: i64, value: bool) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let changed = tx.execute(sql, params![value as i32, user_id])?;
         if changed == 0 {
             return Err(anyhow!("Unknown account"));
@@ -416,7 +416,7 @@ impl Database {
         if current == is_admin {
             return Ok(());
         }
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "UPDATE users SET is_admin = ?1 WHERE id = ?2",
             params![is_admin as i32, user_id],

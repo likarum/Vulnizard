@@ -80,7 +80,7 @@ pub struct ProjectMember {
 
 impl Database {
     pub(super) fn migrate_roles(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(ROLES_SCHEMA)?;
         tx.commit()?;
         Ok(())

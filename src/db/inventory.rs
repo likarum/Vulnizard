@@ -161,7 +161,7 @@ fn clean(value: &Option<String>, max: usize) -> Option<String> {
 
 impl Database {
     pub(super) fn migrate_inventory(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(INVENTORY_SCHEMA)?;
         tx.commit()?;
         Ok(())

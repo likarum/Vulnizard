@@ -388,7 +388,7 @@ fn parse_events(json: &str) -> Vec<Event> {
 impl Database {
     /// Schema v6: web platform tables. Runs once (fresh DB or upgrade from v5).
     pub(super) fn migrate_platform(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(PLATFORM_SCHEMA)?;
         tx.commit()?;
         self.rebuild_catalog()?;
@@ -397,7 +397,7 @@ impl Database {
 
     /// Rebuilds the vendor/product catalog from the normalized products table
     pub fn rebuild_catalog(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(
             r#"
             DELETE FROM products;
@@ -627,7 +627,7 @@ impl Database {
         if self.user_origin(owner_id)? != super::Scope::Instance {
             return Err(anyhow!("This account cannot create organizations"));
         }
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM organizations WHERE name = ?1 COLLATE NOCASE)",
             params![name],
@@ -722,7 +722,7 @@ impl Database {
 
     pub fn add_member(&self, org_id: i64, username: &str, role: &str) -> Result<()> {
         // One transaction: a refused change (last owner demoted) is rolled back
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let user_id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM users WHERE username = ?1 COLLATE NOCASE
@@ -751,7 +751,7 @@ impl Database {
     }
 
     pub fn remove_member(&self, org_id: i64, user_id: i64) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "DELETE FROM memberships WHERE organization_id = ?1 AND user_id = ?2",
             params![org_id, user_id],
@@ -1011,7 +1011,7 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let mut per_project: BTreeMap<i64, Vec<ChangeRow>> = BTreeMap::new();
         {
             let mut changes = tx.prepare(

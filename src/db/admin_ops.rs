@@ -37,7 +37,7 @@ pub struct AdminNotification {
 
 impl Database {
     pub(super) fn migrate_notifications(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(NOTIFICATION_SCHEMA)?;
         tx.commit()?;
         Ok(())

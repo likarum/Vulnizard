@@ -158,7 +158,7 @@ impl Database {
         // Rebuilding `applications` must not cascade to the entries that reference it
         self.conn().execute_batch("PRAGMA foreign_keys=OFF;")?;
         let result = (|| -> Result<()> {
-            let tx = self.conn().unchecked_transaction()?;
+            let tx = self.write_tx()?;
             tx.execute_batch(DISTRO_SCHEMA)?;
             let broken: i64 = tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
             if broken > 0 {
@@ -187,7 +187,7 @@ impl Database {
     /// Replaces the advisories of a distribution family ("Debian") and makes
     /// sure their CVEs exist in the database. Returns the number of advisories.
     pub fn replace_distro_advisories(&self, family: &str, advisories: &[DistroAdvisory]) -> Result<usize> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute("DELETE FROM distro_advisories WHERE ecosystem LIKE ?1", params![format!("{family}:%")])?;
         {
             let mut insert = tx.prepare(

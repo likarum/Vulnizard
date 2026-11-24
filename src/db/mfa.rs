@@ -228,21 +228,21 @@ pub struct MfaPending {
 
 impl Database {
     pub(super) fn migrate_mfa(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(MFA_SCHEMA)?;
         tx.commit()?;
         Ok(())
     }
 
     pub(super) fn migrate_security(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(SECURITY_SCHEMA)?;
         tx.commit()?;
         Ok(())
     }
 
     pub(super) fn migrate_access_v20(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(ACCESS_V20_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -252,7 +252,7 @@ impl Database {
     /// (see `crate::secrets`). Safe to run again: sealed values are left alone.
     pub(super) fn migrate_seal_secrets(&self) -> Result<usize> {
         let mut sealed = 0;
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         for (table, id, column) in [
             ("destinations", "id", "config"),
             ("inventory_sources", "id", "config"),
@@ -284,7 +284,7 @@ impl Database {
     }
 
     pub(super) fn migrate_passkey_login(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(PASSKEY_LOGIN_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -470,7 +470,7 @@ impl Database {
     /// Leaves an organization: the account gives up its own memberships in it
     /// (the organization and its projects). The last owner stays.
     pub fn leave_org(&self, org_name: &str, user_id: i64) -> Result<bool> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let Some(org_id) = tx
             .query_row("SELECT id FROM organizations WHERE name = ?1 COLLATE NOCASE", params![org_name], |r| r.get::<_, i64>(0))
             .optional()?
@@ -566,7 +566,7 @@ impl Database {
     // ---------- recovery codes ----------
 
     pub fn replace_recovery_codes(&self, user_id: i64, hashes: &[String]) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute("DELETE FROM mfa_recovery_codes WHERE user_id = ?1", params![user_id])?;
         for hash in hashes {
             tx.execute(
@@ -698,7 +698,7 @@ impl Database {
     /// (lost device). The account signs in with its password alone, and
     /// enrols again if a second factor is required.
     pub fn reset_mfa(&self, user_id: i64) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         for table in ["mfa_totp", "mfa_passkeys", "mfa_recovery_codes", "mfa_pending", "sessions"] {
             tx.execute(&format!("DELETE FROM {table} WHERE user_id = ?1"), params![user_id])?;
         }

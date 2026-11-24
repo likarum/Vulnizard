@@ -241,6 +241,14 @@ impl Database {
     pub fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    /// A transaction that writes: it takes the write lock when it opens, and
+    /// waits its turn for it. A deferred one that reads first is refused at
+    /// once on its first write when another connection (a synchronization)
+    /// committed meanwhile: "database is locked", whatever the time allowed.
+    pub(crate) fn write_tx(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
+    }
 }
 
 impl Database {
@@ -1684,6 +1692,33 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let db = Database::open(&db_path).unwrap();
         (db, temp_dir)
+    }
+
+    #[test]
+    fn a_writing_transaction_waits_its_turn_instead_of_failing() {
+        let (db, dir) = create_test_db();
+        let other = Database::connect(&dir.path().join("test.db")).unwrap();
+        other.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        db.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+        // What used to happen: a transaction reads, a synchronization commits, the transaction's
+        // first write is refused at once, with or without time to wait
+        let deferred = db.conn.unchecked_transaction().unwrap();
+        let _: i64 = deferred.query_row("SELECT COUNT(*) FROM metadata", [], |r| r.get(0)).unwrap();
+        other.set_metadata("sync", "wrote meanwhile").unwrap();
+        let refused = deferred.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('k', 'v')", []);
+        assert!(refused.unwrap_err().to_string().contains("locked"));
+        drop(deferred);
+
+        // A writing transaction holds the lock from its opening: the other side waits for it
+        // (here, with no time to wait, it is told to come back), and its own writes pass
+        let tx = db.write_tx().unwrap();
+        let _: i64 = tx.query_row("SELECT COUNT(*) FROM metadata", [], |r| r.get(0)).unwrap();
+        assert!(other.set_metadata("sync", "second").is_err());
+        tx.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('k', 'v')", []).unwrap();
+        tx.commit().unwrap();
+        other.set_metadata("sync", "third").unwrap();
+        assert_eq!(db.get_metadata("k").unwrap().as_deref(), Some("v"));
     }
 
     #[test]
