@@ -63,6 +63,19 @@ The sources are asked for much less. With the default settings an instance downl
   followed at all). Each package is now recorded with its own ecosystem only.
 - An ecosystem of OSV that could not be read no longer passes silently: the run is recorded
   as failed, names the ecosystem, and the next cycle reads it again from the same point.
+- **"Added" counted every CVE a run read** (#82). A run showed "174 added, 0 updated" when
+  most of these CVEs were already known, and KEV, EPSS, Exploit-DB, Metasploit and Nuclei
+  showed the size of their whole file as "added" each time. A run now counts apart the CVEs
+  it made known, those of which something changed, and those it read again and found as
+  they were, in the history of runs, on the sources page and in the logs. A CVE found as it
+  was is no longer written again. Runs recorded before the upgrade keep their old figures
+  (schema v26, automatic). Vulnrichment counted as "added" the CVEs it could not find.
+- **Reading the KEV catalog replaced the description the NVD gave** (#92) with the catalog's
+  own wording, every time, and recorded it as a change of the CVE; the NVD then put its text
+  back at the next modification. The catalog now describes only a CVE nobody described yet.
+  CVEs of the catalog already stored keep the catalog's wording until the NVD modifies them
+  or the history is read again (`sync --source nvd --full`).
+- A failed run now records the cause of the failure, not only "cannot fetch <source>".
 
 ## 0.2.5
 

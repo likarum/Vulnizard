@@ -81,7 +81,9 @@ impl CveSource for CisaKevSource {
             cve.kev_known_exploited = true;
             cve.kev_date_added = Some(vuln.date_added.clone());
 
-            if cve.description.is_none() {
+            // The catalog's own wording is only for a CVE nobody described yet:
+            // it must not replace the description the NVD gave
+            if !db.has_description(&vuln.cve_id)? {
                 cve.description = Some(format!(
                     "{} - {}",
                     vuln.vulnerability_name, vuln.short_description
@@ -98,11 +100,7 @@ impl CveSource for CisaKevSource {
                 ..Default::default()
             });
 
-            match db.upsert_cve(&cve) {
-                Ok(true) => result.added += 1,
-                Ok(false) => result.updated += 1,
-                Err(_) => result.errors += 1,
-            }
+            result.count(db.upsert_cve(&cve));
             pb.inc(1);
         }
 
@@ -110,6 +108,48 @@ impl CveSource for CisaKevSource {
 
         mark.remember(db)?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Stored;
+    use crate::sources::testserver::{Answer, Server};
+
+    #[test]
+    fn the_catalog_describes_only_what_nobody_described() {
+        let catalog = br#"{"title": "t", "catalogVersion": "1", "dateReleased": "d", "count": 2, "vulnerabilities": [
+            {"cveID": "CVE-2024-1", "vendorProject": "Acme", "product": "Widget", "vulnerabilityName": "Acme Widget Flaw", "dateAdded": "2024-01-01",
+             "shortDescription": "The catalog's wording.", "requiredAction": "a", "dueDate": "2024-02-01", "knownRansomwareCampaignUse": "Unknown"},
+            {"cveID": "CVE-2024-2", "vendorProject": "Acme", "product": "Gadget", "vulnerabilityName": "Acme Gadget Flaw", "dateAdded": "2024-01-02",
+             "shortDescription": "Only the catalog knows it.", "requiredAction": "a", "dueDate": "2024-02-02", "knownRansomwareCampaignUse": "Unknown"}]}"#
+            .to_vec();
+        let server = Server::start(move |_| Answer::ok(catalog.clone()));
+        let db = Database::open_in_memory().unwrap();
+        let mut known = Cve::new("CVE-2024-1".into());
+        known.description = Some("What the NVD says.".into());
+        assert_eq!(db.upsert_cve(&known).unwrap(), Stored::Created);
+
+        let source = CisaKevSource::at(&server.url);
+        let opts = SyncOptions::new(0).ignore_freshness(true).force_full();
+        let first = source.sync(&db, &opts).unwrap();
+        assert_eq!((first.added, first.updated, first.same), (1, 1, 0));
+        let stored = db.get_cve("CVE-2024-1").unwrap().unwrap();
+        assert!(stored.kev_known_exploited);
+        assert_eq!(stored.description.as_deref(), Some("What the NVD says."));
+        // Being exploited is news; the description did not move
+        let news: Vec<String> =
+            db.list_cve_changes("CVE-2024-1").unwrap().iter().flat_map(|c| c.events.iter().map(|e| e.kind().to_string())).collect();
+        assert!(news.iter().any(|kind| kind == "kev") && !news.iter().any(|kind| kind == "description"), "{news:?}");
+        assert_eq!(
+            db.get_cve("CVE-2024-2").unwrap().unwrap().description.as_deref(),
+            Some("Acme Gadget Flaw - Only the catalog knows it.")
+        );
+
+        // The same catalog read again changes nothing, and the NVD rewriting its CVE is not undone
+        let again = source.sync(&db, &opts).unwrap();
+        assert_eq!((again.added, again.updated, again.same), (0, 0, 2));
     }
 }
 

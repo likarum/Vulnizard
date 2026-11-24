@@ -69,11 +69,11 @@ pub fn run_sources(
                 tracing::info!("sync {source}: unchanged upstream, nothing downloaded");
             }
             Some(Ok(r)) => {
-                db.complete_sync(sync_id, r.added, r.updated)?;
-                tracing::info!("sync {}: {} added, {} updated, {} errors", source, r.added, r.updated, r.errors);
+                db.complete_sync(sync_id, r.added, r.updated, r.same)?;
+                tracing::info!("sync {}: {} added, {} updated, {} unchanged, {} errors", source, r.added, r.updated, r.same, r.errors);
             }
             Some(Err(e)) => {
-                db.fail_sync(sync_id, &e.to_string())?;
+                db.fail_sync(sync_id, &format!("{e:#}"))?;
                 tracing::warn!("sync {} failed: {}", source, e);
             }
             None => {

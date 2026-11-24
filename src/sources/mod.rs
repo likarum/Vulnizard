@@ -162,8 +162,12 @@ pub trait CveSource {
 /// Résultat d'une synchronisation
 #[derive(Debug, Default)]
 pub struct SyncResult {
+    /// CVEs the run made known
     pub added: i64,
+    /// CVEs already known of which something changed
     pub updated: i64,
+    /// CVEs read again and found as they were
+    pub same: i64,
     pub errors: i64,
     /// Nothing was fetched: the source ran recently enough (or has nothing to
     /// do). Such a run is not a synchronization and must not count as one.
@@ -184,9 +188,19 @@ impl SyncResult {
 }
 
 impl SyncResult {
-    #[allow(dead_code)]
+    /// Every CVE the run read
     pub fn total(&self) -> i64 {
-        self.added + self.updated
+        self.added + self.updated + self.same
+    }
+
+    /// Counts what storing one CVE did
+    pub fn count(&mut self, stored: Result<crate::db::Stored>) {
+        match stored {
+            Ok(crate::db::Stored::Created) => self.added += 1,
+            Ok(crate::db::Stored::Changed) => self.updated += 1,
+            Ok(crate::db::Stored::Same) => self.same += 1,
+            Err(_) => self.errors += 1,
+        }
     }
 }
 
@@ -420,12 +434,15 @@ mod tests {
 
         let second = source.sync(&db, &opts).unwrap();
         assert!(second.unchanged, "{name}: an unchanged file is not read again");
-        assert_eq!(second.added + second.updated, 0, "{name}");
+        assert_eq!(second.total(), 0, "{name}");
         assert!(server.asked().last().unwrap().header("if-none-match").is_some(), "{name}: the fingerprint is sent back");
 
         version.store(2, Ordering::SeqCst);
         let third = source.sync(&db, &opts).unwrap();
-        assert!(!third.unchanged && third.added + third.updated > 0, "{name}: a changed file is read");
+        assert!(!third.unchanged && third.total() > 0, "{name}: a changed file is read");
+        // The same CVEs, read a second time, are neither added nor updated
+        assert!(first.added > 0 && first.same == 0, "{name}: the first run creates");
+        assert_eq!((third.added, third.updated, third.same), (0, 0, first.total()), "{name}: nothing of them changed");
         assert_eq!(server.asked().len(), 3, "{name}: one request per run");
     }
 

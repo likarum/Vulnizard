@@ -343,6 +343,8 @@ pub struct SyncRun {
     pub status: String,
     pub added: i64,
     pub updated: i64,
+    /// CVEs read again and found as they were
+    pub same: i64,
     pub error: Option<String>,
 }
 
@@ -1374,7 +1376,7 @@ impl Database {
 
     pub fn recent_syncs(&self, limit: i64) -> Result<Vec<SyncRun>> {
         let mut stmt = self.conn().prepare(
-            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message
+            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message, cves_unchanged
              FROM sync_history ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -1386,6 +1388,7 @@ impl Database {
                     status: r.get(3)?,
                     added: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     updated: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    same: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
                     error: r.get(6)?,
                 })
             })?

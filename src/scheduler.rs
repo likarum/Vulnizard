@@ -214,7 +214,7 @@ mod tests {
     fn sync_summary_reports_each_source_and_failures() {
         let db = Database::open_in_memory().unwrap();
         let ok = db.start_sync("nvd").unwrap();
-        db.complete_sync(ok, 3, 1).unwrap();
+        db.complete_sync(ok, 3, 1, 0).unwrap();
         let ko = db.start_sync("epss").unwrap();
         db.fail_sync(ko, "timeout").unwrap();
         let (title, body) = sync_summary(&db, &["nvd".into()], "2000-01-01 00:00:00");
@@ -234,7 +234,7 @@ mod tests {
         // would never be due again.
         let db = Database::open_in_memory().unwrap();
         let real = db.start_sync("epss").unwrap();
-        db.complete_sync(real, 10, 0).unwrap();
+        db.complete_sync(real, 10, 0, 0).unwrap();
         db.conn().execute("UPDATE sync_history SET started_at = datetime('now', '-13 hours'), completed_at = datetime('now', '-13 hours')", []).unwrap();
         let last = db.get_last_sync("epss").unwrap().unwrap();
         let skipped = db.start_sync("epss").unwrap();
@@ -248,7 +248,7 @@ mod tests {
         // The date kept is when the run started: what changed upstream while it ran is not lost
         let long = db.start_sync("nvd").unwrap();
         db.conn().execute("UPDATE sync_history SET started_at = datetime('now', '-2 hours') WHERE id = ?1", [long]).unwrap();
-        db.complete_sync(long, 1, 0).unwrap();
+        db.complete_sync(long, 1, 0, 0).unwrap();
         let age = (chrono::Utc::now() - db.get_last_sync("nvd").unwrap().unwrap()).num_minutes();
         assert!((115..=125).contains(&age), "{age}");
 
@@ -263,7 +263,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let admin = db.create_account("root", None, "h", true).unwrap();
         let run = db.start_sync("nvd").unwrap();
-        db.complete_sync(run, 2, 0).unwrap();
+        db.complete_sync(run, 2, 0, 0).unwrap();
         notify_sync_finished(&db, &Config::default(), admin, &["nvd".into()], "2000-01-01 00:00:00");
         let inbox = db.push_take(admin).unwrap();
         assert_eq!(inbox.len(), 1);

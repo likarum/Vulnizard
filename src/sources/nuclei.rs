@@ -109,13 +109,9 @@ impl CveSource for NucleiSource {
         for (cve_id, path) in templates {
             let mut cve = Cve::new(cve_id);
             cve.nuclei_template = Some(path);
-            match db.upsert_cve(&cve) {
-                Ok(true) => result.added += 1,
-                Ok(false) => result.updated += 1,
-                Err(_) => result.errors += 1,
-            }
+            result.count(db.upsert_cve(&cve));
         }
-        println!("  {} CVEs with a Nuclei template ✓", result.added + result.updated);
+        println!("  {} CVEs with a Nuclei template ✓", result.total());
         mark.remember(db)?;
         Ok(result)
     }

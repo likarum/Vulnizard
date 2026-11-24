@@ -602,7 +602,7 @@ impl Database {
     /// Latest run of each source
     pub fn last_sync_runs(&self) -> Result<Vec<crate::db::SyncRun>> {
         let mut stmt = self.conn().prepare(
-            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message
+            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message, cves_unchanged
              FROM sync_history WHERE id IN (SELECT MAX(id) FROM sync_history GROUP BY source)",
         )?;
         let rows = stmt
@@ -614,6 +614,7 @@ impl Database {
                     status: r.get(3)?,
                     added: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     updated: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    same: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
                     error: r.get(6)?,
                 })
             })?

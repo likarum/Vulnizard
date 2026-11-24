@@ -66,7 +66,7 @@ impl VulnrichmentSource {
             println!("  Updating {} CVEs with SSVC data...", ssvc_updates.len());
             let updated = db.batch_update_ssvc(&ssvc_updates)?;
             result.updated = updated;
-            result.added = ssvc_updates.len() as i64 - updated;
+            result.same = ssvc_updates.len() as i64 - updated;
         }
 
         // Get and store latest commit SHA
@@ -220,6 +220,7 @@ impl VulnrichmentSource {
             println!("  Updating {} CVEs with SSVC data...", ssvc_updates.len());
             let updated = db.batch_update_ssvc(&ssvc_updates)?;
             result.updated = updated;
+            result.same = ssvc_updates.len() as i64 - updated;
         }
 
         // Update metadata

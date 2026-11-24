@@ -399,11 +399,7 @@ impl NvdSource {
                         Window::Modified => db.upsert_cve(&cve),
                         Window::Published => db.upsert_cve_untracked(&cve),
                     };
-                    match stored {
-                        Ok(true) => result.added += 1,
-                        Ok(false) => result.updated += 1,
-                        Err(_) => result.errors += 1,
-                    }
+                    result.count(stored);
                 }
                 start_index += RESULTS_PER_PAGE;
                 pb.set_position(start_index.min(total) as u64);

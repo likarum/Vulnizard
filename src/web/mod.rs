@@ -1662,7 +1662,7 @@ mod tests {
         let db = Database::connect(&app.db_path).unwrap();
         let id = db.start_sync("nvd").unwrap();
         assert!(app.get("/cve", Some(&user)).await.body.contains("sync in progress"));
-        db.complete_sync(id, 1, 0).unwrap();
+        db.complete_sync(id, 1, 0, 0).unwrap();
         assert!(app.get("/cve", Some(&user)).await.body.contains("Database synced just now"));
 
         assert_eq!(app.post("/sync", Some(&user), "back=%2Fproduct").await.status, StatusCode::FORBIDDEN);
@@ -1729,7 +1729,7 @@ mod tests {
         // Once running, then finished, the state follows and the page stops refreshing
         let run = db.start_sync("osv").unwrap();
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("synchronizing…"));
-        db.complete_sync(run, 3, 0).unwrap();
+        db.complete_sync(run, 3, 0, 0).unwrap();
         // Asking again for a source that is waiting or just ran is not repeated, and says why
         let again = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
         let flash = again.cookie.expect("explanation");

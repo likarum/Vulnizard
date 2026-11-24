@@ -600,21 +600,21 @@ fn cmd_sync(db: &Database, config: &Config, months: Option<u32>, source: Option<
                 println!("  └─ Unchanged upstream since the last run: nothing downloaded\n");
             }
             Ok(sync_result) => {
-                db.complete_sync(sync_id, sync_result.added, sync_result.updated)?;
+                db.complete_sync(sync_id, sync_result.added, sync_result.updated, sync_result.same)?;
                 if sync_result.errors > 0 {
                     println!(
-                        "  └─ Result: {} added, {} updated, {} errors\n",
-                        sync_result.added, sync_result.updated, sync_result.errors
+                        "  └─ Result: {} added, {} updated, {} unchanged, {} errors\n",
+                        sync_result.added, sync_result.updated, sync_result.same, sync_result.errors
                     );
                 } else {
                     println!(
-                        "  └─ Result: {} added, {} updated ✓\n",
-                        sync_result.added, sync_result.updated
+                        "  └─ Result: {} added, {} updated, {} unchanged ✓\n",
+                        sync_result.added, sync_result.updated, sync_result.same
                     );
                 }
             }
             Err(e) => {
-                db.fail_sync(sync_id, &e.to_string())?;
+                db.fail_sync(sync_id, &format!("{e:#}"))?;
                 println!("  └─ FAILED: {}\n", e);
             }
         }

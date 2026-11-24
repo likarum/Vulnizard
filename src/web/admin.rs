@@ -48,6 +48,7 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                 "status" => Some(views::SortKey::text(&r.status)),
                 "added" => Some(views::SortKey::num(r.added as f64)),
                 "updated" => Some(views::SortKey::num(r.updated as f64)),
+                "unchanged" => Some(views::SortKey::num(r.same as f64)),
                 _ => None,
             },
         );
@@ -93,7 +94,7 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                     thead {
                         tr {
                             (listing.th("source", "Source")) (listing.th("started", "Started (UTC)")) th { "Completed" }
-                            (listing.th("status", "Status")) (listing.th("added", "Added")) (listing.th("updated", "Updated"))
+                            (listing.th("status", "Status")) (listing.th("added", "Added")) (listing.th("updated", "Updated")) (listing.th("unchanged", "Unchanged"))
                             th { "Error" }
                         }
                     }
@@ -106,10 +107,11 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                                 td { (s.status) }
                                 td { (s.added) }
                                 td { (s.updated) }
+                                td { (s.same) }
                                 td { (s.error.as_deref().unwrap_or("")) }
                             }
                         }
-                        @if syncs.is_empty() { tr { td colspan="7" .muted { "No sync yet." } } }
+                        @if syncs.is_empty() { tr { td colspan="8" .muted { "No sync yet." } } }
                     }
                 }
             },
@@ -845,7 +847,7 @@ pub async fn sources(
                                         span.status { span.dot.waiting {} "waiting to start" }
                                     } @else if let Some(r) = run {
                                         @if r.status == "completed" {
-                                            span.status { span.dot {} (r.added) " added, " (r.updated) " updated" }
+                                            span.status { span.dot {} (r.added) " added, " (r.updated) " updated, " (r.same) " unchanged" }
                                         } @else if r.status == "unchanged" {
                                             span.status { span.dot {} "unchanged upstream, nothing downloaded" }
                                         } @else {
