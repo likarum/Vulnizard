@@ -76,6 +76,16 @@ The sources are asked for much less. With the default settings an instance downl
   CVEs of the catalog already stored keep the catalog's wording until the NVD modifies them
   or the history is read again (`sync --source nvd --full`).
 - A failed run now records the cause of the failure, not only "cannot fetch <source>".
+- **The vulnerabilities list was wider than the window** (#90): at 1280 px on "All projects"
+  the page was 1463 px wide and the action buttons were cut. Both lists (to review, decided)
+  now fit any width; long names wrap or are cut with the full text under the pointer.
+- **"Used by: 0 of 3 projects available to all"** (#87). A destination now says apart who it
+  is offered to and which projects use it, each a link to its notification settings, and
+  says plainly that it sends nothing until a project picks it.
+- **"Send test" on a browser destination failed when no browser was registered** (#86) and
+  sent the user to the settings. The page now offers to enable notifications on the spot,
+  then sends the test. The message only remains when the permission is refused or the
+  browser cannot receive notifications.
 
 ## 0.2.5
 
