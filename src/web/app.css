@@ -366,7 +366,7 @@ table.fit col.num { width: 116px; }
 table.fit col.flag { width: 96px; }
 table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
-table.fit col.due { width: 108px; }
+table.fit col.due { width: 124px; }
 table.fit col.name { width: 20%; }
 table.fit col.app { width: 16%; }
 table.fit col.who { width: 13%; }
@@ -412,6 +412,12 @@ table.dense col.project { width: 10%; }
   font-size: 13px; font-weight: 400; line-height: 1.4; white-space: normal; text-align: left; overflow-wrap: break-word;
 }
 .info:hover .bubble, .info:focus .bubble, .info:focus-within .bubble { display: block; }
+/* Between a phone and a small laptop, a list of all projects has no room left
+   for a text beside the project and the deadline: the page of the CVE has it */
+@media (min-width: 761px) and (max-width: 899px) {
+  table.triage:has(col.project) col.desc { visibility: collapse; }
+}
+
 /* Between the phone layout and a wide window: tighter cells, a date over its
    time, the buttons one under the other, a project name kept on one line and
    a description cut after four lines (their title attribute holds the whole
@@ -429,7 +435,6 @@ table.dense col.project { width: 10%; }
   table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
   table.fit col.due { width: 88px; }
-  table.triage col.cvss { width: 96px; }
   table.fit col.name { width: 19%; }
   table.fit col.app { width: 15%; }
   table.fit col.who { width: 12%; }

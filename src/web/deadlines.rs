@@ -13,15 +13,13 @@ use crate::db::{Actor, Database, Org};
 use crate::deadlines::{parse_days, DelayOverride, Delays, FIELDS, MAX_DAYS};
 use crate::rbac::Permission;
 
-/// What the delays mean, said the same way on both pages
+/// What the delays mean, said the same way on both pages (plain text: it also goes in a bubble)
 fn rule() -> Markup {
     html! {
-        p.muted {
-            "An entry of the watchlist is due that many days after its detection, according to the severity its CVE has today. "
-            "A CVE without a score follows the medium delay. A CVE known to be exploited (CISA KEV) follows the exploited delay when it is shorter than the one of its severity. "
-            "Any decision — closed, not applicable, risk accepted — stops the clock: a decided entry is never overdue. "
-            "Reopening an entry or changing the version of its application does not move its deadline."
-        }
+        "An entry of the watchlist is due that many days after its detection, according to the severity its CVE has today. "
+        "A CVE without a score follows the medium delay. A CVE known to be exploited (CISA KEV) follows the exploited delay when it is shorter than the one of its severity. "
+        "Any decision — closed, not applicable, risk accepted — stops the clock: a decided entry is never overdue. "
+        "Reopening an entry or changing the version of its application does not move its deadline."
     }
 }
 
@@ -39,7 +37,7 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                 h1 { "Administration" }
                 (admin_tabs("deadlines"))
                 h2 { "Remediation deadlines" }
-                (rule())
+                p.muted { (rule()) }
                 form.stack.card method="post" action="/admin/deadlines" {
                     @for (field, label) in FIELDS {
                         label {
@@ -99,6 +97,7 @@ pub(super) fn org_section(db: &Database, org: &Org) -> Result<Markup, AppError> 
             }
         }
         @if manage {
+            p.muted { "Replace a delay for the projects of this organization, or leave its field empty to follow the instance; empty them all to follow it entirely." }
             form.stack.card method="post" action={ "/orgs/" (enc(&org.name)) "/deadlines" } {
                 @for (field, label) in FIELDS {
                     label {
@@ -109,7 +108,6 @@ pub(super) fn org_section(db: &Database, org: &Org) -> Result<Markup, AppError> 
                 }
                 button type="submit" { "Save" }
             }
-            p.muted { "Leave a field empty to follow the instance for that value; empty them all to follow it entirely." }
         }
     })
 }
