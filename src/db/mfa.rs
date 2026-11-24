@@ -271,12 +271,11 @@ impl Database {
                 }
             }
         }
-        for key in ["push.vapid_private_key", "setting.nvd_api_key"] {
-            let value: Option<String> = tx.query_row("SELECT value FROM metadata WHERE key = ?1", params![key], |r| r.get(0)).optional()?;
-            if let Some(value) = value.filter(|v| !v.is_empty() && !crate::secrets::is_sealed(v)) {
-                tx.execute("UPDATE metadata SET value = ?1 WHERE key = ?2", params![self.seal(&value), key])?;
-                sealed += 1;
-            }
+        let key = "setting.nvd_api_key";
+        let value: Option<String> = tx.query_row("SELECT value FROM metadata WHERE key = ?1", params![key], |r| r.get(0)).optional()?;
+        if let Some(value) = value.filter(|v| !v.is_empty() && !crate::secrets::is_sealed(v)) {
+            tx.execute("UPDATE metadata SET value = ?1 WHERE key = ?2", params![self.seal(&value), key])?;
+            sealed += 1;
         }
         tx.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '21')", [])?;
         tx.commit()?;

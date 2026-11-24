@@ -554,7 +554,7 @@ impl Database {
             self.migrate_roles()?;
         }
 
-        // Migration v12 -> v13: notification destinations, Web Push
+        // Migration v12 -> v13: notification destinations
         if schema_version < 13 {
             tracing::info!("Upgrading database schema to v13 (notification destinations)");
             self.migrate_destinations()?;
@@ -647,6 +647,12 @@ impl Database {
         if schema_version < 27 {
             tracing::info!("Upgrading database schema to v27 (destinations receive by their scope; the per-project rules are gone)");
             self.migrate_destination_settings()?;
+        }
+
+        // Migration v27 -> v28: browser notifications are removed
+        if schema_version < 28 {
+            tracing::info!("Upgrading database schema to v28 (browser notifications removed)");
+            self.migrate_remove_browser_notifications()?;
         }
 
         // Check if normalized table needs to be populated
@@ -797,6 +803,7 @@ impl Database {
         self.migrate_osv_advisories()?;
         self.migrate_sync_unchanged()?;
         self.migrate_destination_settings()?;
+        self.migrate_remove_browser_notifications()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1725,14 +1732,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 27
+        // Check schema version is 28
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "27");
+        assert_eq!(version, "28");
     }
 
     #[test]

@@ -1,11 +1,8 @@
 //! Notifications in the UI: destinations (where messages go, and what each
 //! one sends), in the project settings for those of the project and in the
-//! administration for all of them; browser notifications (Web Push).
+//! administration for all of them.
 
 use axum::extract::{Form, Path, Query, State};
-use axum::http::header;
-use axum::response::IntoResponse;
-use axum::Json;
 use maud::{html, Markup};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,7 +10,7 @@ use serde_json::{json, Value};
 use super::admin::{admin_tabs, flash_redirect, require_admin, take_flash, with_flash_cleared};
 use super::pages::{load_project, redirect, require, ActionResult, HtmlResult};
 use super::views::{self, enc, layout, product_url, Nav};
-use super::{blocking, AppError, MaybeUser, St, User};
+use super::{blocking, AppError, St, User};
 use crate::changes::EVENT_TYPES;
 use crate::config::Config;
 use crate::db::{Database, Destination, Org, OrgProject, DESTINATION_KINDS};
@@ -55,11 +52,6 @@ fn kind_chips(base: &str, chosen: Option<&str>) -> Markup {
     }
 }
 
-/// Browsers one account may register for notifications. Each one is a URL
-/// the server calls when notifying: few, so that slow ones cannot hold the
-/// notification run for long.
-const MAX_PUSH_SUBSCRIPTIONS: usize = 5;
-
 /// Fields of a destination of the given type. The SMTP server is only asked
 /// for an email destination.
 fn destination_fields(kind: &str, default_smtp: bool) -> Markup {
@@ -79,12 +71,6 @@ fn destination_fields(kind: &str, default_smtp: bool) -> Markup {
                     label { "Username (optional)" input type="text" name="smtp_username" maxlength="200" autocomplete="off"; }
                     label { "Password" input type="password" name="smtp_password" maxlength="500" autocomplete="new-password"; }
                     label { "Sender" input type="text" name="smtp_from" maxlength="200" placeholder="Vulnizard <vulnizard@example.org>"; }
-                }
-            }
-            "browser" => {
-                p.muted {
-                    "Sends a notification to the browsers of the people who can read the project. "
-                    "Each person enables it for their own browser in " a href="/settings" { "Settings" } "."
                 }
             }
             "ntfy" => { label { "Topic URL" input type="url" name="url" maxlength="500" required placeholder="https://ntfy.example.org/vulnizard"; } }
@@ -150,7 +136,6 @@ fn destination_config(config: &Config, kind: &str, fields: &Fields, instance_smt
             notify::check_webhook_url(config, url).map_err(|e| AppError::Bad(format!("Invalid target URL: {e}")))?;
             Ok(json!({ "url": url }))
         }
-        "browser" => Ok(json!({})),
         _ => Err(bad("Invalid destination type.")),
     }
 }
@@ -295,7 +280,7 @@ pub fn project_section(
                                 div.muted {
                                     (kind_label(&d.kind))
                                     // A webhook URL or a topic is a secret of whoever manages the destination
-                                    @if manage && d.kind != "browser" { " · " (views::truncate(&d.target(), 60)) }
+                                    @if manage { " · " (views::truncate(&d.target(), 60)) }
                                 }
                                 @if manage { input type="hidden" name="id" value=(d.id); }
                             }
@@ -447,9 +432,6 @@ pub struct AdminQuery {
     tab: Option<String>,
     /// Type of the destination being added
     new: Option<String>,
-    /// Browser destination whose test found no browser to send to: the page
-    /// offers to enable notifications on this one
-    enable: Option<i64>,
 }
 
 /// Choices of the "belongs to" selector of an instance or organization destination
@@ -491,7 +473,7 @@ pub async fn admin(
         let config = st.effective_config(&db)?;
         let tab = q.tab.as_deref().unwrap_or("projects");
         let body = match tab {
-            "destinations" => admin_destinations(&db, &config, &user, q.new.as_deref(), q.enable)?,
+            "destinations" => admin_destinations(&db, &config, q.new.as_deref())?,
             "delivery" => html! {
                 form.stack.card method="post" action="/admin/notifications/delivery" {
                     label.check {
@@ -592,17 +574,10 @@ fn admin_rules(db: &Database) -> Result<Markup, AppError> {
 fn admin_destinations(
     db: &Database,
     config: &Config,
-    user: &crate::db::Account,
     new_kind: Option<&str>,
-    enable: Option<i64>,
 ) -> Result<Markup, AppError> {
     let mut all = db.list_all_destinations()?;
     let total = all.len();
-    // Only while it is still true: once a browser is registered the test is simply sent
-    let enable = match enable.and_then(|id| all.iter().find(|d| d.id == id && d.kind == "browser")) {
-        Some(destination) if db.list_push_subscriptions(user.id)?.is_empty() => Some(push_test_offer(destination)),
-        _ => None,
-    };
     let listing = views::Listing::from_page("owner", false);
     listing.apply(
         &mut all,
@@ -620,10 +595,8 @@ fn admin_destinations(
         p.muted {
             "Every destination. What it belongs to decides what it receives, by itself: a destination of the instance gets the notifications of every project, "
             "one of an organization those of its projects, one of a project those of that project. "
-            "The gear opens what it sends: event types, minimum CVSS, enabled or not. "
-            "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
+            "The gear opens what it sends: event types, minimum CVSS, enabled or not."
         }
-        @if let Some(offer) = enable { (offer) }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
         div.scroll {
             table.list.fit.dense {
@@ -687,33 +660,6 @@ fn admin_destinations(
             }
         }
     })
-}
-
-/// Shown when a test through a browser destination found none of the
-/// administrator's browsers registered: a button enables notifications on
-/// this browser (push.js: permission, registration) and then sends the test.
-/// Without JavaScript, or where the browser cannot receive notifications, the
-/// button stays hidden and the text points to the Settings page.
-fn push_test_offer(destination: &Destination) -> Markup {
-    html! {
-        div.card.notice id="push-test" {
-            p {
-                strong { "Test through “" (destination.name) "”: none of your browsers is registered." }
-                " Browser notifications reach each person on the browsers they enabled, and a test goes to yours."
-            }
-            p data-fallback {
-                "Enable notifications for this browser first, in "
-                a href="/settings" { "Settings → Browser notifications" }
-                ", then send the test again."
-            }
-            p data-status hidden {}
-            form method="post" action={ "/admin/notifications/destinations/" (destination.id) } {
-                input type="hidden" name="action" value="test";
-                button type="button" data-enable hidden { "Enable notifications on this browser and send the test" }
-            }
-        }
-        script src="/static/push.js" defer {}
-    }
 }
 
 pub async fn admin_destination_create(State(st): St, User(user): User, Form(fields): Form<Fields>) -> ActionResult {
@@ -807,27 +753,8 @@ pub async fn admin_destination_action(
             }
             "test" => {
                 let config = st.effective_config(&db)?;
-                let outcome = if destination.kind == "browser" {
-                    // Browsers are addressed per person: the test goes to those of whoever asks
-                    let registered = db.list_push_subscriptions(user.id)?.len();
-                    if registered == 0 {
-                        // Nowhere to send it yet: not a failure, the page offers to enable this browser
-                        return Ok(redirect(format!("{back}&enable={id}")));
-                    }
-                    crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
-                        |reached| match reached {
-                            0 => Err(anyhow::anyhow!(
-                                "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
-                            )),
-                            n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
-                        },
-                    )
-                } else {
-                    notify::send_system(&config, &destination, "Test", "Test message sent from the Vulnizard administration.")
-                        .map(|()| "sent".to_string())
-                };
-                match outcome {
-                    Ok(detail) => flash_redirect(&st, back, &format!("Test through “{}”: {detail}.", destination.name)),
+                match notify::send_system(&config, &destination, "Test", "Test message sent from the Vulnizard administration.") {
+                    Ok(()) => flash_redirect(&st, back, &format!("Test through “{}”: sent.", destination.name)),
                     Err(e) => flash_redirect(&st, back, &format!("Test through “{}” failed: {e}", destination.name)),
                 }
             }
@@ -874,109 +801,10 @@ pub async fn admin_project_test(
         let name = item.notification.name.clone();
         let back = "/admin/notifications";
         let config = st.effective_config(&db)?;
-        let dispatch = notify::test_dispatch(item.notification, project, &item.org, &item.project);
-        Ok(match notify::send(&config, &db, &dispatch) {
+        let dispatch = notify::test_dispatch(item.notification, &item.org, &item.project);
+        Ok(match notify::send(&config, &dispatch) {
             Ok(()) => flash_redirect(&st, back, &format!("Test sent through “{name}”.")),
             Err(e) => flash_redirect(&st, back, &format!("Test through “{name}” failed: {e}")),
         })
     })
-}
-
-// ==========================================
-// Browser notifications (Web Push)
-// ==========================================
-
-/// Part of the user's Settings page
-pub fn settings_section(db: &Database, user: &crate::db::Account) -> Result<Markup, AppError> {
-    let browsers = db.list_push_subscriptions(user.id)?;
-    Ok(html! {
-        h2 { "Browser notifications" }
-        div.card id="push-box" {
-            p data-status { "Checking this browser…" }
-            div.row {
-                button type="button" data-enable hidden { "Enable on this browser" }
-                button.secondary type="button" data-disable hidden { "Disable on this browser" }
-            }
-            p.muted {
-                "You are notified here by the projects that send to “browser notifications”, and when a synchronization you started is over. "
-                "The message only wakes your browser, which then asks Vulnizard for the content: nothing about your vulnerabilities goes through the browser vendor's push service. "
-                "Requires HTTPS (or localhost)."
-            }
-            @if !browsers.is_empty() {
-                p.muted { (browsers.len()) " browser(s) enabled for your account:" }
-                ul.plain {
-                    @for (_, label) in &browsers { li.muted { (label.as_deref().unwrap_or("unnamed browser")) } }
-                }
-            }
-        }
-        script src="/static/push.js" defer {}
-    })
-}
-
-/// Public key the browser needs to subscribe
-pub async fn push_key(State(st): St, User(_): User) -> Result<Json<Value>, AppError> {
-    blocking(|| Ok(Json(json!({ "key": crate::push::public_key(&st.db()?)? }))))
-}
-
-#[derive(Deserialize)]
-pub struct SubscriptionBody {
-    endpoint: String,
-    #[serde(default)]
-    label: String,
-}
-
-pub async fn push_subscribe(State(st): St, User(user): User, Json(body): Json<SubscriptionBody>) -> Result<Json<Value>, AppError> {
-    blocking(|| {
-        // The endpoint comes from the browser: only a public https push service is accepted
-        crate::push::check_endpoint(&st.config, &body.endpoint)
-            .map_err(|_| AppError::Bad("Invalid push endpoint.".into()))?;
-        let label: String = body.label.chars().filter(|c| !c.is_control()).take(80).collect();
-        let db = st.db()?;
-        if db.list_push_subscriptions(user.id)?.len() >= MAX_PUSH_SUBSCRIPTIONS {
-            return Err(AppError::Bad("Too many browsers registered.".into()));
-        }
-        db.add_push_subscription(user.id, &body.endpoint, Some(&label).filter(|l| !l.is_empty()).map(|l| l.as_str()))?;
-        Ok(Json(json!({ "ok": true })))
-    })
-}
-
-pub async fn push_unsubscribe(State(st): St, User(user): User, Json(body): Json<SubscriptionBody>) -> Result<Json<Value>, AppError> {
-    blocking(|| {
-        st.db()?.remove_push_subscription(user.id, &body.endpoint)?;
-        Ok(Json(json!({ "ok": true })))
-    })
-}
-
-/// Messages waiting for the signed-in user; read (and removed) by the service
-/// worker when a push wakes it. Without a session nothing answers (the worker
-/// then shows its generic message).
-pub async fn push_inbox(State(st): St, headers: axum::http::HeaderMap, MaybeUser(user): MaybeUser) -> Result<axum::response::Response, AppError> {
-    let Some(user) = user else {
-        return Ok((axum::http::StatusCode::UNAUTHORIZED, [(header::CACHE_CONTROL, "no-store")], Json(json!({ "error": "sign in" }))).into_response());
-    };
-    // Reading empties the inbox: another site must not be able to trigger it
-    let cross_site = headers
-        .get("sec-fetch-site")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|site| site != "same-origin");
-    let items = if cross_site {
-        Vec::new()
-    } else {
-        blocking(|| st.db()?.push_take(user.id).map_err(AppError::from))?
-    };
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(items)).into_response())
-}
-
-pub async fn push_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
-    super::pages::asset(&headers, "text/javascript; charset=utf-8", include_str!("push.js"))
-}
-
-pub async fn service_worker() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("sw.js"),
-    )
 }

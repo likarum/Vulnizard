@@ -12,7 +12,6 @@ mod versions;
 mod mcp;
 mod models;
 mod notify;
-mod push;
 mod rbac;
 mod scheduler;
 mod settings;

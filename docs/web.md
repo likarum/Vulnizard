@@ -47,7 +47,7 @@ database was last synchronized (administrators can start a sync from there):
     date field. A past state is marked as such, with a link back to today
   - *Audit*: who decided what, when and why — accepted risks first
   - *Settings* (per project): the project's own notification **destinations** (email with its own
-    SMTP server, ntfy, Slack, webhook, browser) in one table: a row per destination, a checkbox
+    SMTP server, ntfy, Slack, webhook) in one table: a row per destination, a checkbox
     per event type, a minimum CVSS, saved together. A new destination starts with every event
     checked; one with no event checked sends nothing. Destinations of the organization or of the
     instance also receive the project's notifications: they are managed by their administrators
@@ -67,9 +67,9 @@ database was last synchronized (administrators can start a sync from there):
   `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
 Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin
-files: browser notifications (Web Push), passkeys, filters that apply while typing, and the
+files: passkeys, filters that apply while typing, and the
 color theme. Every list can be sorted (click a column header, click again to reverse) and
-filtered with its search box; everything works without JavaScript except notifications, passkeys
+filtered with its search box; everything works without JavaScript except passkeys
 and the choice of a theme.
 
 The header has a menu of **color themes** (Classic, Forest, Plum, Sand, Dracula, Nord, Noctis, High contrast) and a

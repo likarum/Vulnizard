@@ -137,15 +137,15 @@ fn run_cycle(db_path: &Path, base: &Config, order: Option<SyncOrder>, queue: &Sy
                 Err(e) => tracing::warn!("inventory '{}' failed: {e:#}", source.name),
             }
         }
-        // A sync started by someone tells them (and the instance destinations) when it is over
-        if let Some(user_id) = order.by {
-            notify_sync_finished(&db, &config, user_id, &sources, &began);
+        // A sync started by someone tells the instance destinations when it is over
+        if order.by.is_some() {
+            notify_sync_finished(&db, &config, &sources, &began);
         }
     }
     match db.process_changes() {
         Ok(dispatches) => {
             for d in &dispatches {
-                match notify::send(&config, &db, d) {
+                match notify::send(&config, d) {
                     Ok(()) => tracing::info!(
                         "notification '{}' sent ({}/{}, {} changes)",
                         d.notification.name,
@@ -192,12 +192,8 @@ fn sync_summary(db: &Database, sources: &[String], since: &str) -> (String, Stri
     (title.to_string(), lines.join("\n"))
 }
 
-fn notify_sync_finished(db: &Database, config: &Config, user_id: i64, sources: &[String], since: &str) {
+fn notify_sync_finished(db: &Database, config: &Config, sources: &[String], since: &str) {
     let (title, body) = sync_summary(db, sources, since);
-    // The browsers of whoever asked for it
-    if let Err(e) = crate::push::deliver(db, config, user_id, &title, &body, "/admin/sources") {
-        tracing::warn!("scheduler: browser notification failed: {e:#}");
-    }
     // Enabled instance destinations that want instance events
     for destination in db.list_system_destinations().unwrap_or_default() {
         if let Err(e) = notify::send_system(config, &destination, &title, &body) {
@@ -256,17 +252,5 @@ mod tests {
         assert!(opts.may_skip_if_fresh());
         assert!(!opts.clone().ignore_freshness(true).may_skip_if_fresh());
         assert!(!opts.force_full().may_skip_if_fresh());
-    }
-
-    #[test]
-    fn a_manual_sync_reaches_the_requester_inbox() {
-        let db = Database::open_in_memory().unwrap();
-        let admin = db.create_account("root", None, "h", true).unwrap();
-        let run = db.start_sync("nvd").unwrap();
-        db.complete_sync(run, 2, 0, 0).unwrap();
-        notify_sync_finished(&db, &Config::default(), admin, &["nvd".into()], "2000-01-01 00:00:00");
-        let inbox = db.push_take(admin).unwrap();
-        assert_eq!(inbox.len(), 1);
-        assert_eq!((inbox[0].title.as_str(), inbox[0].url.as_str()), ("Synchronization finished", "/admin/sources"));
     }
 }

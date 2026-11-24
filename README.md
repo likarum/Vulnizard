@@ -32,7 +32,7 @@ It is also meant for AI assistants: the same data and the same rights through MC
 - **Applications** you run, with their version: the CVEs affecting that version are listed
 - **Triage**: close, accept the risk with a justification, or mark not applicable
 - **Subscriptions** to vendors and products, with daily reports of what changed
-- **Notifications** by email, ntfy, Slack, webhook or browser, per project, filtered by event and CVSS
+- **Notifications** by email, ntfy, Slack or webhook, per project, filtered by event and CVSS
 - **History and audit**: charts over time, state at any past date, who decided what and why
 - **CVE database** to browse: search, vendors, products, weaknesses, change history, personal tags
 - **Sources**: NVD, CISA KEV, EPSS, CISA Vulnrichment (SSVC), OSV, Exploit-DB, Metasploit, Nuclei templates —

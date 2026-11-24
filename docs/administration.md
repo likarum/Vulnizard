@@ -16,9 +16,7 @@ configuration file and apply without restart.
   projects, one of a **project** those of that project. No project has to pick it. The **gear** of
   a destination opens what it sends: the event types (all checked on a new destination), a minimum
   CVSS (none by default), enabled or not, and for a destination of the instance the instance
-  events (a manual synchronization finished). Whoever starts a manual sync is told when
-  it ends. **Browser notifications** use Web Push: enable them per browser in *Settings*
-  (requires HTTPS, or localhost)
+  events (a manual synchronization finished)
 - **MCP**: turn on the MCP endpoint of the server, choose whether assistants may modify data, and see
   the list of tools
 - **Users** and **Single sign-on**: see below

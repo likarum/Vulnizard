@@ -1,8 +1,8 @@
 //! Secrets at rest. The database holds values that must be read back in
 //! clear to be used (second-factor seeds, SMTP passwords, SSO client secrets,
-//! tokens of Git sources, webhook URLs, the Web Push signing key). They are
-//! stored encrypted with a key kept in a file next to the database, so that
-//! a copy of the database alone (a backup, a dump) does not reveal them.
+//! tokens of Git sources, webhook URLs). They are stored encrypted with a
+//! key kept in a file next to the database, so that a copy of the database
+//! alone (a backup, a dump) does not reveal them.
 //!
 //! This does not protect against someone who reads both files: the key must
 //! be readable by the server. Keep the key file out of database backups, or
