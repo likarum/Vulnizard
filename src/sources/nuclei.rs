@@ -81,10 +81,6 @@ impl NucleiSource {
 }
 
 impl CveSource for NucleiSource {
-    fn name(&self) -> &'static str {
-        "nuclei"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         // Templates are added a few times a week
         if opts.may_skip_if_fresh() {

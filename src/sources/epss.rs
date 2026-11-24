@@ -79,10 +79,6 @@ impl EpssSource {
 }
 
 impl CveSource for EpssSource {
-    fn name(&self) -> &'static str {
-        "epss"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         use chrono::Utc;
         use indicatif::{ProgressBar, ProgressStyle};

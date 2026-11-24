@@ -218,13 +218,4 @@ impl Config {
         }
     }
 
-    /// Sauvegarde la config dans un fichier TOML
-    #[allow(dead_code)]
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let content =
-            toml::to_string_pretty(self).with_context(|| "Failed to serialize config")?;
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write config file: {}", path.display()))?;
-        Ok(())
-    }
 }

@@ -41,10 +41,6 @@ impl CisaKevSource {
 }
 
 impl CveSource for CisaKevSource {
-    fn name(&self) -> &'static str {
-        "cisa_kev"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         use chrono::Utc;
         use indicatif::{ProgressBar, ProgressStyle};
@@ -157,18 +153,12 @@ mod tests {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 struct KevCatalog {
-    title: String,
-    catalog_version: String,
-    date_released: String,
-    count: u32,
     vulnerabilities: Vec<KevVulnerability>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 struct KevVulnerability {
     #[serde(rename = "cveID")]
     cve_id: String,
@@ -177,11 +167,4 @@ struct KevVulnerability {
     vulnerability_name: String,
     date_added: String,
     short_description: String,
-    required_action: String,
-    due_date: String,
-    known_ransomware_campaign_use: String,
-    #[serde(default)]
-    notes: Option<String>,
-    #[serde(default)]
-    cwes: Option<Vec<String>>,
 }

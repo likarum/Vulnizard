@@ -151,10 +151,6 @@ impl SyncOptions {
 
 /// Trait commun pour toutes les sources de CVE
 pub trait CveSource {
-    /// Nom de la source
-    #[allow(dead_code)]
-    fn name(&self) -> &'static str;
-
     /// Synchronise les CVE depuis cette source
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult>;
 }

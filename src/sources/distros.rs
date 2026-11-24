@@ -113,10 +113,6 @@ pub fn parse_record(json: &str, family: &str, oldest: u32) -> Vec<DistroAdvisory
 }
 
 impl CveSource for DistrosSource {
-    fn name(&self) -> &'static str {
-        "distros"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         let mut result = SyncResult::default();
         // Only useful once an inventory reports system packages

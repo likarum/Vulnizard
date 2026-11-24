@@ -302,10 +302,6 @@ impl VulnrichmentSource {
 }
 
 impl CveSource for VulnrichmentSource {
-    fn name(&self) -> &'static str {
-        "vulnrichment"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         // Check if sync should be skipped (< 24h since last sync)
         if opts.may_skip_if_fresh() {

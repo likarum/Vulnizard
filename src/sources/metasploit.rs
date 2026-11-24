@@ -72,10 +72,6 @@ impl MetasploitSource {
 }
 
 impl CveSource for MetasploitSource {
-    fn name(&self) -> &'static str {
-        "metasploit"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         use chrono::Utc;
         use indicatif::{ProgressBar, ProgressStyle};
