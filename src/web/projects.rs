@@ -398,7 +398,9 @@ pub struct ProjectMemberForm {
     role: String,
 }
 
-/// Gives a user a role on this project only
+/// A name with a role, for this project only. The name of someone holding a
+/// role on this project — the list shows it — changes that role. Any other
+/// name is invited: the same answer whether an account bears it or not.
 pub async fn project_member_set(
     State(st): St,
     User(user): User,
@@ -410,14 +412,21 @@ pub async fn project_member_set(
         let (org, project) = load_project(&db, &user, &org, &project)?;
         require(&org, Permission::ManageMembers)?;
         let role = crate::rbac::Role::parse(&form.role).ok_or_else(|| AppError::Bad("Unknown role.".into()))?;
-        let account = db
-            .get_credentials_or_sso(form.username.trim())?
-            .ok_or_else(|| AppError::Bad("Unknown user.".into()))?;
-        if !db.may_hold_right(account.id, crate::db::Scope::Project(project.id))? {
+        let name = super::invitations::typed_name(&form.username)?;
+        let scope = crate::db::Scope::Project(project.id);
+        let page = product_url(Some((&org.name, &project.name)), "settings");
+        let member = db
+            .list_project_members(project.id)?
+            .into_iter()
+            .find(|m| m.level == "project" && m.username.eq_ignore_ascii_case(name));
+        let Some(member) = member else {
+            return super::invitations::invite(&db, &user, scope, name, role, page);
+        };
+        if !db.may_hold_right(member.user_id, scope)? {
             return Err(AppError::Bad("This account belongs to another project or organization.".into()));
         }
-        db.set_project_member(project.id, account.id, role)?;
-        Ok(redirect(product_url(Some((&org.name, &project.name)), "settings")))
+        db.set_project_member(project.id, member.user_id, role)?;
+        Ok(redirect(page))
     })
 }
 

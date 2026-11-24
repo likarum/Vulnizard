@@ -17,16 +17,6 @@ use crate::models::{
 // ==========================================
 
 impl Database {
-    /// Create a new user
-    #[allow(dead_code)]
-    pub fn create_user(&self, user: &User) -> Result<i64> {
-        self.conn().execute(
-            "INSERT INTO users (username, email) VALUES (?1, ?2)",
-            params![user.username, user.email],
-        )?;
-        Ok(self.conn().last_insert_rowid())
-    }
-
     /// Get user by username
     pub fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let mut stmt = self.conn().prepare(
@@ -46,55 +36,6 @@ impl Database {
         Ok(user)
     }
 
-    /// Get user by ID
-    #[allow(dead_code)]
-    pub fn get_user(&self, id: i64) -> Result<Option<User>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, username, email, created_at, updated_at FROM users WHERE id = ?1"
-        )?;
-
-        let user = stmt.query_row(params![id], |row| {
-            Ok(User {
-                id: Some(row.get(0)?),
-                username: row.get(1)?,
-                email: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        }).optional()?;
-
-        Ok(user)
-    }
-
-    /// List all users
-    #[allow(dead_code)]
-    pub fn list_users(&self) -> Result<Vec<User>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, username, email, created_at, updated_at FROM users ORDER BY username"
-        )?;
-
-        let users = stmt.query_map([], |row| {
-            Ok(User {
-                id: Some(row.get(0)?),
-                username: row.get(1)?,
-                email: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?.collect::<std::result::Result<Vec<_>, _>>()?;
-
-        Ok(users)
-    }
-
-    /// Delete user by username (cascades to projects, applications, watchlist entries)
-    #[allow(dead_code)]
-    pub fn delete_user(&self, username: &str) -> Result<bool> {
-        let rows = self.conn().execute(
-            "DELETE FROM users WHERE username = ?1",
-            params![username],
-        )?;
-        Ok(rows > 0)
-    }
 }
 
 // ==========================================
@@ -120,27 +61,6 @@ impl Database {
         )?;
 
         let project = stmt.query_row(params![user_id, name], |row| {
-            Ok(Project {
-                id: Some(row.get(0)?),
-                user_id: row.get(1)?,
-                name: row.get(2)?,
-                description: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-            })
-        }).optional()?;
-
-        Ok(project)
-    }
-
-    /// Get project by ID
-    #[allow(dead_code)]
-    pub fn get_project(&self, id: i64) -> Result<Option<Project>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, user_id, name, description, created_at, updated_at FROM projects WHERE id = ?1"
-        )?;
-
-        let project = stmt.query_row(params![id], |row| {
             Ok(Project {
                 id: Some(row.get(0)?),
                 user_id: row.get(1)?,
@@ -288,7 +208,6 @@ impl Database {
     }
 
     /// Get application by ID
-    #[allow(dead_code)]
     pub fn get_application(&self, id: i64) -> Result<Option<Application>> {
         let mut stmt = self.conn().prepare(
             "SELECT id, project_id, name, version, vendor, ecosystem, cpe_pattern, notes, created_at, updated_at, grp, known_cves

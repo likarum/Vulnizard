@@ -93,6 +93,11 @@ pub const SECURITY_EVENTS: &[(&str, &str)] = &[
     ("second_step_locked", "Second step locked after too many wrong answers"),
     ("mfa_reset", "Two-step sign-in reset"),
     ("mfa_requirement", "Two-step sign-in requirement changed"),
+    ("invitation_sent", "Invitation sent"),
+    ("invitation_accepted", "Invitation accepted"),
+    ("invitation_declined", "Invitation declined"),
+    ("invitation_cancelled", "Invitation cancelled"),
+    ("remediation_delays", "Remediation deadlines changed"),
 ];
 
 #[derive(Debug, Clone)]
@@ -439,19 +444,25 @@ impl Database {
         Ok(())
     }
 
-    /// True if the instance requires a second factor of this account (it signs
-    /// in with a password). The requirement of an organization is not counted
-    /// here: it only closes that organization (see the access views).
+    /// True if a second factor is required of this account (it signs in with
+    /// a password): by the instance, or by an organization it was made a
+    /// member of. Without one, such an account can do nothing but set it up.
     pub fn mfa_required(&self, user_id: i64) -> Result<bool> {
-        Ok(self.has_password(user_id)? && self.instance_requires_mfa()?)
+        Ok(self.has_password(user_id)? && (self.instance_requires_mfa()? || !self.orgs_requiring_mfa(user_id)?.is_empty()))
     }
 
-    /// Organizations this account has a role in but cannot open until it sets
-    /// up a second factor
+    /// Organizations this account has a role in and that it has not set up
+    /// the second factor they require for
     pub fn orgs_awaiting_mfa(&self, user_id: i64) -> Result<Vec<String>> {
         if !self.has_password(user_id)? || self.has_second_factor(user_id)? {
             return Ok(Vec::new());
         }
+        self.orgs_requiring_mfa(user_id)
+    }
+
+    /// Organizations that require a second factor, among those this account
+    /// was itself made a member of (the organization or one of its projects)
+    fn orgs_requiring_mfa(&self, user_id: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn().prepare(
             "SELECT DISTINCT o.name FROM organizations o
              WHERE o.require_mfa = 1 AND (
@@ -721,7 +732,7 @@ mod tests {
         let bob = account(&db, "bob");
         assert!(!db.mfa_required(alice).unwrap());
 
-        // An organization requiring it is closed to its members without a factor, and only that
+        // An organization requiring it holds its members without a factor to setting one up
         let org = db.create_org("acme", alice).unwrap();
         let project = db.create_org_project(org, alice, "infra", None).unwrap();
         let other = db.create_org("other", alice).unwrap();
@@ -731,7 +742,9 @@ mod tests {
         assert_eq!(orgs(bob), ["acme", "other"]);
         db.set_org_requires_mfa(org, true).unwrap();
         assert!(db.org_requires_mfa(org).unwrap());
-        assert!(!db.must_enrol_mfa(bob).unwrap() && !db.mfa_required(bob).unwrap());
+        assert!(db.must_enrol_mfa(bob).unwrap() && db.mfa_required(bob).unwrap());
+        // Who is not a member of it is not concerned
+        assert!(!db.mfa_required(account(&db, "carol")).unwrap());
         assert_eq!(orgs(bob), ["other"]);
         assert!(db.get_org("acme", bob).unwrap().is_none());
         assert!(db.project_role(bob, project).unwrap().is_none());
@@ -745,6 +758,7 @@ mod tests {
         assert_eq!(orgs(bob), ["acme", "other"]);
         assert!(db.project_role(bob, project).unwrap().is_some());
         assert!(db.orgs_awaiting_mfa(bob).unwrap().is_empty());
+        assert!(db.mfa_required(bob).unwrap() && !db.must_enrol_mfa(bob).unwrap());
         db.delete_totp(bob).unwrap();
 
         // An account without password signs in elsewhere: its provider handles the second step
@@ -756,6 +770,7 @@ mod tests {
         assert!(db.leave_org("acme", bob).unwrap());
         assert!(!db.leave_org("acme", bob).unwrap());
         assert!(db.orgs_awaiting_mfa(bob).unwrap().is_empty());
+        assert!(!db.mfa_required(bob).unwrap());
         assert!(db.leave_org("other", alice).is_err());
         assert!(!db.leave_org("nope", alice).unwrap());
 

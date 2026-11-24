@@ -122,14 +122,6 @@ impl Cve {
     }
 }
 
-/// Résultat de recherche pour affichage
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct SearchResult {
-    pub cve: Cve,
-    pub relevance: f64,
-}
-
 // ==========================================
 // Watchlist Models
 // ==========================================
@@ -145,16 +137,6 @@ pub struct User {
 }
 
 impl User {
-    #[allow(dead_code)]
-    pub fn new(username: String) -> Self {
-        Self {
-            id: None,
-            username,
-            email: None,
-            created_at: None,
-            updated_at: None,
-        }
-    }
 }
 
 /// Project belonging to a user
@@ -323,21 +305,6 @@ pub struct WatchlistEntry {
 }
 
 impl WatchlistEntry {
-    #[allow(dead_code)]
-    pub fn new(app_id: i64, cve_id: String) -> Self {
-        Self {
-            id: None,
-            app_id,
-            cve_id,
-            status: CveStatus::Untreated,
-            priority: Priority::Medium,
-            assigned_to: None,
-            notes: None,
-            created_at: None,
-            updated_at: None,
-            treated_at: None,
-        }
-    }
 }
 
 /// Extended watchlist entry with context (for display)

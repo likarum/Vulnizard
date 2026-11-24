@@ -731,20 +731,8 @@ impl Database {
             )
             .optional()?;
         let user_id = user_id.ok_or_else(|| anyhow!("Unknown user"))?;
-        let role = Role::parse(role).ok_or_else(|| anyhow!("Unknown role"))?.as_str();
-        tx.execute(
-            "INSERT INTO memberships (organization_id, user_id, role) VALUES (?1, ?2, ?3)
-             ON CONFLICT(organization_id, user_id) DO UPDATE SET role = excluded.role",
-            params![org_id, user_id, role],
-        )?;
-        let owners: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM memberships WHERE organization_id = ?1 AND role = 'owner'",
-            params![org_id],
-            |r| r.get(0),
-        )?;
-        if owners == 0 {
-            return Err(anyhow!("An organization must keep at least one owner"));
-        }
+        let role = Role::parse(role).ok_or_else(|| anyhow!("Unknown role"))?;
+        grant_org_role(&tx, org_id, user_id, role)?;
         tx.commit()?;
         Ok(())
     }
@@ -859,13 +847,15 @@ impl Database {
             .optional()?)
     }
 
-    /// Effective role of the user on the project (instance, organization or project level)
+    /// Effective role of the user on the project (instance, organization or
+    /// project level), executive included: what it allows is asked of the
+    /// role (`Role::allows`), holding one is not reading the project.
     pub fn project_role(&self, user_id: i64, project_id: i64) -> Result<Option<Role>> {
         let role: Option<String> = self
             .conn()
             .query_row(
                 &format!(
-                    "SELECT {role} FROM project_access pa WHERE pa.project_id = ?1 AND pa.user_id = ?2",
+                    "SELECT {role} FROM project_summary_access pa WHERE pa.project_id = ?1 AND pa.user_id = ?2",
                     role = super::roles::role_of("pa.rank")
                 ),
                 params![project_id, user_id],
@@ -874,6 +864,27 @@ impl Database {
             .optional()?;
         Ok(role.as_deref().and_then(Role::parse))
     }
+}
+
+/// Gives (or changes) the role of an account on an organization, inside the
+/// transaction of the caller: refused, for the caller to roll back, when it
+/// would leave the organization without an owner. The one way a member form
+/// or an accepted invitation gives a role.
+pub(super) fn grant_org_role(conn: &rusqlite::Connection, org_id: i64, user_id: i64, role: Role) -> Result<()> {
+    conn.execute(
+        "INSERT INTO memberships (organization_id, user_id, role) VALUES (?1, ?2, ?3)
+         ON CONFLICT(organization_id, user_id) DO UPDATE SET role = excluded.role",
+        params![org_id, user_id, role.as_str()],
+    )?;
+    let owners: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memberships WHERE organization_id = ?1 AND role = 'owner'",
+        params![org_id],
+        |r| r.get(0),
+    )?;
+    if owners == 0 {
+        return Err(anyhow!("An organization must keep at least one owner"));
+    }
+    Ok(())
 }
 
 // ==========================================

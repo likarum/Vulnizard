@@ -3,6 +3,62 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.3.0
+
+### Added
+
+- **Remediation deadlines** (#68). A delay in days per CVSS severity (critical 7, high 30,
+  medium 90, low 180 by default) and one for exploited CVEs (CISA KEV, 14), which wins when
+  it is shorter; a CVE without a score follows the medium delay. Set for the instance in
+  Administration → Deadlines; the owners of an organization may replace any of them for its
+  projects. The clock starts when the entry is detected and any decision (closed, not
+  applicable, accepted risk) stops it. The Vulnerabilities view has a sortable "Due" column
+  and an "Overdue" filter. MCP `list_watchlist` and the new REST
+  `GET /api/organizations/{org}/projects/{project}/watchlist` give `due_at`, `days_left`
+  and `overdue_days`, and can list the overdue entries only. Schema v29, automatic.
+- **Invitations** (#10). Adding a member to an organization or a project by name no longer
+  grants a role at once, and no longer says whether the name exists: it records an
+  invitation, valid 14 days, which the person accepts or declines after signing in (a mark in
+  the header, a section in Settings). An account created after the invitation can never take
+  it. Changing the role of someone already in the list still applies at once, and so do the
+  rights given from Administration → Users. Schema v30, automatic.
+
+- **An "Overdue" view** (#77): the vulnerabilities past their deadline by application
+  (number, average and worst lateness, each row opening the list narrowed to it), by week of
+  detection and of deadline, and their number day by day, to tell a batch that arrived at
+  once from a period without triage. The Vulnerabilities list can be narrowed by application
+  and by severity.
+- **History: open vulnerabilities by severity, day by day** (#69), stacked, with the accepted
+  risks as a separate line; the severity is the one each CVE has today. MCP `get_evolution`
+  gives the same breakdown per day.
+- **An "executive" role** (#79), below viewer: it reads the Overview of what it holds (an
+  organization, a project or the whole instance) and nothing else. Vulnerabilities,
+  applications, history, audit, settings, the CVE database, every other page, API endpoint
+  and MCP tool refuse it; `get_summary` and the summary endpoints are what it may call. It is
+  given where the other roles are. An account that also holds viewer or more somewhere
+  keeps, there, what that role gives. Schema v31, automatic.
+- **Slack: the form gives the way to the webhook address** (#102): a link that opens Slack
+  with the app already described (name, incoming webhooks on), the steps that follow, and
+  the logo as a PNG to upload as the app's icon. Slack takes the name and the icon of a
+  webhook from the app, not from the messages.
+- MCP `get_summary` and REST `GET /api/summary` (and `…/projects/{project}/summary`): the
+  figures of the Overview, without any CVE or application name.
+
+### Changed
+
+- **The Overview shows figures only** (#75): open vulnerabilities and overdue ones, by
+  severity; average and worst lateness of the overdue ones; average time to resolve, by
+  severity, over the last 30, 90 or 365 days. "Resolved" is any decision (closed, not
+  applicable, accepted risk), counted from the detection. Each count opens the list behind
+  it. The charts moved to History, which now follows the day shown; "To review first" and
+  "Latest changes" are gone from the Overview (they are the Vulnerabilities list in its
+  default order, and "Changes on subscribed products" in History).
+- **An organization that requires two-step sign-in holds its members to it.** A member
+  without a second factor used to keep the rest of their account and only lose that
+  organization; they now can do nothing but set one up once signed in, as when the instance
+  requires it. They can no longer leave the organization instead.
+- A KEV or NVD answer that lacks a field Vulnizard does not use is no longer refused (#11).
+
 ## 0.2.6
 
 The sources are asked for much less. With the default settings an instance downloaded about

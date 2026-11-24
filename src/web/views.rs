@@ -12,9 +12,10 @@ pub fn enc(s: &str) -> String {
 }
 
 /// Views of the "products" side, in navigation order: (key, label)
-pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
+pub const PRODUCT_VIEWS: [(&str, &str); 7] = [
     ("overview", "Overview"),
     ("vulnerabilities", "Vulnerabilities"),
+    ("overdue", "Overdue"),
     ("applications", "Applications"),
     ("subscriptions", "Subscriptions"),
     ("history", "History"),
@@ -69,14 +70,22 @@ pub struct PageContext {
     /// Last completed sync, `YYYY-MM-DD HH:MM:SS` UTC
     pub last_sync: Option<String>,
     pub sync_running: bool,
-    /// (organization, project) the user can access
+    /// (organization, project) the user holds a role on, executive included
     pub projects: Vec<(String, String)>,
+    /// Those of `projects` the user is only executive of: their Overview and
+    /// nothing else, so no other view is offered for them
+    pub figures_only: Vec<(String, String)>,
+    /// The account is confined to the Overview (`Database::summary_only`):
+    /// nothing but it, the account settings and signing out is offered
+    pub confined: bool,
     /// Organization the lists of "all projects" are narrowed to. Always one
     /// of those of `projects`: it is checked on every request, and it only
     /// hides rows; it never gives access to anything.
     pub org: Option<String>,
     /// Path and query of the current page (to come back after an action)
     pub path: String,
+    /// Invitations waiting for the answer of the signed-in account
+    pub invitations: usize,
 }
 
 impl PageContext {
@@ -85,6 +94,17 @@ impl PageContext {
         let mut orgs: Vec<&str> = self.projects.iter().map(|(org, _)| org.as_str()).collect();
         orgs.dedup();
         orgs
+    }
+
+    /// Whether the lists of a scope may be opened: the project is read
+    /// (viewer or more), or at the `*` scope one of the projects is. An
+    /// account without any project keeps the views, which invite it to start.
+    pub fn can_list(&self, scope: Option<(&str, &str)>) -> bool {
+        let only_figures = |org: &str, project: &str| self.figures_only.iter().any(|(o, p)| o == org && p == project);
+        match scope {
+            Some((org, project)) => !only_figures(org, project),
+            None => !self.confined && (self.projects.is_empty() || self.projects.iter().any(|(org, project)| !only_figures(org, project))),
+        }
     }
 }
 
@@ -228,19 +248,21 @@ fn project_menu(ctx: &PageContext, scope: Option<(&str, &str)>, view: &str) -> M
             }
             ul {
                 li {
-                    a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] {
+                    a href=(product_url(None, if ctx.can_list(None) { view } else { "overview" })) class=[scope.is_none().then_some("active")] {
                         "All projects" @if let Some(org) = &ctx.org { " of " (org) } " (*)"
                     }
                 }
                 @for (org, project) in listed() {
                     @let current = scope == Some((org.as_str(), project.as_str()));
+                    // A project the account is executive of only has its Overview
+                    @let view = if ctx.can_list(Some((org, project))) { view } else { "overview" };
                     li {
                         a href=(product_url(Some((org, project)), view)) class=[current.then_some("active")] {
                             (project) @if several_orgs { " " span.muted { (org) } }
                         }
                     }
                 }
-                li.sep { a href="/projects" { "Manage projects…" } }
+                @if !ctx.confined { li.sep { a href="/projects" { "Manage projects…" } } }
             }
         }
     }
@@ -303,6 +325,11 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                                 @if u.is_admin {
                                     a href="/admin" class=[(nav == Nav::Admin).then_some("active")] { "Admin" }
                                 }
+                                @if ctx.invitations > 0 {
+                                    a.invited href="/settings#invitations" title="You were invited to an organization or a project: accept or decline in your settings" {
+                                        (ctx.invitations) @if ctx.invitations == 1 { " invitation" } @else { " invitations" }
+                                    }
+                                }
                                 a href="/settings" { (u.username) }
                                 form.inline method="post" action="/logout" {
                                     button.link type="submit" { "Log out" }
@@ -320,18 +347,24 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                                 // shown; from any other page, back to that page
                                 (org_menu(&ctx, &if on_products && !view.is_empty() { product_url(None, view) } else { ctx.path.clone() }))
                                 (project_menu(&ctx, scope, if view.is_empty() { "overview" } else { view }))
+                                // Where the account is executive, the Overview is all there is
+                                @let lists = ctx.can_list(scope);
                                 @for (key, label) in PRODUCT_VIEWS {
-                                    a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }
+                                    @if lists || key == "overview" {
+                                        a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }
+                                    }
                                 }
-                                @if scope.is_some() {
+                                @if scope.is_some() && lists {
                                     a href=(product_url(scope, "settings")) class=[(view == "settings").then_some("active")] { "Settings" }
                                 }
                             }
-                            nav.zone.info {
-                                span.zone-label { "CVE database" }
-                                (info(ExploreTab::Cves, "/cve", "CVEs"))
-                                (info(ExploreTab::Vendors, "/vendors", "Vendors"))
-                                (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                            @if !ctx.confined {
+                                nav.zone.info {
+                                    span.zone-label { "CVE database" }
+                                    (info(ExploreTab::Cves, "/cve", "CVEs"))
+                                    (info(ExploreTab::Vendors, "/vendors", "Vendors"))
+                                    (info(ExploreTab::Weaknesses, "/weaknesses", "Weaknesses"))
+                                }
                             }
                         }
                     }
@@ -748,6 +781,8 @@ pub fn triage_key(item: &TriageItem, column: &str) -> Option<SortKey> {
         "app" => Some(SortKey::text(&item.app_name)),
         "project" => Some(SortKey::text(&item.project)),
         "status" => Some(SortKey::text(&item.status)),
+        // The nearest deadline first, the most overdue before all
+        "due" => Some(SortKey::opt(item.deadline.and_then(|d| d.days_left()).map(|days| days as f64))),
         _ => None,
     }
 }
@@ -774,6 +809,21 @@ pub fn columns(names: &str, show_project: bool) -> Markup {
     }
 }
 
+/// Where an entry to review stands against its remediation deadline: "in 12
+/// days", "today", or a red mark once overdue. The title gives the dates.
+pub fn due_cell(item: &TriageItem) -> Markup {
+    html! {
+        @if let Some(deadline) = item.deadline.filter(|d| d.days_left().is_some()) {
+            @let title = format!("Due {}: {} days after its detection on {}", deadline.due, deadline.delay_days, deadline.detected);
+            @if deadline.is_overdue() {
+                td.due.late { span.tag.late title=(title) { (deadline.label()) } }
+            } @else {
+                td.due title=(title) { (deadline.label()) }
+            }
+        } @else { td.due {} }
+    }
+}
+
 /// Vulnerabilities to review, with the buttons deciding on each
 pub fn triage_table(
     items: &[TriageItem],
@@ -783,12 +833,12 @@ pub fn triage_table(
 ) -> Markup {
     html! {
         table.list.triage.fit {
-            (triage_columns(show_project, "desc"))
+            (triage_columns(show_project, "due desc"))
             thead {
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
                     @if show_project { (th(listing, "project", "Project")) }
-                    th { "Description" } th {}
+                    (th(listing, "due", "Due")) th { "Description" } th {}
                 }
             }
             tbody {
@@ -807,13 +857,14 @@ pub fn triage_table(
                                 a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } title=(item.project) { (item.project) }
                             }
                         }
+                        (due_cell(item))
                         // The title gives the text back where a narrow window cuts it after a few lines
                         td.desc { @if !description.is_empty() { div.clamp title=(truncate(description, 160)) { (truncate(description, 160)) } } }
                         td.right.actions { (actions(item)) }
                     }
                 }
                 @if items.is_empty() {
-                    tr { td colspan=(if show_project { "6" } else { "5" }) .muted { "Nothing to review." } }
+                    tr { td colspan=(if show_project { "7" } else { "6" }) .muted { "Nothing to review." } }
                 }
             }
         }
@@ -861,10 +912,26 @@ mod tests {
             description: Some("A race condition. ".repeat(30)),
             group: "web".into(),
             version_unknown: true,
+            detected_at: "2026-01-01 00:00:00".into(),
+            decided_at: None,
+            deadline: None,
         };
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 2, 5).unwrap();
+        let delays = crate::deadlines::Delays::default();
+        // High and known exploited: 14 days from January 1st, so 21 days late on February 5th
+        let item = TriageItem { deadline: Some(delays.assess(today - chrono::Duration::days(35), None, item.cvss, item.kev, today)), ..item };
         let all = triage_table(std::slice::from_ref(&item), true, None, |_| html! { button { "Close" } }).into_string();
         // The columns are named for the stylesheet, which gives each its width
-        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"due\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        // Overdue entries carry a mark; the dates are in its title
+        assert!(all.contains("<td class=\"due late\"><span class=\"tag late\" title=\"Due 2026-01-15: 14 days after its detection on 2026-01-01\">overdue by 21 days</span></td>"), "{all}");
+        let later = TriageItem { deadline: Some(delays.assess(today - chrono::Duration::days(2), None, item.cvss, false, today)), ..item.clone() };
+        let in_time = triage_table(&[later.clone()], true, None, |_| html! {}).into_string();
+        assert!(in_time.contains("<td class=\"due\" title=\"Due 2026-03-05: 30 days after its detection on 2026-02-03\">in 28 days</td>"), "{in_time}");
+        // The nearest deadline sorts first; a decided entry has none
+        let decided = TriageItem { deadline: Some(delays.assess(today, Some(today), None, false, today)), ..item.clone() };
+        assert_eq!(triage_key(&item, "due").unwrap().compare(&triage_key(&later, "due").unwrap()), std::cmp::Ordering::Less);
+        assert!(triage_table(&[decided], true, None, |_| html! {}).into_string().contains("<td class=\"due\"></td>"));
         // Only the score is kept on one line: names, tags and buttons wrap inside their column
         assert_eq!(all.matches("nowrap").count(), 1, "{all}");
         assert!(all.contains("title=\"customer-facing-payment-platform\">customer-facing-payment-platform</a>"));
@@ -877,16 +944,16 @@ mod tests {
 
         // One project: no project column, in the column group as in the rows
         let one = triage_table(&[item], false, None, |_| html! {}).into_string();
-        assert!(one.contains("<col class=\"app\"><col class=\"desc\">") && !one.contains("class=\"project\""));
+        assert!(one.contains("<col class=\"app\"><col class=\"due\"><col class=\"desc\">") && !one.contains("class=\"project\""));
         let empty = triage_table(&[], false, None, |_| html! {}).into_string();
-        assert!(empty.contains("colspan=\"5\"") && empty.contains("Nothing to review."));
+        assert!(empty.contains("colspan=\"6\"") && empty.contains("Nothing to review."));
         assert!(triage_columns(true, "decision").into_string().contains("<col class=\"project\"><col class=\"decision\"><col class=\"actions\">"));
 
         // The stylesheet fixes the layout, sizes every named column and lets long words break
         let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
         let css = comments.replace_all(STYLESHEET, "").into_owned();
         assert!(css.contains("table.list.fit { table-layout: fixed; }") && css.contains("table.fit td { overflow-wrap: anywhere; }"));
-        for column in ["cve", "cvss", "app", "project", "desc", "decision", "actions"] {
+        for column in ["cve", "cvss", "app", "project", "due", "desc", "decision", "actions"] {
             // The description is the one column left without a width: it takes what remains
             assert_eq!(css.contains(&format!("table.fit col.{column} {{ width:")), column != "desc", "{column}");
         }
@@ -907,7 +974,7 @@ mod tests {
         let css = comments.replace_all(STYLESHEET, "").into_owned();
         // Between the phone layout and a wide window the same columns are tighter
         let narrow = css.split("@media (min-width: 761px) and (max-width: 1199px) {").nth(1).unwrap().split("\n}\n").next().unwrap();
-        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "fig", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
         for column in sized {
             assert!(css.contains(&format!("\ntable.fit col.{column} {{ width:")), "{column}");
             // One button keeps its width: its text has to fit

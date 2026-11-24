@@ -17,6 +17,15 @@ configuration file and apply without restart.
   a destination opens what it sends: the event types (all checked on a new destination), a minimum
   CVSS (none by default), enabled or not, and for a destination of the instance the instance
   events (a manual synchronization finished)
+- **Deadlines**: the remediation delays, in days from the detection of an entry: one per severity
+  (critical 7, high 30, medium 90, low 180 by default) and one for the CVEs known to be exploited
+  (CISA KEV, 14), which applies when it is shorter than the delay of the severity. A CVE without a
+  score follows the medium delay. Each is a whole number of days from 1 to 3650. The **owners of an
+  organization** may replace any of them for its projects, on the page of the organization
+  (*Remediation deadlines*): a field left empty follows the instance, and keeps following it when
+  the instance changes. Deadlines are computed when they are read, from the severity the CVE has
+  then: changing a delay applies at once to every entry still to review. Every change, of the
+  instance or of an organization, is written to the security log with its author
 - **MCP**: turn on the MCP endpoint of the server, choose whether assistants may modify data, and see
   the list of tools
 - **Users** and **Single sign-on**: see below
@@ -27,19 +36,61 @@ configuration file and apply without restart.
   for the rights at once), disable/enable, reset passwords, act on several users at a time. A disabled
   account loses its sessions, API tokens and logins at once; the last enabled administrator cannot be removed.
 - **Rights exist at three levels** — the whole instance, an organization (all its projects) or a single
-  project — with the same three roles; the highest one applies:
+  project — with the same four roles; the highest one applies:
 
-  | Role | Read | Decide on CVEs | Manage applications, subscriptions, notifications, inventory | Manage members, delete |
-  |---|---|---|---|---|
-  | owner | ✓ | ✓ | ✓ | ✓ |
-  | editor | ✓ | ✓ | ✓ | |
-  | viewer | ✓ | | | |
+  | Role | Figures of the Overview | Read | Decide on CVEs | Manage applications, subscriptions, notifications, inventory | Manage members, delete |
+  |---|---|---|---|---|---|
+  | owner | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | editor | ✓ | ✓ | ✓ | ✓ | |
+  | viewer | ✓ | ✓ | | | |
+  | executive | ✓ | | | | |
+
+  **Executive** gives the *Overview* of what it is held on — a project, every project of an
+  organization and "all projects" of it, or the whole instance — and nothing else: the figures
+  without a link to a list, the choice of the period, and the project and organization menus
+  limited to what is held. Vulnerabilities, Overdue, Applications, Subscriptions, History, Audit,
+  the settings of a project, its members, notifications, reports and exports, the pages of an
+  organization and every form are refused, as they are to someone without the right; so is every
+  address of them typed by hand. It is given where the other roles are (*Admin → Users*, the member
+  forms through an invitation, the default role of a sign-on provider, the role of a provisioned
+  group), by who may give viewer there.
+
+  - An account **whose every role is executive** is confined to the Overview: it also loses the
+    *CVE database* (CVEs, vendors, weaknesses), cannot create an organization or a project, and
+    keeps its own *Settings* (password, two-step sign-in, API tokens, invitations) and signing out.
+    The header still says when the database was last synchronized. An administrator is never
+    confined.
+  - An account that is executive in one place and **viewer or more in another** keeps there what
+    that role gives there, and has the CVE database as soon as one role above executive exists. Where
+    it is executive it only has the Overview. At "all projects", the figures count every project it
+    holds a role on; the lists show those it reads.
+  - Through the **REST API**, a confined account gets `/api/summary`,
+    `/api/organizations/{org}/projects/{project}/summary` and `/api/summary/projects` (the names
+    those figures go with); every other endpoint answers 403. Through **MCP** over HTTP it is
+    offered `get_summary` and `list_projects` (names only) — the other tools are not listed to it
+    and answer "Unknown tool".
 
   A right on one project gives nothing outside it: its holder does not see the other projects of the
   organization, and a project owner only manages the members of that project.
 
   The decision history (audit) is append-only and survives the deletion of a project; only deleting
   the whole organization removes it.
+
+- **Members are invited.** Whoever manages the members of an organization or of a project types a
+  name and a role. Nothing is granted then: an **invitation** is recorded, and the page answers the
+  same thing whether an account bears the name or not. The person finds the invitation after signing
+  in (a mark in the page header, and *Settings → Invitations*), sees who invites them, to what and
+  with which role, and **accepts or declines**. Accepting gives exactly that role, at that level.
+  - The organization's page and the project's settings list the pending invitations — the name as
+    typed, the role, who invited, the dates — and cancel them. An invitation that is declined, or
+    that expired, is simply no longer in the list.
+  - An invitation lasts **14 days**; an organization or a project holds at most 50 pending ones.
+    Inviting the same name again replaces the former invitation.
+  - It is void — not shown to the invited person, not acceptable — as soon as whoever made it is
+    disabled or no longer manages the members there, and it goes with its organization or project.
+  - The name of someone already in the list of members changes their role at once, as it shows them
+    anyway.
+  - Administrators, who see every account, still give rights directly in *Admin → Users*.
 
 - **SSO (OpenID Connect)**: any number of providers, added by an administrator in
   *Admin → Single sign-on* — your own identity provider (Pocket-ID, Keycloak, Authentik, Entra ID…)
@@ -73,6 +124,19 @@ a password revokes sessions and API tokens.
 Behind a reverse proxy with HTTPS, set `web.secure_cookies = true` and
 `web.base_url`; the proxy must forward the original `Host` header.
 
+**Usernames and invitations.** Adding a member does not tell whether a username exists: the
+answer, the page and the work done are the same for an account, for a disabled account and for a
+name nobody bears, and the security log records the name as typed, not an account. An invitation
+belongs to the account that bore the name **when it was made**, by its identifier: an account
+created afterwards with that name — by registration, single sign-on or SCIM — never sees it and
+cannot accept it, and an invitation to a name nobody bore is never claimable; it expires. (Usernames
+are never renamed; a SCIM `userName` change does not change the name used here.) An account that
+comes from a project or an organization cannot accept a role outside it, and the invitation
+says nothing of that either. What a manager can still learn: an invitation that is **accepted**
+shows the new member, and one that is **declined** leaves the list before its expiry — both are
+decisions of the invited person. And where self-registration is open, the registration form tells
+anybody whether a name is taken.
+
 ## Passwords
 
 - A new password has **at least 15 characters** (NIST SP 800-63B rev. 4, for a password that may
@@ -103,9 +167,10 @@ It can be **required**:
 - for the **whole instance** (*Admin → Users*): an account without a second factor can do nothing
   but set one up, and cannot remove its last one;
 - for **one organization** (its page, by whoever manages its members and has a second factor
-  themselves): members without a second factor cannot open that organization — web, API and MCP
-  alike — while the rest of their account keeps working. Anyone can leave an organization they
-  were added to.
+  themselves): a member without a second factor is held like under the requirement of the
+  instance: once signed in they can do nothing but set one up, whatever else their account
+  gives. The organization also stays closed to them through the API and the MCP. Accounts
+  that are not members of it are not concerned.
 
 - Passkeys are bound to the host of `web.base_url`: browsers only allow them over HTTPS (or on
   `localhost`), never on a bare IP address. Otherwise only the authenticator app is offered.
@@ -120,7 +185,8 @@ It can be **required**:
   `vulnizard user reset-mfa <username>` on the server.
 - Every change is recorded (*Admin → Security log*, and on the account's own page): factor set up or
   removed, recovery codes generated or used, lock after too many wrong answers, reset, change of
-  the requirement. Entries cannot be changed or removed.
+  the requirement. Invitations are recorded there too: sent, accepted, declined, cancelled.
+  Entries cannot be changed or removed.
 
 ## Logs that show tampering
 

@@ -7,7 +7,9 @@
 mod admin;
 mod api;
 mod charts;
+mod deadlines;
 mod inventory;
+mod invitations;
 mod mfa;
 mod notifications;
 mod oidc;
@@ -375,7 +377,112 @@ impl FromRequestParts<Arc<AppState>> for ApiUser {
             }
             Ok(None)
         })?;
-        account.map(ApiUser).ok_or(ApiError(AppError::Unauthorized))
+        let account = account.ok_or(ApiError(AppError::Unauthorized))?;
+        // An account confined to the Overview reaches its figures and nothing else
+        let route = parts.extensions.get::<axum::extract::MatchedPath>().map(|p| p.as_str().to_string());
+        if !route.as_deref().is_some_and(|route| CONFINED_API.contains(&route)) {
+            let confined = blocking(|| -> Result<bool, AppError> { Ok(state.db()?.summary_only(account.id)?) })?;
+            if confined {
+                return Err(ApiError(AppError::Forbidden));
+            }
+        }
+        Ok(ApiUser(account))
+    }
+}
+
+// ==========================================
+// Accounts confined to the Overview
+// ==========================================
+
+/// Everything the web UI answers to an account confined to the Overview
+/// (`Database::summary_only`: every role it holds is executive): method and
+/// route, as the router names them. Any other route is refused before its
+/// handler runs, whatever it is asked about: the answer tells nothing.
+///
+/// A route added to the router is refused to these accounts until it is
+/// listed here (`an_executive_reaches_its_overview_and_nothing_else`).
+pub(crate) const CONFINED_ROUTES: &[(&str, &str)] = &[
+    // The Overview of what it holds, and the organization filter of its bar
+    ("GET", "/"),
+    ("GET", "/product"),
+    ("GET", "/product/{org}/{project}"),
+    ("POST", "/org-filter"),
+    // Its own settings: password, two-step sign-in, tokens, invitations
+    ("GET", "/settings"),
+    ("POST", "/settings/password"),
+    ("POST", "/settings/tokens"),
+    ("POST", "/settings/tokens/{id}/delete"),
+    ("GET", "/settings/mfa"),
+    ("POST", "/settings/mfa/totp"),
+    ("POST", "/settings/mfa/totp/confirm"),
+    ("POST", "/settings/mfa/totp/delete"),
+    ("POST", "/settings/mfa/recovery"),
+    ("POST", "/settings/mfa/passkeys/start"),
+    ("POST", "/settings/mfa/passkeys/finish"),
+    ("POST", "/settings/mfa/passkeys/{id}/delete"),
+    ("POST", "/invitations/{id}/accept"),
+    ("POST", "/invitations/{id}/decline"),
+    // Signing out, and in: these answer the same to everyone
+    ("POST", "/logout"),
+    ("GET", "/login"),
+    ("POST", "/login"),
+    ("GET", "/register"),
+    ("POST", "/register"),
+    ("GET", "/setup"),
+    ("POST", "/setup"),
+    ("GET", "/auth/oidc/{provider}/login"),
+    ("GET", "/auth/oidc/{provider}/callback"),
+    ("GET", "/login/mfa"),
+    ("POST", "/login/mfa"),
+    ("POST", "/login/mfa/passkey/start"),
+    ("POST", "/login/mfa/passkey/finish"),
+    ("POST", "/login/passkey/start"),
+    ("POST", "/login/passkey/finish"),
+    // Files of the page itself
+    ("GET", "/static/app.css"),
+    ("GET", "/static/logo.svg"),
+    ("GET", "/static/logo.png"),
+    ("GET", "/static/mfa.js"),
+    ("GET", "/static/filter.js"),
+    ("GET", "/static/theme.js"),
+    ("GET", "/favicon.ico"),
+];
+
+/// What the REST API answers to such an account: its figures and the names
+/// of the projects they are about. `/mcp` is in, the tools being narrowed by
+/// the server itself (`mcp::CONFINED_TOOLS`).
+pub(crate) const CONFINED_API: &[&str] = &[
+    "/api/summary",
+    "/api/summary/projects",
+    "/api/organizations/{org}/projects/{project}/summary",
+    "/mcp",
+];
+
+/// Refuses whatever is not in `CONFINED_ROUTES` to an account confined to
+/// the Overview, with the answer a missing permission gets. Each handler and
+/// each query still checks the rights on its own: this is what holds for the
+/// routes that never looked at a project (reference database, organizations
+/// to create, administration).
+async fn confined_gate(State(state): St, req: Request, next: Next) -> Response {
+    let method = if *req.method() == Method::HEAD { "GET" } else { req.method().as_str() };
+    let open = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|route| CONFINED_ROUTES.contains(&(method, route.as_str())));
+    if open {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let confined = blocking(|| -> Result<bool, AppError> {
+        match session_account(&parts, &state)? {
+            Some(account) => Ok(state.db()?.summary_only(account.id)?),
+            None => Ok(false),
+        }
+    });
+    match confined {
+        Ok(false) => next.run(Request::from_parts(parts, body)).await,
+        Ok(true) => AppError::Forbidden.into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -425,19 +532,34 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
         let account = lookup_session(&parts, &state)?;
         let db = state.db()?;
         let (last_sync, sync_running) = db.sync_status()?;
-        let projects: Vec<(String, String)> = match &account {
-            Some(a) => db.list_user_projects(a.id)?.into_iter().map(|p| (p.org, p.name)).collect(),
+        // The menus name what the account holds a role on, executive included
+        let held = match &account {
+            Some(a) => db.held_projects(a.id)?,
             None => Vec::new(),
         };
+        let figures_only: Vec<(String, String)> =
+            held.iter().filter(|p| !p.can_view()).map(|p| (p.org.clone(), p.name.clone())).collect();
+        let projects: Vec<(String, String)> = held.into_iter().map(|p| (p.org, p.name)).collect();
+        let confined = match &account {
+            Some(a) => db.summary_only(a.id)?,
+            None => false,
+        };
         let org = chosen_org(&parts, &projects);
+        let invitations = match &account {
+            Some(a) => db.received_invitations(a.id)?.len(),
+            None => 0,
+        };
         Ok((
             account,
             views::PageContext {
                 last_sync,
                 sync_running,
                 projects,
+                figures_only,
+                confined,
                 org,
                 path,
+                invitations,
             },
         ))
     });
@@ -562,6 +684,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/orgs/{org}/delete", post(pages::org_delete))
         .route("/orgs/{org}/members", post(pages::member_add))
         .route("/orgs/{org}/members/{user_id}/delete", post(pages::member_remove))
+        .route("/orgs/{org}/invitations/{id}/cancel", post(invitations::org_cancel))
+        .route("/orgs/{org}/projects/{project}/invitations/{id}/cancel", post(invitations::project_cancel))
+        .route("/invitations/{id}/accept", post(invitations::accept))
+        .route("/invitations/{id}/decline", post(invitations::decline))
         .route("/orgs/{org}/projects", post(projects::project_create))
         .route("/orgs/{org}/projects/{project}", get(project_redirect))
         .route("/orgs/{org}/projects/{project}/delete", post(projects::project_delete))
@@ -665,6 +791,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/admin/notifications/{id}", post(notifications::admin_project_test))
         .route("/admin/mcp", get(admin::mcp).post(admin::mcp_save))
+        .route("/admin/deadlines", get(deadlines::admin).post(deadlines::admin_save))
+        .route("/orgs/{org}/deadlines", post(deadlines::org_save))
         .route("/admin/sso", get(admin::sso).post(admin::sso_save))
         .route("/admin/sso/scim/tokens", post(admin::scim_token_create))
         .route("/admin/sso/scim/tokens/{id}/delete", post(admin::scim_token_delete))
@@ -676,8 +804,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/sso/{slug}", post(admin::sso_action))
         .route("/static/app.css", get(pages::stylesheet))
         .route("/static/logo.svg", get(pages::logo))
+        .route("/static/logo.png", get(pages::logo_png))
         .route("/favicon.ico", get(pages::logo))
         .fallback(|| async { AppError::NotFound })
+        .layer(middleware::from_fn_with_state(state.clone(), confined_gate))
         .layer(middleware::from_fn_with_state(state.clone(), mfa::gate))
         .layer(middleware::from_fn_with_state(state.clone(), page_context))
         .layer(middleware::from_fn(csrf_guard));
@@ -694,6 +824,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/organizations", get(api::organizations))
         .route("/organizations/{org}/projects", get(api::projects))
         .route("/organizations/{org}/projects/{project}", get(api::project))
+        .route("/organizations/{org}/projects/{project}/watchlist", get(api::watchlist))
+        .route("/organizations/{org}/projects/{project}/summary", get(api::project_summary))
+        .route("/summary", get(api::summary))
+        .route("/summary/projects", get(api::summary_projects))
         .route("/organizations/{org}/projects/{project}/reports", get(api::reports))
         .route("/organizations/{org}/projects/{project}/reports/{day}", get(api::report))
         .fallback(|| async { ApiError(AppError::NotFound) });
@@ -895,6 +1029,18 @@ mod tests {
             self.state.login_guard.record(&auth::ThrottleKey::second_step(id), true);
         }
 
+        /// Accepts every invitation waiting for an account: what follows a
+        /// name typed in a member form, when the tests are about something else
+        fn accept_invitations(&self, username: &str) {
+            let db = Database::connect(&self.db_path).unwrap();
+            let id = db.get_credentials(username).unwrap().unwrap().0.id;
+            let waiting = db.received_invitations(id).unwrap();
+            assert!(!waiting.is_empty(), "no invitation waiting for {username}");
+            for invitation in waiting {
+                assert!(db.accept_invitation(id, invitation.id).unwrap().is_some());
+            }
+        }
+
         /// The setup code of an instance without accounts
         fn setup_code(&self) -> Option<String> {
             Database::connect(&self.db_path).unwrap().setup_code().unwrap()
@@ -1080,6 +1226,7 @@ mod tests {
                 .post("/orgs/acme/members", Some(&owner), &format!("username={name}&role={role}"))
                 .await;
             assert_eq!(added.status, StatusCode::SEE_OTHER);
+            app.accept_invitations(name);
         }
         // The legacy role name is refused
         let legacy = app.post("/orgs/acme/members", Some(&owner), "username=viewer&role=member").await;
@@ -1110,15 +1257,20 @@ mod tests {
         let entry = db.project_triage(project_id, false).unwrap()[0].entry_id;
         let app_id = db.list_applications(project_id).unwrap()[0].id.unwrap();
 
-        // Everyone sees the entry; the dashboard lists it with actions only for those who can triage
-        for page in ["/product/acme/infra", "/product", "/product?view=vulnerabilities"] {
+        // Everyone sees the entry; the list shows it with actions only for those who can triage
+        for page in ["/product/acme/infra?view=vulnerabilities", "/product?view=vulnerabilities"] {
             let viewer_page = app.get(page, Some(&viewer)).await;
             assert!(viewer_page.body.contains("CVE-2024-4343"), "{page}");
             assert!(!viewer_page.body.contains(&format!("/watchlist/{entry}")), "{page}");
             assert!(app.get(page, Some(&editor)).await.body.contains(&format!("/watchlist/{entry}")), "{page}");
         }
-        // The overview draws its charts without any inline style or script
-        let overview = app.get("/product", Some(&editor)).await.body;
+        // The overview counts it, and names neither the CVE nor a decision to take
+        for page in ["/product/acme/infra", "/product"] {
+            let figures = app.get(page, Some(&editor)).await.body;
+            assert!(figures.contains(&open_figure(page, 1)) && !figures.contains("CVE-2024-4343") && !figures.contains("/watchlist/"), "{page}");
+        }
+        // The history draws its charts without any inline style or script
+        let overview = app.get("/product?view=history", Some(&editor)).await.body;
         assert!(overview.contains("<svg") && overview.contains("stroke-p0"));
         // No inline style or script: the only scripts are the external ones of the theme and of the live filters
         let without_files = overview
@@ -1970,6 +2122,7 @@ mod tests {
             cookies.insert(name, app.register(name).await);
             if !role.is_empty() {
                 app.post("/orgs/acme/members", Some(&admin), &format!("username={name}&role={role}")).await;
+                app.accept_invitations(name);
             }
         }
         let (editor, viewer, stranger) = (&cookies["editor"], &cookies["viewer"], &cookies["stranger"]);
@@ -2212,6 +2365,7 @@ mod tests {
         app.post("/admin/users", Some(&admin), "username=mate&password=a-long-password").await;
         let given = app.post("/orgs/acme/projects/infra/members", Some(&dev), "username=mate&role=viewer").await;
         assert_eq!(given.status, StatusCode::SEE_OTHER);
+        app.accept_invitations("mate");
         let mate_id = db.get_credentials("mate").unwrap().unwrap().0.id;
         let infra = db.find_project("acme", "infra").unwrap().unwrap();
         let web = db.find_project("acme", "web").unwrap().unwrap();
@@ -2339,9 +2493,11 @@ mod tests {
         assert_eq!(app.post(&format!("/admin/users/{user_id}"), Some(&admin), "action=grant_admin").await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post(&assign, Some(&admin), "scope=project%3Aacme%2Finfra&role=viewer").await.status, StatusCode::SEE_OTHER);
         assert_eq!(
+            // An invitation says nothing of the account it names; this one can never be accepted
             app.post("/orgs/acme/projects/web/members", Some(&admin), "username=jane.doe.p2&role=viewer").await.status,
-            StatusCode::BAD_REQUEST
+            StatusCode::SEE_OTHER
         );
+        assert!(db.received_invitations(user_id).unwrap().is_empty());
         assert_eq!(db.project_role(user_id, web).unwrap(), None);
 
         // Filters and pagination
@@ -2451,6 +2607,7 @@ mod tests {
         app.post("/orgs", Some(&admin), "name=acme").await;
         app.post("/projects", Some(&admin), "org=acme&name=infra").await;
         app.post("/orgs/acme/members", Some(&admin), "username=viewer&role=viewer").await;
+        app.accept_invitations("viewer");
         let db = Database::connect(&app.db_path).unwrap();
         let project = db.find_project("acme", "infra").unwrap().unwrap();
         let base = "/orgs/acme/projects/infra/inventory";
@@ -3106,6 +3263,203 @@ mod tests {
         assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), ops).await.status, StatusCode::SEE_OTHER);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn adding_a_member_is_an_invitation_that_tells_nothing_of_the_name() {
+        let app = app(open_registration());
+        let root = app.register("root").await;
+        let bob = app.register("bob").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.register("gone").await;
+        app.post("/orgs", Some(&root), "name=acme").await;
+        app.post("/projects", Some(&root), "org=acme&name=infra").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        let id = |name: &str| db.list_accounts().unwrap().into_iter().find(|a| a.username == name).unwrap().id;
+        let (org, infra) = (db.get_org("acme", id("root")).unwrap().unwrap().id, db.find_project("acme", "infra").unwrap().unwrap());
+        db.set_org_member(org, id("viewer"), crate::rbac::Role::Viewer).unwrap();
+        db.set_disabled(id("gone"), true).unwrap();
+        let (org_form, project_form) = ("/orgs/acme/members", "/orgs/acme/projects/infra/members");
+        let (org_page, project_page) = ("/orgs/acme", "/product/acme/infra?view=settings");
+        let answer = |r: &Reply| (r.status, r.location.clone(), r.body.clone(), r.cookies.clone());
+        let cancel_link = regex::Regex::new(r"/invitations/(\d+)/cancel").unwrap();
+
+        // An account, a name nobody bears and a disabled account: one answer, to the letter,
+        // and a row that only differs by the name typed
+        for (form, page) in [(org_form, org_page), (project_form, project_page)] {
+            let mut answers = Vec::new();
+            for name in ["bob", "ghost", "gone"] {
+                let reply = app.post(form, Some(&root), &format!("username=+{name}+&role=viewer")).await;
+                assert_eq!(reply.status, StatusCode::SEE_OTHER, "{}", reply.body);
+                let shown = app.get(reply.location.as_deref().unwrap(), Some(&root)).await;
+                assert_eq!(shown.status, StatusCode::OK);
+                assert!(shown.body.contains("Invitation recorded.") && shown.body.contains("nothing here tells whether the name is one of an account"));
+                let row = shown.body.split("<tr>").find(|row| row.starts_with(&format!("<td>{name}</td>"))).expect("the row of the name").to_string();
+                let row = cancel_link.replace(row.split("</tr>").next().unwrap(), "/invitations/N/cancel").replace(name, "NAME");
+                assert!(row.contains("<td data-label=\"Invited by\">root</td>") && row.contains(">Cancel</button>"), "{row}");
+                answers.push((answer(&reply), row));
+            }
+            let location = answers[0].0.1.clone().unwrap();
+            assert!(location.starts_with(page) && location.ends_with("notice=invited#invitations"), "{location}");
+            assert!(answers.iter().all(|a| *a == answers[0]), "{form}");
+            // The words only show after an invitation, and the list is sized like every other
+            let plain = app.get(page, Some(&root)).await.body;
+            assert!(!plain.contains("Invitation recorded.") && plain.contains("Pending invitations"));
+            assert!(plain.contains("<table class=\"list fit\"><colgroup><col><col class=\"kind\"><col class=\"who\"><col class=\"day\"><col class=\"day\"><col class=\"act\"></colgroup>"));
+        }
+        // A name that could not be a username is refused on its spelling, a role that is none on its name
+        for name in ["bob%40example.org", "a+b", ""] {
+            assert_eq!(app.post(org_form, Some(&root), &format!("username={name}&role=viewer")).await.status, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(app.post(project_form, Some(&root), "username=bob&role=admin").await.status, StatusCode::BAD_REQUEST);
+
+        // Nothing is granted
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), None);
+        assert!(db.list_members(org).unwrap().iter().all(|m| m.username != "bob"));
+
+        // Managing members is what gives the form, the list and the cancellation
+        let pending = db.pending_invitations(crate::db::Scope::Organization(org)).unwrap();
+        let on_project = db.pending_invitations(crate::db::Scope::Project(infra)).unwrap();
+        let (ghost_org, ghost_project) = (pending[1].id, on_project[1].id);
+        assert_eq!((pending[1].name.as_str(), on_project[1].name.as_str()), ("ghost", "ghost"));
+        for (who, refused) in [(&viewer, StatusCode::FORBIDDEN), (&stranger, StatusCode::NOT_FOUND)] {
+            assert_eq!(app.post(org_form, Some(who), "username=bob&role=viewer").await.status, refused);
+            assert_eq!(app.post(project_form, Some(who), "username=bob&role=viewer").await.status, refused);
+            assert_eq!(app.post(&format!("/orgs/acme/invitations/{ghost_org}/cancel"), Some(who), "").await.status, refused);
+            assert_eq!(app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"), Some(who), "").await.status, refused);
+        }
+        for page in [org_page, project_page] {
+            let seen = app.get(page, Some(&viewer)).await;
+            assert_eq!(seen.status, StatusCode::OK);
+            assert!(!seen.body.contains("Pending invitations") && !seen.body.contains("ghost") && !seen.body.contains("/invitations/"), "{page}");
+        }
+        assert_eq!(db.pending_invitations(crate::db::Scope::Organization(org)).unwrap().len(), 3);
+
+        // Without a session: the sign-in page; from another site: refused
+        for path in [
+            "/invitations/1/accept".to_string(), "/invitations/1/decline".to_string(),
+            format!("/orgs/acme/invitations/{ghost_org}/cancel"), format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"),
+            org_form.to_string(), project_form.to_string(),
+        ] {
+            assert_eq!(app.post(&path, None, "username=bob&role=viewer").await.location.as_deref(), Some("/login"), "{path}");
+            for session in [None, Some(root.as_str()), Some(bob.as_str())] {
+                let mut foreign = HttpRequest::post(path.as_str())
+                    .header(header::HOST, "localhost")
+                    .header(header::ORIGIN, "http://elsewhere.example")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                if let Some(cookie) = session {
+                    foreign = foreign.header(header::COOKIE, cookie);
+                }
+                assert_eq!(app.send(foreign.body(Body::from("username=bob&role=owner")).unwrap()).await.status, StatusCode::FORBIDDEN, "{path}");
+            }
+        }
+        assert_eq!(db.pending_invitations(crate::db::Scope::Organization(org)).unwrap().len(), 3);
+
+        // The invited account is told in the header of every page, and answers in its settings
+        let home = app.get("/projects", Some(&bob)).await.body;
+        assert!(home.contains("<a class=\"invited\" href=\"/settings#invitations\"") && home.contains(">2 invitations</a>"));
+        let settings = app.get("/settings", Some(&bob)).await.body;
+        assert!(settings.contains("<table class=\"list fit\"><colgroup><col><col class=\"kind\"><col class=\"who\"><col class=\"day\"><col class=\"actions\"></colgroup>"));
+        assert!(settings.contains("<td>organization acme</td>") && settings.contains("<td>project acme / infra</td>"));
+        assert!(settings.contains("<td data-label=\"Invited by\">root</td>") && settings.contains("<td data-label=\"Role\">viewer</td>"));
+        let mine = db.received_invitations(id("bob")).unwrap();
+        let (to_org, to_project) = (mine[0].id, mine[1].id);
+        for other in [&root, &viewer, &stranger] {
+            let page = app.get("/settings", Some(other)).await.body;
+            assert!(!page.contains("class=\"invited\"") && !page.contains("id=\"invitations\"") && !page.contains("/accept"));
+        }
+
+        // An account created afterwards with an invited name neither sees the invitation nor takes it,
+        // and an invitation of someone else answers like one that does not exist
+        let ghost = app.register("ghost").await;
+        let page = app.get("/settings", Some(&ghost)).await.body;
+        assert!(!page.contains("class=\"invited\"") && !page.contains("id=\"invitations\"") && !page.contains("acme"));
+        let unknown = app.post("/invitations/99999/accept", Some(&ghost), "").await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        for (who, invitation) in [(&ghost, ghost_org), (&ghost, ghost_project), (&ghost, to_org), (&stranger, to_project), (&root, to_org)] {
+            for action in ["accept", "decline"] {
+                let reply = app.post(&format!("/invitations/{invitation}/{action}"), Some(who), "").await;
+                assert_eq!(answer(&reply), answer(&unknown), "{invitation} {action}");
+            }
+        }
+        assert_eq!(app.get(org_page, Some(&ghost)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.project_role(id("ghost"), infra).unwrap(), None);
+        assert_eq!(db.received_invitations(id("bob")).unwrap().len(), 2);
+
+        // Declining removes the invitation; accepting gives exactly the role offered, where it was offered
+        let declined = app.post(&format!("/invitations/{to_org}/decline"), Some(&bob), "").await;
+        assert_eq!((declined.status, declined.location.as_deref()), (StatusCode::SEE_OTHER, Some("/settings")));
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>bob</td>"));
+        let accepted = app.post(&format!("/invitations/{to_project}/accept"), Some(&bob), "").await;
+        assert_eq!((accepted.status, accepted.location.as_deref()), (StatusCode::SEE_OTHER, Some("/product/acme/infra")));
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), Some(crate::rbac::Role::Viewer));
+        assert_eq!(app.get("/product/acme/infra", Some(&bob)).await.status, StatusCode::OK);
+        assert_eq!(app.get(org_page, Some(&bob)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get("/projects", Some(&bob)).await.body.contains("class=\"invited\""));
+        assert_eq!(answer(&app.post(&format!("/invitations/{to_project}/accept"), Some(&bob), "").await), answer(&unknown));
+        // Now a member the list shows: its name changes its role at once, as before
+        let changed = app.post(project_form, Some(&root), "username=Bob&role=editor").await;
+        assert_eq!(changed.location.as_deref(), Some(project_page));
+        assert_eq!(db.project_role(id("bob"), infra).unwrap(), Some(crate::rbac::Role::Editor));
+
+        // Cancelling: at the level the invitation was made, by who manages its members
+        assert_eq!(app.post(&format!("/orgs/acme/invitations/{ghost_project}/cancel"), Some(&root), "").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_org}/cancel"), Some(&root), "").await.status, StatusCode::NOT_FOUND);
+        let cancelled = app.post(&format!("/orgs/acme/invitations/{ghost_org}/cancel"), Some(&root), "").await;
+        assert_eq!((cancelled.status, cancelled.location.as_deref()), (StatusCode::SEE_OTHER, Some("/orgs/acme#invitations")));
+        let cancelled = app.post(&format!("/orgs/acme/projects/infra/invitations/{ghost_project}/cancel"), Some(&root), "").await;
+        assert_eq!(cancelled.location.as_deref(), Some("/product/acme/infra?view=settings#invitations"));
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>ghost</td>"));
+        assert!(!app.get(project_page, Some(&root)).await.body.contains("<td>ghost</td>"));
+
+        // Expiry: after fourteen days the invitation is nowhere, and cannot be accepted
+        app.post(org_form, Some(&root), "username=stranger&role=editor").await;
+        let waiting = db.received_invitations(id("stranger")).unwrap()[0].id;
+        db.conn().execute("UPDATE invitations SET expires_at = datetime('now', '-1 minute') WHERE id = ?1", [waiting]).unwrap();
+        assert!(!app.get("/settings", Some(&stranger)).await.body.contains("id=\"invitations\""));
+        assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>stranger</td>"));
+        assert_eq!(answer(&app.post(&format!("/invitations/{waiting}/accept"), Some(&stranger), "").await), answer(&unknown));
+        assert_eq!(app.get(org_page, Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+
+        // Whoever invited is demoted, or disabled, before the answer: the invitation is void
+        let second = app.register("second").await;
+        db.set_org_member(org, id("second"), crate::rbac::Role::Owner).unwrap();
+        for void in ["demoted", "disabled"] {
+            assert_eq!(app.post(org_form, Some(&second), "username=stranger&role=owner").await.status, StatusCode::SEE_OTHER, "{void}");
+            let waiting = db.received_invitations(id("stranger")).unwrap()[0].id;
+            assert!(app.get("/settings", Some(&stranger)).await.body.contains("<td data-label=\"Invited by\">second</td>"));
+            match void {
+                "demoted" => db.set_org_member(org, id("second"), crate::rbac::Role::Editor).unwrap(),
+                _ => db.set_disabled(id("second"), true).unwrap(),
+            }
+            assert!(!app.get("/settings", Some(&stranger)).await.body.contains("id=\"invitations\""), "{void}");
+            assert!(!app.get(org_page, Some(&root)).await.body.contains("<td>stranger</td>"), "{void}");
+            assert_eq!(answer(&app.post(&format!("/invitations/{waiting}/accept"), Some(&stranger), "").await), answer(&unknown), "{void}");
+            assert_eq!(app.get(org_page, Some(&stranger)).await.status, StatusCode::NOT_FOUND, "{void}");
+            db.set_org_member(org, id("second"), crate::rbac::Role::Owner).unwrap();
+        }
+
+        // The cap: the same refusal for an account and for a name nobody bears
+        let taken = db.pending_invitations(crate::db::Scope::Project(infra)).unwrap().len() as i64;
+        for i in taken..crate::db::MAX_PENDING_INVITATIONS {
+            db.invite(crate::db::Scope::Project(infra), &format!("name-{i}"), crate::rbac::Role::Viewer, &crate::db::Actor::user(id("root"), "root")).unwrap();
+        }
+        let full = app.post(project_form, Some(&root), "username=stranger&role=viewer").await;
+        assert_eq!(full.status, StatusCode::BAD_REQUEST);
+        assert!(full.body.contains("Too many pending invitations"));
+        assert_eq!(answer(&app.post(project_form, Some(&root), "username=nobody-at-all&role=viewer").await), answer(&full));
+        assert!(db.received_invitations(id("stranger")).unwrap().is_empty());
+
+        // Everything is on the security trail; what is recorded when a name is typed names the level, not an account
+        let trail = db.list_security_events(None, 500).unwrap();
+        for event in ["invitation_sent", "invitation_accepted", "invitation_declined", "invitation_cancelled"] {
+            assert!(trail.iter().any(|e| e.event == event), "{event}");
+        }
+        assert!(trail.iter().filter(|e| e.event == "invitation_sent").all(|e| e.username.is_empty()));
+        assert!(trail.iter().any(|e| e.event == "invitation_accepted" && e.username == "bob" && e.detail.as_deref() == Some("project acme / infra as viewer, invited by root")));
+    }
+
     /// Every route declared in the routers, as (path, public). Read from the
     /// source, so that a route added tomorrow is swept without anyone
     /// remembering to list it here.
@@ -3134,7 +3488,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 17] = [
+    const PUBLIC_ROUTES: [&str; 18] = [
         "/login",
         "/register",
         "/setup",
@@ -3148,6 +3502,7 @@ mod tests {
         "/auth/oidc/{provider}/callback",
         "/static/app.css",
         "/static/logo.svg",
+        "/static/logo.png",
         "/static/mfa.js",
         "/static/filter.js",
         "/static/theme.js",
@@ -3504,22 +3859,29 @@ mod tests {
         let carol = app.register("carol").await;
         app.post("/orgs", Some(&root), "name=acme").await;
         app.post("/orgs/acme/members", Some(&root), "username=bob&role=viewer").await;
+        app.accept_invitations("bob");
         assert_eq!(app.post("/orgs/acme/mfa", Some(&bob), "required=1").await.status, StatusCode::FORBIDDEN);
         assert_eq!(app.post("/orgs/acme/mfa", Some(&root), "required=1").await.status, StatusCode::SEE_OTHER);
         assert!(app.get("/orgs/acme", Some(&root)).await.body.contains("checked"));
 
-        // The organization is closed to bob (no factor) and only that: the rest of his account works
-        assert_eq!(app.get("/orgs/acme", Some(&bob)).await.status, StatusCode::NOT_FOUND);
-        assert_eq!(app.get("/product", Some(&bob)).await.status, StatusCode::OK);
-        assert_eq!(app.get("/settings", Some(&bob)).await.status, StatusCode::OK);
-        let listed = app.get("/orgs", Some(&bob)).await.body;
-        assert!(listed.contains("closed: requires two-step sign-in") && listed.contains("/orgs/acme/leave"));
-        assert!(app.get("/settings/mfa", Some(&bob)).await.body.contains("Closed until you set up a second factor"));
+        // Bob, a member without a factor, is held to setting one up: nothing else answers, as when
+        // the instance requires it. Carol, who is not a member, is not concerned.
+        for path in ["/orgs/acme", "/product", "/settings", "/orgs"] {
+            assert_eq!(app.get(path, Some(&bob)).await.location.as_deref(), Some("/settings/mfa"), "{path}");
+        }
+        assert_eq!(app.post("/orgs/acme/leave", Some(&bob), "").await.status, StatusCode::FORBIDDEN);
+        let enrol = app.get("/settings/mfa", Some(&bob)).await.body;
+        assert!(enrol.contains("A second factor is required for your account.") && enrol.contains("Required by: acme."));
+        assert_eq!(app.get("/product", Some(&carol)).await.status, StatusCode::OK);
+        assert!(app.get(&format!("/admin/users/{bob_id}"), Some(&root)).await.body.contains("required, not set up"));
+        // The requirement lifted, the account works again
         // Someone without a factor cannot turn the requirement on (they would lock themselves out)
         app.post("/orgs", Some(&carol), "name=carols").await;
         let refused = app.post("/orgs/carols/mfa", Some(&carol), "required=1").await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
-        // Added without being asked, bob can leave; the only owner cannot
+        assert_eq!(app.post("/orgs/acme/mfa", Some(&root), "").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/product", Some(&bob)).await.status, StatusCode::OK);
+        // Bob can leave; the only owner cannot
         assert_eq!(app.post("/orgs/acme/leave", Some(&bob), "").await.status, StatusCode::SEE_OTHER);
         assert!(!app.get("/orgs", Some(&bob)).await.body.contains("acme"));
         assert_eq!(app.post("/orgs/carols/leave", Some(&carol), "").await.status, StatusCode::BAD_REQUEST);
@@ -3563,8 +3925,8 @@ mod tests {
         assert!(filtered.contains("Two-step sign-in reset") && !filtered.contains("Authenticator app set up"));
         assert!(app.get(&format!("/admin/users/{bob_id}"), Some(&root)).await.body.contains("Two-step sign-in reset"));
         // Saving the same requirement again records nothing
-        app.post("/orgs/acme/mfa", Some(&root), "required=1").await;
-        assert_eq!(db.list_security_events(None, 100).unwrap().iter().filter(|e| e.event == "mfa_requirement").count(), 3);
+        app.post("/orgs/acme/mfa", Some(&root), "").await;
+        assert_eq!(db.list_security_events(None, 100).unwrap().iter().filter(|e| e.event == "mfa_requirement").count(), 4);
         assert_eq!(app.get("/settings", Some(&carol)).await.status, StatusCode::OK);
     }
 
@@ -3589,6 +3951,10 @@ mod tests {
         // Live filters: the script is on every page and the forms carry what it refreshes
         assert!(app.get("/static/filter.js", None).await.body.contains("form.filters"));
         assert!(app.get("/static/logo.svg", None).await.body.starts_with("<svg"));
+        let png = app.router.clone().oneshot(HttpRequest::get("/static/logo.png").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(png.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
+        let png = axum::body::to_bytes(png.into_body(), 1 << 20).await.unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 5_000);
         // The stylesheet has a layout for narrow screens, and pages tell phones not to zoom out
         assert!(app.get("/static/app.css", None).await.body.contains("@media (max-width: 760px)"));
         assert!(app.get("/login", None).await.body.contains("name=\"viewport\" content=\"width=device-width"));
@@ -3730,6 +4096,192 @@ mod tests {
         assert!(!db.has_second_factor(user_id).unwrap());
     }
 
+    // ---------- remediation deadlines ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deadlines_are_set_by_administrators_and_replaced_by_organization_owners() {
+        let app = app(open_registration());
+        let root = app.register("root").await;
+        let owner = app.register("owner").await;
+        let editor = app.register("editor").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        for (name, role) in [("editor", "editor"), ("viewer", "viewer")] {
+            assert_eq!(app.post("/orgs/acme/members", Some(&owner), &format!("username={name}&role={role}")).await.status, StatusCode::SEE_OTHER);
+            app.accept_invitations(name);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let acme = db.get_org("acme", db.get_credentials("owner").unwrap().unwrap().0.id).unwrap().unwrap().id;
+        let all = "critical=3&high=20&medium=60&low=120&kev=10";
+
+        // The instance: administrators only, and nobody without a session
+        for (who, session) in [("owner", &owner), ("viewer", &viewer), ("stranger", &stranger)] {
+            assert_eq!(app.get("/admin/deadlines", Some(session)).await.status, StatusCode::FORBIDDEN, "{who}");
+            assert_eq!(app.post("/admin/deadlines", Some(session), all).await.status, StatusCode::FORBIDDEN, "{who}");
+        }
+        for anonymous in [app.get("/admin/deadlines", None).await, app.post("/admin/deadlines", None, all).await, app.post("/orgs/acme/deadlines", None, "critical=1").await] {
+            assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+            assert!(anonymous.location.as_deref().is_some_and(|to| to.starts_with("/login")), "{:?}", anonymous.location);
+        }
+        assert_eq!(db.instance_delays().unwrap(), crate::deadlines::Delays::default());
+        let page = app.get("/admin/deadlines", Some(&root)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        for (field, days) in [("critical", 7), ("high", 30), ("medium", 90), ("low", 180), ("kev", 14)] {
+            assert!(page.body.contains(&format!("<input type=\"number\" name=\"{field}\" value=\"{days}\" min=\"1\" max=\"3650\" step=\"1\" required>")), "{field}");
+        }
+        assert!(page.body.contains("<a href=\"/admin/deadlines\" class=\"active\">Deadlines</a>"), "{}", page.body);
+        // Whole numbers of days from 1 to 3650, all five of them
+        for bad in ["critical=0&high=20&medium=60&low=120&kev=10", "critical=3&high=3651&medium=60&low=120&kev=10", "critical=3&high=20&medium=soon&low=120&kev=10",
+                    "critical=3&high=20&medium=60&low=-5&kev=10", "critical=3&high=20&medium=60&low=120", "critical=3&high=20&medium=60&low=120&kev=1.5"] {
+            assert_eq!(app.post("/admin/deadlines", Some(&root), bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(db.instance_delays().unwrap(), crate::deadlines::Delays::default());
+        let saved = app.post("/admin/deadlines", Some(&root), all).await;
+        assert_eq!((saved.status, saved.location.as_deref()), (StatusCode::SEE_OTHER, Some("/admin/deadlines")));
+        let instance = crate::deadlines::Delays { critical: 3, high: 20, medium: 60, low: 120, kev: 10 };
+        assert_eq!(db.instance_delays().unwrap(), instance);
+        assert!(app.get("/admin/deadlines", Some(&root)).await.body.contains("name=\"kev\" value=\"10\""));
+
+        // The organization: its owners. A viewer or an editor is refused, and who has no role in it does not
+        // even learn it exists, an administrator of the instance included
+        let replace = "critical=1&high=&medium=&low=&kev=40";
+        for (who, session, expected) in [
+            ("viewer", &viewer, StatusCode::FORBIDDEN), ("editor", &editor, StatusCode::FORBIDDEN),
+            ("stranger", &stranger, StatusCode::NOT_FOUND), ("root", &root, StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(app.post("/orgs/acme/deadlines", Some(session), replace).await.status, expected, "{who}");
+        }
+        assert!(db.org_delay_override(acme).unwrap().is_empty());
+        for bad in ["critical=0", "kev=3651", "high=many"] {
+            assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let saved = app.post("/orgs/acme/deadlines", Some(&owner), replace).await;
+        assert_eq!((saved.status, saved.location.as_deref()), (StatusCode::SEE_OTHER, Some("/orgs/acme#deadlines")));
+        assert_eq!(db.org_delays(acme).unwrap(), crate::deadlines::Delays { critical: 1, kev: 40, ..instance });
+        // The page says what applies and who set it; the form is for the owners only
+        let page = app.get("/orgs/acme", Some(&owner)).await.body;
+        assert!(page.contains("<tr><td>Critical</td><td>1</td><td>this organization</td></tr>"), "{page}");
+        assert!(page.contains("<tr><td>High</td><td>20</td><td><span class=\"muted\">the instance</span></td></tr>"));
+        assert!(page.contains("<input type=\"number\" name=\"critical\" value=\"1\" placeholder=\"inherited: 3\" min=\"1\" max=\"3650\" step=\"1\">"));
+        assert!(page.contains("<input type=\"number\" name=\"high\" placeholder=\"inherited: 20\" min=\"1\" max=\"3650\" step=\"1\">"));
+        let read_only = app.get("/orgs/acme", Some(&viewer)).await.body;
+        assert!(read_only.contains("<td>Exploited (CISA KEV)</td><td>40</td>") && !read_only.contains("/orgs/acme/deadlines"));
+        // Emptied: the organization follows the instance again
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "critical=&high=&medium=&low=&kev=").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(db.org_delays(acme).unwrap(), instance);
+
+        // Every change is in the security log, with its author
+        let logged: Vec<(String, String)> = db.list_security_events(None, 100).unwrap().into_iter()
+            .filter(|e| e.event == "remediation_delays").map(|e| (e.actor, e.detail.unwrap_or_default())).collect();
+        assert_eq!(logged, [
+            ("owner".to_string(), "organization acme: inherited from the instance".to_string()),
+            ("owner".to_string(), "organization acme: critical 1, kev 40".to_string()),
+            ("root".to_string(), "instance: critical 3, high 20, medium 60, low 120, kev 10".to_string()),
+        ]);
+        let log = app.get("/admin/security", Some(&root)).await.body;
+        assert!(log.contains("Remediation deadlines changed") && log.contains("organization acme: critical 1, kev 40"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_view_and_the_api_tell_what_is_due() {
+        let app = app(open_registration());
+        let owner = app.register("owner").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        app.post("/projects", Some(&owner), "org=acme&name=infra").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, cvss) in [("CVE-2024-4343", 9.1), ("CVE-2024-4344", 5.0)] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.description = Some("Widget flaw".into());
+            cve.cvss_v3_score = Some(cvss);
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        assert_eq!(app.post("/orgs/acme/projects/infra/applications", Some(&owner), "name=widget&version=1.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+        // Detected ten days ago: the critical one was due after 7 days, the medium one has 80 left
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-10 days')", []).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let day = |from_detection: i64| (today + chrono::Duration::days(from_detection - 10)).to_string();
+        let late = format!("<td class=\"due late\"><span class=\"tag late\" title=\"Due {}: 7 days after its detection on {}\">overdue by 3 days</span></td>", day(7), day(0));
+        let in_time = format!("<td class=\"due\" title=\"Due {}: 90 days after its detection on {}\">in 80 days</td>", day(90), day(0));
+
+        for scope in ["/product", "/product/acme/infra"] {
+            let view = format!("{scope}?view=vulnerabilities");
+            let page = app.get(&view, Some(&owner)).await.body;
+            assert!(page.contains(&late) && page.contains(&in_time), "{scope}: {page}");
+            assert!(page.contains(&format!("<a href=\"{view}&amp;show=overdue\">Overdue</a>")), "{scope}");
+            // The column sorts: the nearest deadline first, or last
+            assert!(page.contains("sort=due&amp;dir=asc"), "{scope}");
+            let order = |body: &str| body.find("CVE-2024-4343</a>").unwrap() < body.find("CVE-2024-4344</a>").unwrap();
+            assert!(order(&app.get(&format!("{view}&sort=due&dir=asc"), Some(&owner)).await.body), "{scope}");
+            assert!(!order(&app.get(&format!("{view}&sort=due&dir=desc"), Some(&owner)).await.body), "{scope}");
+            // Only what is overdue
+            let overdue = app.get(&format!("{view}&show=overdue"), Some(&owner)).await.body;
+            assert!(overdue.contains(&late) && !overdue.contains("CVE-2024-4344"), "{scope}");
+            assert!(overdue.contains(&format!("<a href=\"{view}&amp;show=overdue\" class=\"active\">Overdue</a>")), "{scope}");
+            // The rule is said under the list, with the delays that apply
+            assert!(page.contains("7 days for a critical CVE, 30 for high, 90 for medium, 180 for low") && page.contains("without a score follows the medium delay"), "{scope}");
+        }
+        // Somebody else's projects are not theirs to list
+        assert!(!app.get("/product?view=vulnerabilities&show=overdue", Some(&stranger)).await.body.contains("CVE-2024-4343"));
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&show=overdue", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+
+        // REST API: the same answer, for who can read the project
+        let token = |session: &str| {
+            let (app, session) = (&app, session.to_string());
+            async move { format!("Bearer {}", tokens_of(&app.post("/settings/tokens", Some(&session), "name=ci&password=a-long-password").await.body).remove(0)) }
+        };
+        let (bearer, other) = (token(&owner).await, token(&stranger).await);
+        let path = "/api/organizations/acme/projects/infra/watchlist";
+        assert_eq!(app.api(path, None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.get(path, Some(&owner)).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.api(path, Some(&other)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api(&format!("{path}?status=bogus"), Some(&bearer)).await.status, StatusCode::BAD_REQUEST);
+        let read = |query: &'static str| {
+            let (app, bearer) = (&app, bearer.clone());
+            async move {
+                let reply = app.api(&format!("{path}{query}"), Some(&bearer)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{query}: {}", reply.body);
+                serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()
+            }
+        };
+        let entry = |list: &serde_json::Value, cve: &str| list["entries"].as_array().unwrap().iter().find(|e| e["entry"]["cve_id"] == cve).cloned().unwrap();
+        let list = read("").await;
+        assert_eq!(list["total"], 2);
+        let critical = entry(&list, "CVE-2024-4343");
+        assert_eq!((critical["due_at"].as_str(), critical["days_left"].as_i64(), critical["overdue_days"].as_i64()), (Some(day(7).as_str()), Some(-3), Some(3)));
+        let medium = entry(&list, "CVE-2024-4344");
+        assert_eq!((medium["due_at"].as_str(), medium["days_left"].as_i64(), medium["overdue_days"].as_i64()), (Some(day(90).as_str()), Some(80), Some(0)));
+        let overdue = read("?overdue=1").await;
+        assert_eq!((overdue["total"].as_i64(), overdue["entries"][0]["entry"]["cve_id"].as_str()), (Some(1), Some("CVE-2024-4343")));
+        assert_eq!(read("?status=untreated&overdue=true").await["total"], 1);
+
+        // The organization gives itself more time: nothing is overdue any more, in the list as in the API
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "critical=30").await.status, StatusCode::SEE_OTHER);
+        let page = app.get("/product?view=vulnerabilities", Some(&owner)).await.body;
+        assert!(page.contains("in 20 days") && !page.contains("tag late"), "{page}");
+        assert!(app.get("/product/acme/infra?view=vulnerabilities", Some(&owner)).await.body.contains("30 days for a critical CVE"));
+        assert_eq!(read("?overdue=1").await["total"], 0);
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "").await.status, StatusCode::SEE_OTHER);
+
+        // Decided: no longer due, never overdue; the API says how long it took
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        let id = db.project_entries_for_cve(project, "CVE-2024-4343").unwrap()[0].0;
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{id}"), Some(&owner), "status=treated").await.status, StatusCode::SEE_OTHER);
+        assert!(!app.get("/product?view=vulnerabilities&show=overdue", Some(&owner)).await.body.contains("CVE-2024-4343"));
+        let closed = entry(&read("?status=treated").await, "CVE-2024-4343");
+        assert_eq!(closed["resolved_in_days"], 10);
+        assert!(closed.get("due_at").is_none() && closed.get("overdue_days").is_none());
+        assert_eq!(read("?overdue=1").await["total"], 0);
+    }
+
     /// The entry of a view in the products menu, as the page writes it
     fn menu_entry(scope: &str, key: &str, label: &str, active: bool) -> String {
         let class = if active { " class=\"active\"" } else { "" };
@@ -3745,7 +4297,7 @@ mod tests {
         // Both lists name their columns for the stylesheet; the project column only exists for all projects
         for (scope, project) in [("/product", "<col class=\"project\">"), ("/product/acme/infra", "")] {
             let review = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
-            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
+            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"due\"><col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
             let decided = app.get(&format!("{scope}?view=vulnerabilities&show=handled"), Some(&alice)).await.body;
             assert!(decided.contains(&format!("<table class=\"list fit decided\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"decision\"><col class=\"actions\"></colgroup>")), "{scope}");
             let columns = if project.is_empty() { 5 } else { 6 };
@@ -3764,11 +4316,13 @@ mod tests {
         let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
         let user = format!("/admin/users/{id}");
         // The widths the stylesheet knows; a column without a name takes what is left
-        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "fig", "flag", "kind", "decision", "due", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
         let table = regex::Regex::new(r#"(?s)<table class="([^"]*)">(.*?)</table>"#).unwrap();
         let column = regex::Regex::new(r#"<col(?: class="([a-z]+)")?>"#).unwrap();
         let pages = [
-            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=applications",
+            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=vulnerabilities&show=overdue",
+            "/product/acme/infra?view=vulnerabilities&show=overdue", "/admin/deadlines", "/product?view=applications",
+            "/product?view=overdue", "/product/acme/infra?view=overdue", "/product/default/default",
             "/product?view=subscriptions", "/product?view=history", "/product?view=audit",
             "/product/acme/infra", "/product/acme/infra?view=vulnerabilities", "/product/acme/infra?view=applications",
             "/product/acme/infra?view=subscriptions", "/product/acme/infra?view=history", "/product/acme/infra?view=audit",
@@ -3805,7 +4359,7 @@ mod tests {
         assert!(lists >= 34 && dense >= 6, "{lists} lists, {dense} dense");
         // No list of the interface is left to the width of its content
         for source in [
-            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
+            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("invitations.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
             include_str!("pages.rs"), include_str!("product.rs"), include_str!("projects.rs"), include_str!("views.rs"),
         ] {
             let plain = regex::Regex::new(r"(?m)^\s*table\.list \{").unwrap();
@@ -3879,11 +4433,11 @@ mod tests {
             assert!(former.body.contains("<title>History · Vulnizard</title>") && former.body.contains("Past state"), "{scope}");
             assert!(former.body.contains(&menu_entry(scope, "history", "History", true)), "{scope}");
         }
-        // The overview leads there, day by day
+        // The overview leads there
         app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0").await;
         let overview = app.get("/product", Some(&alice)).await.body;
-        assert!(overview.contains(&format!("<a href=\"/product?view=history&amp;at={}\">", day(2))));
-        assert!(overview.contains("<a href=\"/product?view=history\">History →</a>"));
+        assert!(overview.contains("Charts, and the state of any past day: <a href=\"/product?view=history\">History</a>."));
+        assert!(overview.contains("What is late and where: <a href=\"/product?view=overdue\">Overdue</a>."));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3902,6 +4456,7 @@ mod tests {
                 .post(&format!("/orgs/acme/projects/{project}/members"), Some(&owner), &format!("username={user}&role={role}"))
                 .await;
             assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+            app.accept_invitations(user);
         }
         let db = Database::connect(&app.db_path).unwrap();
         let id = |project: &str| db.find_project("acme", project).unwrap().unwrap();
@@ -4122,8 +4677,13 @@ mod tests {
         format!("<button type=\"submit\" name=\"org\" value=\"{org}\"{class}>{label}</button>")
     }
 
+    /// The first figure of the overview of a scope, leading to the list it counts
+    fn open_figure(scope: &str, count: i64) -> String {
+        format!("<div class=\"value\"><a href=\"{scope}?view=vulnerabilities\">{count}</a></div><div class=\"label\">open vulnerabilities</div>")
+    }
+
     fn to_review(count: i64) -> String {
-        format!("<div class=\"value\">{count}</div><div class=\"label\">CVEs to review</div>")
+        open_figure("/product", count)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4173,7 +4733,7 @@ mod tests {
         let acme = format!("{root}; vz_org=acme");
 
         // The project menu and every list of "all projects" keep that organization only
-        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+        for view in ["overview", "vulnerabilities", "overdue", "applications", "subscriptions", "history", "audit"] {
             let page = app.get(&format!("/product?view={view}"), Some(&acme)).await;
             assert_eq!(page.status, StatusCode::OK, "{view}");
             let body = page.body;
@@ -4190,12 +4750,23 @@ mod tests {
         assert!(vulnerabilities.contains("CVE-2024-4343"));
         let applications = app.get("/product?view=applications", Some(&acme)).await.body;
         assert!(applications.contains("widget"));
+        // The figures are those of that organization: its critical CVE, not the medium one of the other
+        let by_severity = |body: &str, severity: &str| body.contains(&format!("<a href=\"/product?view=vulnerabilities&amp;severity={severity}\">1</a>"));
         let overview = app.get("/product", Some(&acme)).await.body;
-        assert!(overview.contains(&to_review(1)) && overview.contains("CVE-2024-4343"));
+        assert!(overview.contains(&to_review(1)) && by_severity(&overview, "critical") && !by_severity(&overview, "medium"));
         assert!(app.get("/product?view=history", Some(&acme)).await.body.contains("<div class=\"value\">1</div><div class=\"label\">to review</div>"));
         let globex = format!("{root}; vz_org=globex");
         let other = app.get("/product", Some(&globex)).await.body;
-        assert!(other.contains(&to_review(1)) && other.contains("CVE-2024-4444") && !other.contains("CVE-2024-4343"));
+        assert!(other.contains(&to_review(1)) && by_severity(&other, "medium") && !by_severity(&other, "critical"));
+        let everything = app.get("/product", Some(&root)).await.body;
+        assert!(by_severity(&everything, "critical") && by_severity(&everything, "medium"));
+        // So is what is overdue: the critical one is late once detected ten days ago, the medium one is not
+        Database::connect(&app.db_path).unwrap().conn().execute("UPDATE watchlist_events SET at = datetime('now', '-10 days')", []).unwrap();
+        let late = "<a href=\"/product?view=vulnerabilities&amp;show=overdue\">1</a></div><div class=\"label\">overdue on their remediation deadline</div>";
+        assert!(app.get("/product", Some(&acme)).await.body.contains(late) && app.get("/product", Some(&root)).await.body.contains(late));
+        assert!(app.get("/product", Some(&globex)).await.body.contains("<div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div>"));
+        assert!(app.get("/product?view=overdue", Some(&acme)).await.body.contains("app=widget\">widget</a>"));
+        assert!(app.get("/product?view=overdue", Some(&globex)).await.body.contains("Nothing is overdue."));
 
         // It narrows lists and is no access rule: a project of the other organization still opens
         let direct = app.get("/product/globex/shop?view=applications", Some(&acme)).await;
@@ -4256,7 +4827,7 @@ mod tests {
 
         // A member of one organization has no menu, and learns nothing by asking for another:
         // an organization that exists and one that does not get the very same pages
-        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+        for view in ["overview", "vulnerabilities", "overdue", "applications", "subscriptions", "history", "audit"] {
             let path = format!("/product?view={view}");
             let plain = app.get(&path, Some(&alice)).await.body;
             assert!(!plain.contains("Switch organization") && !plain.contains("/org-filter") && !plain.contains("globex"), "{view}");
@@ -4279,6 +4850,7 @@ mod tests {
         // Who is given a project elsewhere sees two organizations, and gets the menu without being an administrator
         let given = app.post("/orgs/globex/projects/shop/members", Some(&bob), "username=alice&role=viewer").await;
         assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        app.accept_invitations("alice");
         let both = app.get("/product?view=applications", Some(&alice)).await.body;
         assert!(both.contains(&org_entry("acme", "acme", false)) && both.contains(&org_entry("globex", "globex", false)));
         assert!(both.contains("widget") && both.contains("gadget"));
@@ -4305,5 +4877,951 @@ mod tests {
         let foreign = app.send(foreign).await;
         assert_eq!(foreign.status, StatusCode::FORBIDDEN);
         assert!(foreign.cookies.is_empty());
+    }
+
+    /// A project with two applications and six CVEs: five on `widget` detected 20 days ago (one
+    /// of each severity, the medium one known exploited, one without a score), one critical on
+    /// `gadget` detected 10 days ago. Three entries are overdue, by 13, 6 and 3 days; the high
+    /// one was closed today, 20 days after its detection. Returns (owner, viewer, stranger).
+    async fn late_project(app: &TestApp) -> (String, String, String) {
+        let owner = app.register("owner").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        app.post("/projects", Some(&owner), "org=acme&name=infra").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&owner), "username=viewer&role=viewer").await.status, StatusCode::SEE_OTHER);
+        app.accept_invitations("viewer");
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, product, cvss, kev) in [
+            ("CVE-2024-5001", "widget", Some(9.1), false),
+            ("CVE-2024-5002", "widget", Some(8.0), false),
+            ("CVE-2024-5003", "widget", Some(5.0), true),
+            ("CVE-2024-5004", "widget", Some(2.0), false),
+            ("CVE-2024-5005", "widget", None, false),
+            ("CVE-2024-5006", "gadget", Some(9.5), false),
+        ] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.description = Some("Flaw".into());
+            cve.cvss_v3_score = cvss;
+            cve.kev_known_exploited = kev;
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some(product.into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        for form in ["name=widget&version=1.0&vendor=acme", "name=gadget&version=2.0&vendor=acme"] {
+            assert_eq!(app.post("/orgs/acme/projects/infra/applications", Some(&owner), form).await.status, StatusCode::SEE_OTHER);
+        }
+        db.conn()
+            .execute_batch(
+                "UPDATE watchlist_entries SET created_at = datetime('now', '-20 days');
+                 UPDATE watchlist_events SET at = datetime('now', '-20 days');
+                 UPDATE watchlist_entries SET created_at = datetime('now', '-10 days') WHERE cve_id = 'CVE-2024-5006';
+                 UPDATE watchlist_events SET at = datetime('now', '-10 days') WHERE cve_id = 'CVE-2024-5006';",
+            )
+            .unwrap();
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        let high = db.project_entries_for_cve(project, "CVE-2024-5002").unwrap()[0].0;
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{high}"), Some(&owner), "status=treated").await.status, StatusCode::SEE_OTHER);
+        (owner, viewer, stranger)
+    }
+
+    /// The cells following the name of a row of a table of figures, up to the end of the row
+    fn figures_row(body: &str, name: &str) -> String {
+        let after = body.split(&format!("{name}</span></td>")).nth(1).unwrap_or_else(|| panic!("no row {name}"));
+        after.split("</tr>").next().unwrap().to_string()
+    }
+
+    const NO_DATA: &str = "<span class=\"nodata\" title=\"Nothing to measure\">—</span>";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overview_shows_the_executive_figures_and_history_keeps_the_rest() {
+        let app = app(open_registration());
+        let (owner, viewer, stranger) = late_project(&app).await;
+        let db = Database::connect(&app.db_path).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let day = |back: i64| (today - chrono::Duration::days(back)).to_string();
+        let days = |n: &str| format!("{n}<span class=\"unit\"> days</span>");
+
+        for scope in ["/product", "/product/acme/infra"] {
+            for reader in [&owner, &viewer] {
+                let page = app.get(scope, Some(reader)).await;
+                assert_eq!(page.status, StatusCode::OK, "{scope}");
+                let body = page.body;
+                let list = format!("{scope}?view=vulnerabilities");
+                // What is open and what is overdue, each leading to the list that shows it
+                assert!(body.contains(&format!("<div class=\"tile\"><div class=\"value\"><a href=\"{list}\">5</a></div><div class=\"label\">open vulnerabilities</div></div>")), "{scope}: {body}");
+                assert!(body.contains(&format!("<div class=\"tile alert\"><div class=\"value\"><a href=\"{list}&amp;show=overdue\">3</a></div><div class=\"label\">overdue on their remediation deadline</div></div>")), "{scope}");
+                // How late, and how long a decision takes: figures with their unit
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average lateness of the overdue ones</div>", days("7.3"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">worst lateness</div>", days("13"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average time to resolve, last 90 days</div>", days("20"))), "{scope}");
+                // By severity: counts linked to their list, a dash where nothing was decided
+                let narrowed = |count: i64, narrowing: &str| format!("<td><a href=\"{list}{narrowing}\">{count}</a></td>");
+                assert_eq!(
+                    figures_row(&body, "Critical"),
+                    format!("{}{}<td>{NO_DATA}</td><td>0</td>", narrowed(2, "&amp;severity=critical"), narrowed(2, "&amp;show=overdue&amp;severity=critical")),
+                    "{scope}"
+                );
+                assert_eq!(figures_row(&body, "High"), format!("<td>0</td><td>0</td><td>{}</td><td>1</td>", days("20")), "{scope}");
+                assert_eq!(
+                    figures_row(&body, "Medium"),
+                    format!("{}{}<td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=medium"), narrowed(1, "&amp;show=overdue&amp;severity=medium")),
+                    "{scope}"
+                );
+                assert_eq!(figures_row(&body, "Low"), format!("{}<td>0</td><td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=low")), "{scope}");
+                assert_eq!(figures_row(&body, "No score"), format!("{}<td>0</td><td>{NO_DATA}</td><td>0</td>", narrowed(1, "&amp;severity=none")), "{scope}");
+                assert!(
+                    body.contains(&format!(
+                        "<tr class=\"total\"><td>All</td>{}{}<td>{}</td><td>1</td></tr>",
+                        narrowed(5, ""),
+                        narrowed(3, "&amp;show=overdue"),
+                        days("20")
+                    )),
+                    "{scope}"
+                );
+                // The period is said and chosen without a script; so is what "resolved" means
+                assert!(body.contains(&format!("<a href=\"{scope}\" class=\"active\">90 days</a>")) && body.contains(&format!("<a href=\"{scope}?period=30\">30 days</a>")), "{scope}");
+                assert!(body.contains(&format!("<a href=\"{scope}?period=365\">365 days</a>")), "{scope}");
+                assert!(body.contains("<strong>Resolved</strong> means decided: closed, not applicable or risk accepted."), "{scope}");
+                assert!(body.contains(&format!("during the last 90 days ({} to {today}, UTC)", day(89))), "{scope}");
+                // Figures only: no chart, no list of CVEs, no decision button, no change of a subscription
+                for gone in ["class=\"chart", "<polyline", "<circle", "CVE-2024", "/watchlist/", "list triage", "To review first", "Latest changes", "What changed", "widget", "gadget"] {
+                    assert!(!body.contains(gone), "{scope}: {gone}");
+                }
+                assert!(!body.contains("style="), "{scope}");
+            }
+        }
+
+        // What left the overview is in the History view: the charts follow the day shown
+        let history = app.get("/product/acme/infra?view=history", Some(&viewer)).await.body;
+        for kept in ["To review, by severity", "All tracked CVEs, by status", "To review, by application", "class=\"chart donut\"", "Changes on subscribed products"] {
+            assert!(history.contains(kept), "{kept}");
+        }
+        assert!(history.contains("<div class=\"tile alert\"><div class=\"value\">1</div><div class=\"label\">to review and known exploited (KEV)</div></div>"));
+        assert!(history.contains("<div class=\"value\">0</div><div class=\"label\">risks accepted</div>"));
+        let all = app.get("/product?view=history", Some(&viewer)).await.body;
+        for kept in ["To review, by project", "colored by project", "All tracked CVEs, by project and status", "stroke-p0", "Changes on subscribed products"] {
+            assert!(all.contains(kept), "{kept}");
+        }
+        // The new chart: to review per day and per severity, the accepted risks apart, and their figures in a table
+        for scope in ["/product", "/product/acme/infra"] {
+            let now = app.get(&format!("{scope}?view=history"), Some(&owner)).await.body;
+            assert!(now.contains("CVEs to review, by severity") && now.contains("the severity is the one each CVE has today"), "{scope}");
+            assert!(now.contains("aria-label=\"CVEs to review per day, by severity\"") && now.contains("aria-label=\"accepted risks per day\""), "{scope}");
+            for color in ["sev-critical", "sev-medium", "sev-low", "sev-none"] {
+                assert!(now.contains(&format!("rx=\"1.5\" class=\"fill-{color}\"></rect>")), "{scope} {color}");
+            }
+            assert!(now.contains("<h3 class=\"next\">Accepted risks <small>— 0 on "), "{scope}");
+            assert!(now.contains("<details class=\"daily\"><summary>The figures of these two charts, day by day</summary><table class=\"list fit\"><colgroup><col><col class=\"fig\">"), "{scope}");
+            assert!(now.contains("<th>Day</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>No score</th><th>To review</th><th>Accepted</th>"), "{scope}");
+            let row = |back: i64, figures: [i64; 7]| format!("<tr><td>{}</td>{}</tr>", day(back), figures.map(|n| format!("<td>{n}</td>")).concat());
+            // Today, the day before (the high one still open), before the second application, before anything
+            assert!(now.contains(&row(0, [2, 0, 1, 1, 1, 5, 0])), "{scope}");
+            assert!(now.contains(&row(1, [2, 1, 1, 1, 1, 6, 0])), "{scope}");
+            assert!(now.contains(&row(15, [1, 1, 1, 1, 1, 5, 0])), "{scope}");
+            assert!(now.contains(&row(21, [0, 0, 0, 0, 0, 0, 0])), "{scope}");
+            // The window of the view is the one of the chart
+            assert!(!now.contains(&format!("<tr><td>{}</td>", day(30))), "{scope}");
+            assert!(app.get(&format!("{scope}?view=history&days=90"), Some(&owner)).await.body.contains(&row(30, [0, 0, 0, 0, 0, 0, 0])), "{scope}");
+        }
+        // On a past day the charts moved here count that day: five entries, all on the first application
+        let then = app.get(&format!("/product/acme/infra?view=history&at={}", day(15)), Some(&owner)).await.body;
+        assert!(then.contains("aria-label=\"to review: 5\"") && then.contains("<title>widget · to review: 5</title>") && !then.contains("<title>gadget"), "{then}");
+
+        // A decision older than the period no longer counts in it: a dash, never a zero
+        db.conn()
+            .execute_batch(
+                "UPDATE watchlist_events SET at = datetime('now', '-65 days') WHERE cve_id = 'CVE-2024-5002' AND kind = 'detected';
+                 UPDATE watchlist_events SET at = datetime('now', '-45 days') WHERE cve_id = 'CVE-2024-5002' AND kind = 'status';",
+            )
+            .unwrap();
+        let month = app.get("/product/acme/infra?period=30", Some(&owner)).await.body;
+        assert!(month.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">average time to resolve, last 30 days</div>")), "{month}");
+        assert!(month.contains("<a href=\"/product/acme/infra?period=30\" class=\"active\">30 days</a>") && month.contains("<th>Resolved in 30 days</th>"));
+        assert_eq!(figures_row(&month, "High"), format!("<td>0</td><td>0</td><td>{NO_DATA}</td><td>0</td>"));
+        assert!(month.contains("<a href=\"/product/acme/infra?view=vulnerabilities\">5</a>"));
+        for (asked, label) in [("90", "90 days"), ("365", "365 days"), ("7", "90 days"), ("", "90 days")] {
+            let page = app.get(&format!("/product/acme/infra?period={asked}"), Some(&owner)).await.body;
+            assert!(page.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average time to resolve, last {label}</div>", days("20"))), "{asked}");
+        }
+
+        // A project with nothing to count: zeros that lead nowhere, and dashes
+        app.post("/projects", Some(&owner), "org=acme&name=quiet").await;
+        assert_eq!(app.post("/orgs/acme/projects/quiet/applications", Some(&owner), "name=harmless&version=1.0").await.status, StatusCode::SEE_OTHER);
+        let quiet = app.get("/product/acme/quiet", Some(&owner)).await.body;
+        assert!(quiet.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">open vulnerabilities</div></div>"));
+        assert!(quiet.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        for label in ["average lateness of the overdue ones", "worst lateness", "average time to resolve, last 90 days"] {
+            assert!(quiet.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">{label}</div>")), "{label}");
+        }
+        assert_eq!(quiet.matches("class=\"nodata\"").count(), 3 + 6);
+        assert!(!quiet.contains("0<span class=\"unit\">") && !quiet.contains("view=vulnerabilities&amp;"));
+        // Nothing monitored at all: the first steps, as before
+        app.post("/projects", Some(&owner), "org=acme&name=blank").await;
+        assert!(app.get("/product/acme/blank", Some(&owner)).await.body.contains("This project does not monitor anything yet."));
+
+        // Nothing for who is not signed in, nor for who is not a member
+        for path in ["/product", "/product/acme/infra", "/product/acme/infra?period=30", "/product?view=overdue", "/product/acme/infra?view=overdue"] {
+            assert_eq!(app.get(path, None).await.location.as_deref(), Some("/login"), "{path}");
+        }
+        for path in ["/product/acme/infra", "/product/acme/infra?period=30", "/product/acme/infra?view=overdue", "/product/acme/infra?view=history"] {
+            assert_eq!(app.get(path, Some(&stranger)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let outside = app.get("/product", Some(&stranger)).await.body;
+        assert!(outside.contains("Nothing is monitored yet") && !outside.contains("open vulnerabilities"));
+
+        // REST API: the same figures and nothing else, for who can read the project
+        let token = |session: &str| {
+            let (app, session) = (&app, session.to_string());
+            async move { format!("Bearer {}", tokens_of(&app.post("/settings/tokens", Some(&session), "name=ci&password=a-long-password").await.body).remove(0)) }
+        };
+        let (bearer, reader, other) = (token(&owner).await, token(&viewer).await, token(&stranger).await);
+        let one = "/api/organizations/acme/projects/infra/summary";
+        for path in ["/api/summary", one] {
+            assert_eq!(app.api(path, None).await.status, StatusCode::UNAUTHORIZED, "{path}");
+            assert_eq!(app.get(path, Some(&owner)).await.status, StatusCode::UNAUTHORIZED, "{path}");
+            for bad in ["0", "366", "ten", "-1"] {
+                assert_eq!(app.api(&format!("{path}?days={bad}"), Some(&bearer)).await.status, StatusCode::BAD_REQUEST, "{path} {bad}");
+            }
+        }
+        assert_eq!(app.api(one, Some(&other)).await.status, StatusCode::NOT_FOUND);
+        let read = |path: String, bearer: String| {
+            let app = &app;
+            async move {
+                let reply = app.api(&path, Some(&bearer)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{path}: {}", reply.body);
+                // Figures only: no CVE, no application, no project
+                for leaked in ["CVE-", "widget", "gadget", "infra", "acme"] {
+                    assert!(!reply.body.contains(leaked), "{path}: {leaked}");
+                }
+                serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()
+            }
+        };
+        let expected = serde_json::json!({
+            "as_of": today.to_string(),
+            "open": { "total": 5, "critical": 2, "high": 0, "medium": 1, "low": 1, "none": 1 },
+            "overdue": { "total": 3, "critical": 2, "high": 0, "medium": 1, "low": 0, "none": 0 },
+            "overdue_days": { "avg": 7.3, "max": 13 },
+            "period_days": 90,
+            "resolved": { "total": 1, "critical": 0, "high": 1, "medium": 0, "low": 0, "none": 0 },
+            "resolved_avg_days": { "total": 20.0, "critical": null, "high": 20.0, "medium": null, "low": null, "none": null },
+        });
+        for path in [one, "/api/summary", "/api/summary?org=acme", "/api/summary?days=90"] {
+            for who in [&bearer, &reader] {
+                assert_eq!(read(path.to_string(), who.clone()).await, expected, "{path}");
+            }
+        }
+        let month = read(format!("{one}?days=30"), bearer.clone()).await;
+        assert_eq!((month["period_days"].as_i64(), month["resolved"]["total"].as_i64(), month["open"]["total"].as_i64()), (Some(30), Some(0), Some(5)));
+        assert!(month["resolved_avg_days"]["total"].is_null() && month["resolved_avg_days"]["high"].is_null());
+        // Who reads nothing gets figures of nothing, and an organization that is not theirs narrows to nothing
+        for (path, who) in [("/api/summary", &other), ("/api/summary?org=acme", &other), ("/api/summary?org=nowhere", &bearer)] {
+            let nothing = read(path.to_string(), who.clone()).await;
+            assert_eq!((nothing["open"]["total"].as_i64(), nothing["resolved"]["total"].as_i64()), (Some(0), Some(0)), "{path}");
+            assert!(nothing["overdue_days"]["avg"].is_null() && nothing["overdue_days"]["max"].is_null() && nothing["resolved_avg_days"]["total"].is_null(), "{path}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_overdue_view_tells_where_the_late_ones_are_and_since_when() {
+        use chrono::Datelike;
+
+        let app = app(open_registration());
+        let (owner, viewer, stranger) = late_project(&app).await;
+        let today = chrono::Utc::now().date_naive();
+        let ago = |back: i64| today - chrono::Duration::days(back);
+        let days = |n: &str| format!("{n}<span class=\"unit\"> days</span>");
+        let tables = regex::Regex::new(r#"<table class="([^"]*)">(<colgroup>)?"#).unwrap();
+
+        for scope in ["/product", "/product/acme/infra"] {
+            for reader in [&owner, &viewer] {
+                let page = app.get(&format!("{scope}?view=overdue"), Some(reader)).await;
+                assert_eq!(page.status, StatusCode::OK, "{scope}");
+                let body = page.body;
+                assert!(body.contains("<title>Overdue · Vulnizard</title>") && body.contains(&menu_entry(scope, "overdue", "Overdue", true)), "{scope}");
+                // How many, how late
+                assert!(body.contains(&format!("<div class=\"tile alert\"><div class=\"value\"><a href=\"{scope}?view=vulnerabilities&amp;show=overdue\">3</a></div><div class=\"label\">overdue vulnerabilities</div></div>")), "{scope}: {body}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">average lateness</div>", days("7.3"))), "{scope}");
+                assert!(body.contains(&format!("<div class=\"value\">{}</div><div class=\"label\">worst lateness</div>", days("13"))), "{scope}");
+                // By application, the worst first; each leads to its overdue entries, in its project
+                let project = if scope == "/product" { "<td class=\"project\"><a href=\"/product/acme/infra?view=overdue\" title=\"infra\">infra</a></td>" } else { "" };
+                let row = |name: &str, count: i64, average: &str, worst: &str| {
+                    format!(
+                        "<tr><td><a href=\"/product/acme/infra?view=vulnerabilities&amp;show=overdue&amp;app={name}\">{name}</a></td>{project}<td>{count}</td><td>{}</td><td>{}</td></tr>",
+                        days(average),
+                        days(worst)
+                    )
+                };
+                let (widget, gadget) = (row("widget", 2, "9.5", "13"), row("gadget", 1, "3", "3"));
+                let at = |row: &str| body.find(row).unwrap_or_else(|| panic!("{scope}: no {row} in {body}"));
+                assert!(at(&widget) < at(&gadget), "{scope}");
+                // Every table is sized by the stylesheet
+                let found: Vec<_> = tables.captures_iter(&body).collect();
+                assert_eq!(found.len(), 3, "{scope}");
+                assert!(found.iter().all(|t| t[1].starts_with("list fit") && t.get(2).is_some()), "{scope}");
+
+                // Over time: today's overdue entries by week of detection and of deadline…
+                let mut weeks: std::collections::BTreeMap<chrono::NaiveDate, (i64, i64)> = Default::default();
+                let monday = |day: chrono::NaiveDate| day - chrono::Duration::days(i64::from(day.weekday().num_days_from_monday()));
+                for (detected, due) in [(20, 13), (20, 6), (10, 3)] {
+                    weeks.entry(monday(ago(detected))).or_default().0 += 1;
+                    weeks.entry(monday(ago(due))).or_default().1 += 1;
+                }
+                for (week, (detected, due)) in &weeks {
+                    assert!(body.contains(&format!("<tr><td>{week}</td><td>{detected}</td><td>{due}</td></tr>")), "{scope} {week}");
+                }
+                assert!(body.contains("detected that week <strong>3</strong>") && body.contains("due that week <strong>3</strong>"), "{scope}");
+                // …and how many were overdue at the end of each day: none, then one, two, three
+                for (back, count) in [(0, 3), (2, 3), (3, 2), (5, 2), (6, 1), (12, 1), (13, 0), (29, 0)] {
+                    assert!(body.contains(&format!("<tr><td>{}</td><td>{count}</td></tr>", ago(back))), "{scope} {back}");
+                    assert!(body.contains(&format!("<title>{} — {count} overdue</title>", ago(back))), "{scope} {back}");
+                }
+                // The window is the one of the History view, and a day leads to its state there
+                assert!(body.contains(&format!("<a href=\"{scope}?view=overdue&amp;days=30\" class=\"active\">30 days</a>")) && body.contains(&format!("<a href=\"{scope}?view=overdue&amp;days=365\">1 year</a>")), "{scope}");
+                assert!(body.contains(&format!("<a href=\"{scope}?view=history&amp;at={}\">", ago(4))), "{scope}");
+                assert!(!body.contains(&format!("<tr><td>{}</td>", ago(30))), "{scope}");
+                assert!(!body.contains("style=") && !body.contains("CVE-2024"), "{scope}");
+            }
+            let year = app.get(&format!("{scope}?view=overdue&days=365"), Some(&owner)).await.body;
+            assert!(year.contains(&format!("<tr><td>{}</td><td>0</td></tr>", ago(364))) && !year.contains(&format!("<tr><td>{}</td>", ago(365))), "{scope}");
+            // Sorted on request
+            let fewest = app.get(&format!("{scope}?view=overdue&sort=count&dir=asc"), Some(&owner)).await.body;
+            assert!(fewest.find("app=gadget\">").unwrap() < fewest.find("app=widget\">").unwrap(), "{scope}");
+        }
+
+        // The list narrowed to one application, as the rows above link to it
+        for scope in ["/product", "/product/acme/infra"] {
+            let list = format!("{scope}?view=vulnerabilities");
+            let cves = |body: &str| -> Vec<u32> { (5001..=5006).filter(|n| body.contains(&format!("CVE-2024-{n}</a>"))).collect() };
+            let get = |query: &'static str| {
+                let (app, owner, list) = (&app, owner.clone(), list.clone());
+                async move { app.get(&format!("{list}{query}"), Some(&owner)).await.body }
+            };
+            let widget = get("&show=overdue&app=widget").await;
+            assert_eq!(cves(&widget), [5001, 5003], "{scope}");
+            assert!(widget.contains(&format!("<p class=\"narrowed\">Only the application <strong>widget</strong> · <a href=\"{list}&amp;show=overdue\">Show all</a></p>")), "{scope}: {widget}");
+            // The narrowing follows from one list to the other, and through a sort
+            assert!(widget.contains(&format!("<a href=\"{list}&amp;app=widget\">To review</a>")), "{scope}");
+            assert!(widget.contains(&format!("<a href=\"{list}&amp;show=overdue&amp;app=widget\" class=\"active\">Overdue</a>")), "{scope}");
+            assert!(widget.contains("show=overdue&amp;app=widget&amp;sort=cvss&amp;dir=asc"), "{scope}");
+            assert_eq!(cves(&get("&show=overdue&app=gadget").await), [5006], "{scope}");
+            assert_eq!(cves(&get("&app=widget").await), [5001, 5003, 5004, 5005], "{scope}");
+            assert_eq!(cves(&get("&show=handled&app=widget").await), [5002], "{scope}");
+            assert!(get("&show=handled&app=gadget").await.contains("No decision yet."), "{scope}");
+            // A name is matched whole, and one nobody runs lists nothing
+            assert_eq!(cves(&get("&app=widge").await), [] as [u32; 0], "{scope}");
+            // By severity, as the figures of the overview link to it; both together
+            let critical = get("&severity=critical").await;
+            assert_eq!(cves(&critical), [5001, 5006], "{scope}");
+            assert!(critical.contains(&format!("Only the CVEs of severity <strong>Critical</strong> · <a href=\"{list}\">Show all</a>")), "{scope}");
+            assert_eq!(cves(&get("&show=overdue&severity=medium").await), [5003], "{scope}");
+            assert_eq!(cves(&get("&severity=none").await), [5005], "{scope}");
+            assert_eq!(cves(&get("&severity=low").await), [5004], "{scope}");
+            let both = get("&severity=critical&app=gadget").await;
+            assert_eq!(cves(&both), [5006], "{scope}");
+            assert!(both.contains("Only the application <strong>gadget</strong>, the CVEs of severity <strong>Critical</strong>"), "{scope}");
+            // What is not a severity narrows nothing; a name is written back escaped
+            let bogus = get("&severity=bogus").await;
+            assert!(cves(&bogus).len() == 5 && !bogus.contains("class=\"narrowed\""), "{scope}");
+            let evil = get("&app=%3Cscript%3Ealert(1)%3C%2Fscript%3E").await;
+            assert!(!evil.contains("<script>alert") && evil.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{scope}");
+        }
+        // Somebody else's entries are not theirs to narrow to
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&app=widget", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+        assert!(!app.get("/product?view=vulnerabilities&app=widget", Some(&stranger)).await.body.contains("CVE-2024-500"));
+
+        // Nothing overdue: the view says so, for who reads nothing as for a project in time
+        let outside = app.get("/product?view=overdue", Some(&stranger)).await.body;
+        assert!(outside.contains("<strong>Nothing is overdue.</strong>") && !outside.contains("widget") && !outside.contains("By application"));
+        assert_eq!(app.get("/product/acme/infra?view=overdue", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+        // Once decided nothing is late any more, and what was late before stays in the chart of the days
+        let db = Database::connect(&app.db_path).unwrap();
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        for cve in ["CVE-2024-5001", "CVE-2024-5003", "CVE-2024-5006"] {
+            let id = db.project_entries_for_cve(project, cve).unwrap()[0].0;
+            assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{id}"), Some(&owner), "status=not_applicable").await.status, StatusCode::SEE_OTHER);
+        }
+        let calm = app.get("/product/acme/infra?view=overdue", Some(&owner)).await.body;
+        assert!(calm.contains("<strong>Nothing is overdue.</strong>") && !calm.contains("By application") && !calm.contains("app=widget"));
+        assert!(calm.contains(&format!("<tr><td>{today}</td><td>0</td></tr>")) && calm.contains(&format!("<tr><td>{}</td><td>3</td></tr>", ago(1))));
+        let overview = app.get("/product/acme/infra", Some(&owner)).await.body;
+        assert!(overview.contains("<div class=\"tile\"><div class=\"value\">0</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        assert!(overview.contains(&format!("<div class=\"value\">{NO_DATA}</div><div class=\"label\">worst lateness</div>")));
+    }
+
+    // ---------- the executive role ----------
+
+    fn id_of(app: &TestApp, username: &str) -> i64 {
+        Database::connect(&app.db_path).unwrap().get_credentials(username).unwrap().unwrap().0.id
+    }
+
+    /// Accepts, in the browser, the one invitation waiting for an account
+    async fn accept_in_settings(app: &TestApp, username: &str, session: &str) {
+        let db = Database::connect(&app.db_path).unwrap();
+        let waiting = db.received_invitations(id_of(app, username)).unwrap();
+        assert_eq!(waiting.len(), 1, "{username}");
+        let accepted = app.post(&format!("/invitations/{}/accept", waiting[0].id), Some(session), "").await;
+        assert_eq!(accepted.status, StatusCode::SEE_OTHER, "{}", accepted.body);
+    }
+
+    async fn api_token(app: &TestApp, session: &str) -> String {
+        tokens_of(&app.post("/settings/tokens", Some(session), "name=t&password=a-long-password").await.body).remove(0)
+    }
+
+    /// One message to the MCP server over HTTP, as a program sends it
+    async fn mcp(app: &TestApp, token: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let message = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let req = HttpRequest::post("/mcp")
+            .header(header::HOST, "127.0.0.1:8000")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json");
+        let reply = app.send(req.body(Body::from(message.to_string())).unwrap()).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        serde_json::from_str(&reply.body).unwrap()
+    }
+
+    /// The result of a tool, and whether it is a failure
+    async fn mcp_tool(app: &TestApp, token: &str, name: &str, arguments: serde_json::Value) -> (bool, String) {
+        let answer = mcp(app, token, "tools/call", serde_json::json!({ "name": name, "arguments": arguments })).await;
+        if let Some(error) = answer.get("error") {
+            return (true, error["message"].as_str().unwrap().to_string());
+        }
+        (answer["result"]["isError"].as_bool().unwrap(), answer["result"]["content"][0]["text"].as_str().unwrap().to_string())
+    }
+
+    /// The first figure of an overview, without a link: what an executive reads
+    fn bare_figure(count: i64) -> String {
+        format!("<div class=\"tile\"><div class=\"value\">{count}</div><div class=\"label\">open vulnerabilities</div></div>")
+    }
+
+    struct Executives {
+        /// Administrator of the instance and owner of acme
+        owner: String,
+        viewer: String,
+        /// Owner of globex
+        other: String,
+        /// Executive of the project acme / infra
+        exec: String,
+        /// Executive of the organization acme
+        board: String,
+        /// Executive of the instance
+        chair: String,
+        /// Executive of acme / infra and viewer of globex / shop
+        mixed: String,
+    }
+
+    /// acme / infra holds 5 open vulnerabilities (3 overdue), acme / web 1 and
+    /// globex / shop 5. The executive role is given at each level, through the
+    /// forms that give the other roles.
+    async fn executives(app: &TestApp) -> Executives {
+        let (owner, viewer, other) = late_project(app).await;
+        assert_eq!(app.post("/projects", Some(&owner), "org=acme&name=web").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post("/orgs/acme/projects/web/applications", Some(&owner), "name=gadget&version=2.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+        app.post("/orgs", Some(&other), "name=globex").await;
+        app.post("/projects", Some(&other), "org=globex&name=shop").await;
+        assert_eq!(app.post("/orgs/globex/projects/shop/applications", Some(&other), "name=widget&version=1.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+
+        // On one project: invited by the owner, accepted from the settings
+        let exec = app.register("exec").await;
+        assert_eq!(app.post("/orgs/acme/projects/infra/members", Some(&owner), "username=exec&role=executive").await.status, StatusCode::SEE_OTHER);
+        let settings = app.get("/settings", Some(&exec)).await.body;
+        assert!(settings.contains("<td data-label=\"Role\">executive</td>"), "{settings}");
+        accept_in_settings(app, "exec", &exec).await;
+        // On an organization
+        let board = app.register("board").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&owner), "username=board&role=executive").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(app, "board", &board).await;
+        // On the instance: given by the administrator
+        let chair = app.register("chair").await;
+        let given = app.post(&format!("/admin/users/{}/assign", id_of(app, "chair")), Some(&owner), "scope=instance&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        // Executive in one place, viewer in another
+        let mixed = app.register("mixed").await;
+        let given = app.post(&format!("/admin/users/{}/assign", id_of(app, "mixed")), Some(&owner), "scope=project%3Aacme%2Finfra&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        assert_eq!(app.post("/orgs/globex/projects/shop/members", Some(&other), "username=mixed&role=viewer").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(app, "mixed", &mixed).await;
+
+        let db = Database::connect(&app.db_path).unwrap();
+        let project = |org: &str, name: &str| db.find_project(org, name).unwrap().unwrap();
+        use crate::rbac::Role;
+        assert_eq!(db.project_role(id_of(app, "exec"), project("acme", "infra")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "exec"), project("acme", "web")).unwrap(), None);
+        assert_eq!(db.project_role(id_of(app, "board"), project("acme", "web")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "chair"), project("globex", "shop")).unwrap(), Some(Role::Executive));
+        assert_eq!(db.project_role(id_of(app, "mixed"), project("globex", "shop")).unwrap(), Some(Role::Viewer));
+        Executives { owner, viewer, other, exec, board, chair, mixed }
+    }
+
+    /// Routes and MCP tools that were classified for an account confined to the
+    /// Overview: allowed (`CONFINED_ROUTES`, `CONFINED_API`, `mcp::CONFINED_TOOLS`)
+    /// or refused, which is what happens to anything not listed there
+    const CLASSIFIED_ROUTES: usize = 126;
+    const CLASSIFIED_TOOLS: usize = 26;
+
+    /// A route with its parameters filled: the project the executive holds, and 1 for the rest
+    fn filled(route: &str) -> String {
+        let mut out = String::new();
+        let mut rest = route;
+        while let Some(start) = rest.find('{') {
+            let end = start + rest[start..].find('}').unwrap();
+            out.push_str(&rest[..start]);
+            out.push_str(match &rest[start + 1..end] {
+                "org" => "acme",
+                "project" => "infra",
+                _ => "1",
+            });
+            rest = &rest[end + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Nothing of the projects may be in an answer that refuses
+    fn tells_nothing(body: &str) -> bool {
+        !["CVE-2024", "widget", "gadget", "acme", "infra", "globex"].iter().any(|data| body.contains(data))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_executive_is_refused_every_route_tool_and_endpoint_but_those_of_its_overview() {
+        let app = app(with_inventory());
+        let world = executives(&app).await;
+        assert_eq!(app.post("/admin/mcp", Some(&world.owner), "http_enabled=1&allow_write=1").await.status, StatusCode::SEE_OTHER);
+        let token = api_token(&app, &world.exec).await;
+        let viewer_token = api_token(&app, &world.viewer).await;
+        let bearer = format!("Bearer {token}");
+
+        let routes = declared_routes();
+        assert!(routes.len() >= 110, "only {} routes found: the source is no longer read correctly", routes.len());
+        // Every route was looked at with an executive in mind. One more route: it is refused to an
+        // executive unless it is added to CONFINED_ROUTES or CONFINED_API; decide, then count it here.
+        assert_eq!(routes.len(), CLASSIFIED_ROUTES, "a route was added or removed: decide what an executive gets of it, then update CLASSIFIED_ROUTES");
+        // What is allowed names routes that exist: an entry cannot outlive its route
+        for (method, route) in CONFINED_ROUTES {
+            assert!(routes.iter().any(|r| r == route), "{method} {route} is allowed to an executive but is not a route");
+        }
+        for route in CONFINED_API {
+            assert!(routes.iter().any(|r| r == route), "{route} is allowed to an executive but is not a route");
+        }
+
+        // ---- The pages: every route of the UI, for GET and for POST ----
+        let mut refused = 0;
+        for route in routes.iter().filter(|r| !r.starts_with("/api") && !r.starts_with("/scim") && *r != "/mcp") {
+            let path = filled(route);
+            for method in ["GET", "POST"] {
+                if CONFINED_ROUTES.contains(&(method, route.as_str())) {
+                    continue;
+                }
+                let reply = if method == "GET" {
+                    app.get(&path, Some(&world.exec)).await
+                } else {
+                    app.post(&path, Some(&world.exec), "name=x&username=x&role=owner&status=treated&org=acme&project_id=1&scope=instance").await
+                };
+                // The refusal of a missing permission; a route that has no such method says so before
+                assert!(
+                    matches!(reply.status, StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED),
+                    "{method} {route} answered {} to an executive: classify it in CONFINED_ROUTES or leave it refused",
+                    reply.status
+                );
+                assert!(tells_nothing(&reply.body), "{method} {route}: {}", reply.body);
+                refused += 1;
+            }
+        }
+        assert!(refused >= 150, "only {refused} refusals: the sweep no longer covers the routes");
+        // A page that does not exist is refused the same way: nothing tells what exists
+        assert_eq!(app.get("/nothing-here", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // The sweep is about the role, not about the pages: a viewer of the same project opens them
+        for path in ["/cve", "/vendors", "/projects", "/orgs/acme", "/product/acme/infra?view=vulnerabilities", "/orgs/acme/audit/export"] {
+            assert_eq!(app.get(path, Some(&world.viewer)).await.status, StatusCode::OK, "{path}");
+        }
+        // What is allowed answers
+        for path in ["/product", "/product/acme/infra", "/settings", "/settings/mfa", "/static/app.css"] {
+            assert_eq!(app.get(path, Some(&world.exec)).await.status, StatusCode::OK, "{path}");
+        }
+        assert_eq!(app.get("/", Some(&world.exec)).await.location.as_deref(), Some("/product"));
+        // Nothing was changed by what was refused
+        let db = Database::connect(&app.db_path).unwrap();
+        assert!(db.get_org("x", id_of(&app, "exec")).unwrap().is_none() && db.list_orgs(id_of(&app, "exec")).unwrap().is_empty());
+        assert!(db.summary_only(id_of(&app, "exec")).unwrap());
+
+        // ---- The REST API: every endpoint ----
+        for route in routes.iter().filter(|r| r.starts_with("/api")) {
+            let path = filled(route);
+            for method in ["GET", "POST"] {
+                let req = HttpRequest::builder().method(method).uri(&path).header(header::HOST, "localhost").header(header::AUTHORIZATION, &bearer);
+                let reply = app.send(req.body(Body::empty()).unwrap()).await;
+                if method == "GET" && CONFINED_API.contains(&route.as_str()) {
+                    assert_eq!(reply.status, StatusCode::OK, "{route}: {}", reply.body);
+                    continue;
+                }
+                // The inventory endpoint takes the token of a source, never the one of an account
+                let expected: &[StatusCode] = if route == "/api/inventory" && method == "POST" {
+                    &[StatusCode::UNAUTHORIZED]
+                } else {
+                    &[StatusCode::FORBIDDEN, StatusCode::METHOD_NOT_ALLOWED]
+                };
+                assert!(expected.contains(&reply.status), "{method} {route} answered {} to an executive", reply.status);
+                assert!(tells_nothing(&reply.body), "{method} {route}: {}", reply.body);
+            }
+        }
+        assert_eq!(app.api("/api/nothing-here", Some(&bearer)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api("/api/cve", Some(&format!("Bearer {viewer_token}"))).await.status, StatusCode::OK);
+        // Provisioning has its own tokens
+        for route in routes.iter().filter(|r| r.starts_with("/scim")) {
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let req = HttpRequest::builder().method(method).uri(filled(route)).header(header::HOST, "localhost").header(header::AUTHORIZATION, &bearer);
+                let status = app.send(req.body(Body::empty()).unwrap()).await.status;
+                assert!(matches!(status, StatusCode::UNAUTHORIZED | StatusCode::METHOD_NOT_ALLOWED), "{method} {route}: {status}");
+            }
+        }
+        // The figures it may ask, and the names they go with
+        let figures: serde_json::Value = serde_json::from_str(&app.api("/api/summary", Some(&bearer)).await.body).unwrap();
+        assert_eq!((figures["open"]["total"].as_i64(), figures["overdue"]["total"].as_i64()), (Some(5), Some(3)), "{figures}");
+        let one: serde_json::Value = serde_json::from_str(&app.api("/api/organizations/acme/projects/infra/summary?days=30", Some(&bearer)).await.body).unwrap();
+        assert_eq!((one["open"]["total"].as_i64(), one["period_days"].as_i64()), (Some(5), Some(30)));
+        let names: serde_json::Value = serde_json::from_str(&app.api("/api/summary/projects", Some(&bearer)).await.body).unwrap();
+        assert_eq!(names, serde_json::json!([{ "org": "acme", "project": "infra", "role": "executive" }]));
+        // A project it does not hold answers as one that does not exist
+        let elsewhere = app.api("/api/organizations/acme/projects/web/summary", Some(&bearer)).await;
+        let nowhere = app.api("/api/organizations/acme/projects/nope/summary", Some(&bearer)).await;
+        assert_eq!((elsewhere.status, &elsewhere.body), (StatusCode::NOT_FOUND, &nowhere.body));
+        // An organization it holds nothing in narrows the figures to nothing
+        let none: serde_json::Value = serde_json::from_str(&app.api("/api/summary?org=globex", Some(&bearer)).await.body).unwrap();
+        assert_eq!(none["open"]["total"].as_i64(), Some(0));
+
+        // ---- MCP: every tool ----
+        let every: Vec<String> = crate::mcp::tool_catalog(true).into_iter().map(|(name, _, _)| name).collect();
+        assert_eq!(every.len(), CLASSIFIED_TOOLS, "a tool was added or removed: decide whether an executive is offered it (mcp::CONFINED_TOOLS), then update CLASSIFIED_TOOLS");
+        let names_of = |answer: &serde_json::Value| -> Vec<String> {
+            let mut names: Vec<String> = answer["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+            names.sort();
+            names
+        };
+        // A viewer is offered them all; the executive, its two
+        assert_eq!(names_of(&mcp(&app, &viewer_token, "tools/list", serde_json::json!({})).await).len(), every.len());
+        assert_eq!(names_of(&mcp(&app, &token, "tools/list", serde_json::json!({})).await), ["get_summary", "list_projects"]);
+        let arguments = serde_json::json!({ "org": "acme", "project": "infra", "id": "CVE-2024-5001", "vendor": "acme", "day": "2024-01-01" });
+        for name in &every {
+            let (failed, text) = mcp_tool(&app, &token, name, arguments.clone()).await;
+            if crate::mcp::CONFINED_TOOLS.contains(&name.as_str()) {
+                assert!(!failed, "{name}: {text}");
+            } else {
+                // The answer of a tool that does not exist
+                assert_eq!((failed, text.as_str()), (true, format!("Unknown tool: {name}").as_str()), "{name}");
+            }
+        }
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({})).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (failed, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "web" })).await;
+        assert!(failed && text.contains("project 'acme/web' not found"), "{text}");
+        let (_, text) = mcp_tool(&app, &token, "list_projects", serde_json::json!({})).await;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!([{ "org": "acme", "project": "infra", "summary_only": true }])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_executive_reads_the_figures_of_what_it_holds_and_nothing_else() {
+        let app = app(open_registration());
+        let world = executives(&app).await;
+        let stranger = app.register("nobody").await;
+        let project_entry = |org: &str, project: &str| format!("<a href=\"/product/{org}/{project}\"");
+        /// Everything of the page that could lead somewhere or tell something beyond the figures
+        fn only_figures(body: &str, scope: &str) {
+            for gone in [
+                "view=", "/cve", "/vendors", "/weaknesses", "/projects", "/orgs", "/admin", "/sync", "/applications", "/subscriptions",
+                "CVE database", "Manage projects", "Sync now", "CVE-2024", "widget", "gadget", "<form method=\"post\" action=\"/orgs",
+            ] {
+                assert!(!body.contains(gone), "{scope}: {gone}");
+            }
+            for kept in ["Database synced", "Database never synced"] {
+                if body.contains(kept) {
+                    return;
+                }
+            }
+            panic!("{scope}: the synchronization status is gone");
+        }
+
+        // ---- On one project ----
+        let page = app.get("/product/acme/infra", Some(&world.exec)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        let body = page.body;
+        assert!(body.contains(&bare_figure(5)), "{body}");
+        assert!(body.contains("<div class=\"tile alert\"><div class=\"value\">3</div><div class=\"label\">overdue on their remediation deadline</div></div>"));
+        assert!(body.contains("<tr class=\"total\"><td>All</td><td>5</td><td>3</td>"), "{body}");
+        assert!(body.contains("<title>Overview · Vulnizard</title>") && body.contains("Your role: executive"));
+        only_figures(&body, "infra");
+        // The period is chosen, the menu names the project it holds and no other
+        assert!(body.contains("<a href=\"/product/acme/infra?period=30\">30 days</a>"));
+        assert_eq!(app.get("/product/acme/infra?period=30", Some(&world.exec)).await.status, StatusCode::OK);
+        assert!(body.contains(&project_entry("acme", "infra")) && !body.contains("web") && !body.contains("shop"), "{body}");
+        // All projects: the same figures, those of that project alone (the owner counts web too)
+        let all = app.get("/product", Some(&world.exec)).await.body;
+        assert!(all.contains(&bare_figure(5)), "{all}");
+        only_figures(&all, "*");
+        assert!(app.get("/product", Some(&world.owner)).await.body.contains(&open_figure("/product", 6)));
+        // Another project answers as it does to someone who holds nothing
+        let elsewhere = app.get("/product/acme/web", Some(&world.exec)).await;
+        let unknown = app.get("/product/acme/web", Some(&stranger)).await;
+        assert_eq!((elsewhere.status, &elsewhere.body), (StatusCode::NOT_FOUND, &unknown.body));
+        // Every other view of the Overview address is refused, at both scopes
+        for view in ["vulnerabilities", "review", "overdue", "applications", "subscriptions", "history", "evolution", "audit", "settings"] {
+            let one = app.get(&format!("/product/acme/infra?view={view}"), Some(&world.exec)).await;
+            assert_eq!(one.status, StatusCode::FORBIDDEN, "{view}");
+            assert!(tells_nothing(&one.body), "{view}");
+            if view != "settings" {
+                assert_eq!(app.get(&format!("/product?view={view}"), Some(&world.exec)).await.status, StatusCode::FORBIDDEN, "* {view}");
+            }
+        }
+        // A narrowing of a list is not a way in either
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&show=overdue&severity=critical", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // Its own settings: nothing of the organization, the invitations it has
+        let settings = app.get("/settings", Some(&world.exec)).await.body;
+        assert!(settings.contains("API tokens") && settings.contains("Change password") && !settings.contains("CVE database"));
+
+        // ---- On an organization: each of its projects, and "all projects" of it ----
+        let all = app.get("/product", Some(&world.board)).await.body;
+        assert!(all.contains(&bare_figure(6)), "{all}");
+        only_figures(&all, "board *");
+        assert!(all.contains(&project_entry("acme", "infra")) && all.contains(&project_entry("acme", "web")) && !all.contains("shop"));
+        let web = app.get("/product/acme/web", Some(&world.board)).await.body;
+        assert!(web.contains(&bare_figure(1)), "{web}");
+        only_figures(&web, "board web");
+        assert_eq!(app.get("/product/globex/shop", Some(&world.board)).await.status, StatusCode::NOT_FOUND);
+        // The organization itself stays closed: members, audit, projects
+        for path in ["/orgs/acme", "/orgs/acme/audit/export", "/orgs", "/projects", "/product/acme/web?view=history"] {
+            assert_eq!(app.get(path, Some(&world.board)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+
+        // ---- On the instance: every project of every organization ----
+        let all = app.get("/product", Some(&world.chair)).await.body;
+        assert!(all.contains(&bare_figure(11)), "{all}");
+        only_figures(&all, "chair *");
+        // The organization filter of the bar works on what it holds
+        assert!(all.contains(&org_entry("acme", "acme", false)) && all.contains(&org_entry("globex", "globex", false)), "{all}");
+        let chosen = app.post("/org-filter", Some(&world.chair), "org=globex&back=/product").await;
+        assert_eq!(chosen.status, StatusCode::SEE_OTHER);
+        let cookies = format!("{}; {}", world.chair, chosen.cookie.clone().unwrap());
+        let narrowed = app.get("/product", Some(&cookies)).await.body;
+        assert!(narrowed.contains(&bare_figure(5)) && narrowed.contains("All projects of globex"), "{narrowed}");
+        assert!(narrowed.contains(&project_entry("globex", "shop")) && !narrowed.contains(&project_entry("acme", "infra")));
+        assert!(app.get("/product/globex/shop", Some(&world.chair)).await.body.contains(&bare_figure(5)));
+        for path in ["/cve", "/cve/CVE-2024-5001", "/vendors", "/weaknesses", "/admin", "/admin/users", "/orgs/globex"] {
+            assert_eq!(app.get(path, Some(&world.chair)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+        // An executive of the instance does not start a synchronization
+        assert_eq!(app.post("/sync", Some(&world.chair), "back=/product").await.status, StatusCode::FORBIDDEN);
+        assert!(app.sync_rx.try_recv().is_err());
+
+        // ---- Executive of acme / infra, viewer of globex / shop ----
+        let mixed = &world.mixed;
+        // One role above executive: the reference database is there
+        for path in ["/cve", "/vendors", "/weaknesses", "/projects", "/settings"] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::OK, "{path}");
+        }
+        // Where it is a viewer, it is a viewer
+        let shop = app.get("/product/globex/shop", Some(mixed)).await.body;
+        assert!(shop.contains(&open_figure("/product/globex/shop", 5)) && shop.contains(&menu_entry("/product/globex/shop", "vulnerabilities", "Vulnerabilities", false)));
+        assert!(shop.contains("CVE database"));
+        let listed = app.get("/product/globex/shop?view=vulnerabilities", Some(mixed)).await;
+        assert!(listed.status == StatusCode::OK && listed.body.contains("CVE-2024-5001"));
+        // Where it is an executive, it is an executive: the figures, without a way to the lists
+        let infra = app.get("/product/acme/infra", Some(mixed)).await.body;
+        assert!(infra.contains(&bare_figure(5)) && infra.contains("Your role: executive"), "{infra}");
+        for gone in ["/product/acme/infra?view=", "CVE-2024", "widget"] {
+            assert!(!infra.contains(gone), "{gone}");
+        }
+        // From there the menu leads to the Overview of the other project, never to a view infra does not have
+        assert!(infra.contains("<a href=\"/product/globex/shop\""));
+        assert!(shop.contains("<a href=\"/product/acme/infra\"") && !shop.contains("/product/acme/infra?view="));
+        for path in [
+            "/product/acme/infra?view=vulnerabilities",
+            "/product/acme/infra?view=history",
+            "/product/acme/infra?view=settings",
+        ] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::FORBIDDEN, "{path}");
+        }
+        // Everything else of that project answers as it does to a stranger
+        for path in ["/orgs/acme/projects/infra/reports/2024-01-01", "/orgs/acme", "/orgs/acme/audit/export"] {
+            assert_eq!(app.get(path, Some(mixed)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let entry = {
+            let db = Database::connect(&app.db_path).unwrap();
+            db.project_entries_for_cve(db.find_project("acme", "infra").unwrap().unwrap(), "CVE-2024-5001").unwrap()[0].0
+        };
+        for (path, form) in [
+            (format!("/orgs/acme/projects/infra/watchlist/{entry}"), "status=treated"),
+            ("/orgs/acme/projects/infra/applications".to_string(), "name=x&version=1"),
+            ("/orgs/acme/projects/infra/members".to_string(), "username=mixed&role=owner"),
+            ("/orgs/acme/projects/infra/delete".to_string(), "name=infra"),
+        ] {
+            assert_eq!(app.post(&path, Some(mixed), form).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        // All projects: the figures count both, the lists show the one it reads
+        let all = app.get("/product", Some(mixed)).await.body;
+        assert!(all.contains(&open_figure("/product", 10)), "{all}");
+        let list = app.get("/product?view=vulnerabilities", Some(mixed)).await;
+        assert_eq!(list.status, StatusCode::OK);
+        assert!(list.body.contains("shop") && list.body.contains("CVE-2024-5001") && !list.body.contains("infra</") && !list.body.contains("CVE-2024-5006"), "{}", list.body);
+        for view in ["applications", "history", "audit", "overdue"] {
+            let page = app.get(&format!("/product?view={view}"), Some(mixed)).await;
+            assert_eq!(page.status, StatusCode::OK, "{view}");
+            assert!(!page.body.contains(">infra<") && !page.body.contains("gadget"), "{view}");
+        }
+        // (the menu of the bar names infra, for its Overview; the list of projects does not)
+        let managed = app.get("/projects", Some(mixed)).await.body;
+        assert!(managed.contains("shop") && !managed.split("<main>").nth(1).unwrap().contains("infra"));
+        // The same through the API and MCP
+        let token = api_token(&app, mixed).await;
+        let bearer = format!("Bearer {token}");
+        let figures: serde_json::Value = serde_json::from_str(&app.api("/api/summary", Some(&bearer)).await.body).unwrap();
+        assert_eq!(figures["open"]["total"].as_i64(), Some(10));
+        assert_eq!(app.api("/api/organizations/acme/projects/infra/summary", Some(&bearer)).await.status, StatusCode::OK);
+        assert_eq!(app.api("/api/organizations/globex/projects/shop/watchlist", Some(&bearer)).await.status, StatusCode::OK);
+        for path in ["/api/organizations/acme/projects/infra", "/api/organizations/acme/projects/infra/watchlist", "/api/organizations/acme/projects/infra/reports", "/api/organizations/acme/audit"] {
+            assert_eq!(app.api(path, Some(&bearer)).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(app.api("/api/cve", Some(&bearer)).await.status, StatusCode::OK);
+        assert_eq!(app.post("/admin/mcp", Some(&world.owner), "http_enabled=1").await.status, StatusCode::SEE_OTHER);
+        let (failed, text) = mcp_tool(&app, &token, "list_watchlist", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert!(failed && text.contains("not found"), "{text}");
+        let (failed, text) = mcp_tool(&app, &token, "list_watchlist", serde_json::json!({})).await;
+        assert!(!failed && text.contains("CVE-2024-5001") && !text.contains("CVE-2024-5006"), "{text}");
+        let (failed, text) = mcp_tool(&app, &token, "get_evolution", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert!(failed && text.contains("not found"), "{text}");
+        let (_, text) = mcp_tool(&app, &token, "get_summary", serde_json::json!({ "org": "acme", "project": "infra" })).await;
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["open"]["total"].as_i64(), Some(5));
+        let (_, text) = mcp_tool(&app, &token, "list_projects", serde_json::json!({})).await;
+        let projects: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(projects[0]["project"], "shop");
+        assert_eq!(projects[1], serde_json::json!({ "org": "acme", "project": "infra", "summary_only": true }));
+
+        // Nothing changed for the others: the viewer still reads, the owner still decides
+        assert!(app.get("/product/acme/infra", Some(&world.viewer)).await.body.contains(&open_figure("/product/acme/infra", 5)));
+        assert_eq!(app.get("/product/globex/shop?view=vulnerabilities", Some(&world.other)).await.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_executive_role_is_given_where_the_others_are_and_by_the_same_people() {
+        let app = app(open_registration());
+        let world = executives(&app).await;
+        let db = Database::connect(&app.db_path).unwrap();
+        use crate::rbac::Role;
+        let infra = db.find_project("acme", "infra").unwrap().unwrap();
+        let web = db.find_project("acme", "web").unwrap().unwrap();
+
+        // Every form that gives a role offers it, viewer staying the one offered first
+        let offered = "<option value=\"executive\">executive";
+        let first = "<option value=\"viewer\" selected>viewer";
+        for path in ["/orgs/acme", "/product/acme/infra?view=settings", &format!("/admin/users/{}", id_of(&app, "viewer")), "/admin/users?new=1", "/admin/sso?new=1"] {
+            let body = app.get(path, Some(&world.owner)).await.body;
+            assert!(body.contains(offered), "{path}");
+            if !path.starts_with("/admin/sso") {
+                assert!(body.contains(first), "{path}");
+            }
+        }
+        assert!(app.get("/orgs/acme", Some(&world.owner)).await.body.contains("<strong>executive</strong>: the figures of the Overview only."));
+        // The members of a project list who is executive there, as they list the others
+        let members = app.get("/product/acme/infra?view=settings", Some(&world.owner)).await.body;
+        assert!(members.contains("exec") && members.contains("executive"));
+
+        // Who may give viewer may give executive, and nobody else: an editor may not
+        let editor = app.register("editor").await;
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=editor&role=editor").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(&app, "editor", &editor).await;
+        app.register("guest").await;
+        for role in ["viewer", "executive"] {
+            for path in ["/orgs/acme/members", "/orgs/acme/projects/infra/members"] {
+                let form = format!("username=guest&role={role}");
+                assert_eq!(app.post(path, Some(&editor), &form).await.status, StatusCode::FORBIDDEN, "{path} {role}");
+                assert_eq!(app.post(path, Some(&world.viewer), &form).await.status, StatusCode::FORBIDDEN, "{path} {role}");
+                assert_eq!(app.post(path, Some(&world.other), &form).await.status, StatusCode::NOT_FOUND, "{path} {role}");
+            }
+        }
+        assert!(db.received_invitations(id_of(&app, "guest")).unwrap().is_empty());
+        // A role nobody knows is still refused
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=guest&role=manager").await.status, StatusCode::BAD_REQUEST);
+        // Only an administrator gives it on the instance, or to anyone from the administration
+        let guest_id = id_of(&app, "guest");
+        for scope in ["instance", "organization%3Aacme", "project%3Aacme%2Finfra"] {
+            let form = format!("scope={scope}&role=executive");
+            assert_eq!(app.post(&format!("/admin/users/{guest_id}/assign"), Some(&editor), &form).await.status, StatusCode::FORBIDDEN, "{scope}");
+            assert_eq!(app.post(&format!("/admin/users/{guest_id}/assign"), Some(&world.owner), &form).await.status, StatusCode::SEE_OTHER, "{scope}");
+        }
+        let rights: Vec<(String, String)> = db.user_assignments(guest_id).unwrap().into_iter().map(|a| (a.level, a.role)).collect();
+        assert_eq!(rights.len(), 3);
+        assert!(rights.iter().all(|(_, role)| role == "executive"), "{rights:?}");
+        assert!(app.get(&format!("/admin/users/{guest_id}"), Some(&world.owner)).await.body.contains("executive"));
+        // An account created with it
+        let created = app.post("/admin/users", Some(&world.owner), "username=report&password=a-long-password&scope=organization%3Aacme&role=executive").await;
+        assert_eq!(created.status, StatusCode::SEE_OTHER, "{}", created.body);
+        assert_eq!(db.org_role(id_of(&app, "report"), db.list_all_orgs().unwrap().iter().find(|(_, name)| name == "acme").unwrap().0).unwrap(), Some(Role::Executive));
+
+        // The role a provider gives at the first sign-in, and the one of a provisioned group
+        let form = "name=Board+SSO&slug=board-sso&issuer=https%3A%2F%2Fid.example.org&client_id=vulnizard&client_secret=s3cret&scopes=openid+email\
+                    &auto_create=1&scope=organization%3Aacme&default_role=executive";
+        let saved = app.post("/admin/sso", Some(&world.owner), form).await;
+        assert_eq!(saved.status, StatusCode::SEE_OTHER, "{}", saved.body);
+        assert_eq!(db.get_sso_provider("board-sso").unwrap().unwrap().default_role.as_deref(), Some("executive"));
+        let group = db.scim_create_group(crate::db::Scope::Instance, "board", None).unwrap();
+        let given = app.post(&format!("/admin/sso/scim/groups/{group}/roles"), Some(&world.owner), "scope=project%3Aacme%2Fweb&role=executive").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        assert_eq!(db.list_group_roles(group).unwrap()[0].role, "executive");
+
+        // The highest role wins on a project; the others are not touched
+        let board_id = id_of(&app, "board");
+        assert_eq!(app.post("/orgs/acme/projects/web/members", Some(&world.owner), "username=board&role=viewer").await.status, StatusCode::SEE_OTHER);
+        accept_in_settings(&app, "board", &world.board).await;
+        assert_eq!(db.project_role(board_id, web).unwrap(), Some(Role::Viewer));
+        assert_eq!(db.project_role(board_id, infra).unwrap(), Some(Role::Executive));
+        assert_eq!(app.get("/product/acme/web?view=vulnerabilities", Some(&world.board)).await.status, StatusCode::OK);
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.board)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get("/cve", Some(&world.board)).await.status, StatusCode::OK);
+        // An executive of a project who is viewer of its organization reads it
+        assert_eq!(app.post(&format!("/admin/users/{}/assign", id_of(&app, "exec")), Some(&world.owner), "scope=organization%3Aacme&role=viewer").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(db.project_role(id_of(&app, "exec"), infra).unwrap(), Some(Role::Viewer));
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.exec)).await.status, StatusCode::OK);
+        // Taken back, the confinement is back
+        assert_eq!(app.post(&format!("/admin/users/{}/assign", id_of(&app, "exec")), Some(&world.owner), "scope=organization%3Aacme&role=none").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get("/cve", Some(&world.exec)).await.status, StatusCode::FORBIDDEN);
+        // The owner changes an executive member into a viewer from the list of members
+        assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=board&role=viewer").await.status, StatusCode::SEE_OTHER);
+        // (a member already there is not invited again: the change waits for nothing)
+        let _ = world.chair;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slack_destination_comes_with_the_way_to_get_its_address() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        let page = app.get("/admin/notifications?tab=destinations&new=slack", Some(&admin)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        // The steps, the logo to upload, and a link that opens Slack with the app described
+        for shown in ["Getting the webhook address from Slack", "Install to Workspace", "href=\"/static/logo.png\"", "Incoming Webhooks"] {
+            assert!(page.body.contains(shown), "{shown}");
+        }
+        let link = page.body.split("href=\"https://api.slack.com/apps?new_app=1&amp;manifest_json=").nth(1).expect("the link to Slack").split('"').next().unwrap().to_string();
+        assert!(page.body.contains("target=\"_blank\" rel=\"noopener noreferrer\""));
+        // What Slack is given: valid JSON, wholly encoded, that switches incoming webhooks on
+        assert!(link.chars().all(|c| c.is_ascii_alphanumeric() || c == '%'), "{link}");
+        let manifest: serde_json::Value = serde_json::from_str(&percent_encoding::percent_decode_str(&link).decode_utf8().unwrap()).unwrap();
+        assert_eq!(manifest["settings"]["incoming_webhooks"]["incoming_webhooks_enabled"], true);
+        assert_eq!(manifest["oauth_config"]["scopes"]["bot"], serde_json::json!(["incoming-webhook"]));
+        let name = manifest["display_information"]["name"].as_str().unwrap();
+        let description = manifest["display_information"]["description"].as_str().unwrap();
+        assert!(name.len() <= 35 && description.len() <= 140);
+        // The other kinds have no such guide, and the project form has the same one
+        assert!(!app.get("/admin/notifications?tab=destinations&new=ntfy", Some(&admin)).await.body.contains("api.slack.com"));
+        let project = app.get("/product/default/default?view=settings&new=slack", Some(&admin)).await;
+        assert!(project.status == StatusCode::OK && project.body.contains("api.slack.com/apps?new_app=1"));
     }
 }

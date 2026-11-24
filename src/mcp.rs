@@ -122,7 +122,7 @@ fn handle_line(db: &Database, allow_write: bool, line: &str) -> Option<Value> {
 impl Mcp<'_> {
 /// Handles one message. Notifications (no `id`) get no response.
 pub fn handle(&self, line: &str) -> Option<Value> {
-    let (db, allow_write) = (self.db, self.allow_write);
+    let db = self.db;
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return Some(error(Value::Null, -32700, "Parse error")),
@@ -156,11 +156,25 @@ pub fn handle(&self, line: &str) -> Option<Value> {
             })
         }
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tool_definitions(allow_write, self.inventory) }),
+        "tools/list" => match self.offered_tools() {
+            Ok(tools) => json!({ "tools": tools }),
+            Err(e) => {
+                tracing::error!("mcp tools/list failed: {e:#}");
+                return Some(error(id, -32603, "internal error"));
+            }
+        },
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            if !tool_definitions(allow_write, self.inventory).iter().any(|t| t["name"] == name) {
+            // A tool that is not offered to the caller answers as one that does not exist
+            let offered = match self.offered_tools() {
+                Ok(tools) => tools,
+                Err(e) => {
+                    tracing::error!("mcp tools/call failed: {e:#}");
+                    return Some(error(id, -32603, "internal error"));
+                }
+            };
+            if !offered.iter().any(|t| t["name"] == name) {
                 return Some(error(id, -32602, &format!("Unknown tool: {name}")));
             }
             // Tool failures are reported in the result so the model can react
@@ -190,8 +204,45 @@ pub fn handle(&self, line: &str) -> Option<Value> {
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
+/// Whether the caller is an account confined to the Overview: every role it
+/// holds is executive (`Database::summary_only`). The local operator never is.
+fn confined(&self) -> Result<bool> {
+    match &self.caller {
+        Caller::Local => Ok(false),
+        Caller::User(account) => self.db.summary_only(account.id),
+    }
+}
+
+/// The tools the caller may list and call. An account confined to the
+/// Overview is offered `CONFINED_TOOLS` and nothing else: the others are not
+/// named to it, and calling one answers "Unknown tool" like a write tool
+/// where writing is off.
+fn offered_tools(&self) -> Result<Vec<Value>> {
+    let mut tools = tool_definitions(self.allow_write, self.inventory);
+    if self.confined()? {
+        tools.retain(|t| CONFINED_TOOLS.iter().any(|name| t["name"] == *name));
+    }
+    Ok(tools)
+}
+
+/// The project the figures are asked of: one the caller holds a role on,
+/// executive included. Every other tool asks to read the project (`target`).
+fn summary_target(&self, args: &Value) -> Result<i64> {
+    let org = opt_str(args, "org").unwrap_or("default");
+    let project = req_str(args, "project")?;
+    let not_found = || anyhow!("project '{org}/{project}' not found (see list_projects)");
+    match &self.caller {
+        Caller::Local => self.db.find_project(org, project)?.ok_or_else(not_found),
+        Caller::User(account) => {
+            let held = self.db.get_project_for_summary(org, project, account.id)?;
+            Ok(held.filter(|(access, _)| access.can(Permission::Summary)).ok_or_else(not_found)?.1.id)
+        }
+    }
+}
+
 /// Resolves the `org` (default: `default`) and `project` arguments to a
-/// project the caller can access.
+/// project the caller can read (viewer or more): an executive of the project
+/// gets the answer of a stranger.
 fn target(&self, args: &Value) -> Result<Target> {
     let org = opt_str(args, "org").unwrap_or("default");
     let project = req_str(args, "project")?;
@@ -251,6 +302,10 @@ fn projects(&self) -> Result<Vec<(i64, String, String)>> {
     Ok(projects.into_iter().map(|p| (p.id, p.org, p.name)).collect())
 }
 }
+
+/// The tools an account confined to the Overview is offered: its figures,
+/// and the names of the projects they are about
+pub(crate) const CONFINED_TOOLS: [&str; 2] = ["get_summary", "list_projects"];
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
@@ -432,11 +487,12 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_watchlist",
-            "List watchlist entries: CVEs tracked per application, with treatment status and priority, and the start of the CVE description (`get_cve` gives it whole). Answers one page (`entries`) with the `total`; ask for the next with `offset`.",
+            "List watchlist entries: CVEs tracked per application, with treatment status and priority, and the start of the CVE description (`get_cve` gives it whole). An entry to review carries its remediation deadline: `due_at`, `days_left` (negative once overdue) and `overdue_days`; a decided one `resolved_in_days`. Answers one page (`entries`) with the `total`; ask for the next with `offset`.",
             json!({
                 "project": { "type": "string", "description": "Only this project (name)" },
                 "application": { "type": "string", "description": "Only this application (its name, whatever the case)" },
                 "status": { "type": "string", "enum": ["untreated", "accepted", "treated", "not_applicable"] },
+                "overdue": { "type": "boolean", "description": "Only the entries to review that are past their remediation deadline, most overdue first" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Entries returned (default 50); refused outside 1 to 500" },
                 "offset": { "type": "integer", "minimum": 0, "description": "Entries skipped (default 0)" },
             }),
@@ -444,14 +500,22 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_evolution",
-            "Day-by-day evolution of the tracked CVEs of a project (or of every accessible project): new, accepted, closed, not applicable, and the stock still to review and accepted at the end of each day.",
+            "Day-by-day evolution of the tracked CVEs of a project (or of every accessible project): new, accepted, closed, not applicable, and the stock still to review (`open`) and accepted at the end of each day. `open_by_severity` splits `open` by the severity each CVE has today, as five counts in this order: critical, high, medium, low, no score.",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
                     "days": { "type": "integer", "minimum": 1, "maximum": 365, "description": "Length of the window ending today (default 30)" } }),
             &[],
         ),
         tool(
+            "get_summary",
+            "Executive figures of a project, of every accessible project, or of those of one organization (`org` without `project`), and nothing else: no CVE, no application. As of today: `open` (entries to review) and `overdue` (those past their remediation deadline), each with a `total` and a count per severity (`critical`, `high`, `medium`, `low`, `none` for CVEs without a score; the severity is the one the CVE has today); `overdue_days` (`avg` and `max` number of days past the deadline). Over the last `period_days` days: `resolved` (entries decided then: closed, not applicable or risk accepted, the decision still standing) and `resolved_avg_days` (average number of days from detection to that decision). An average over nothing is null, never 0.",
+            json!({ "org": { "type": "string", "description": "Organization name. With `project`: its organization (defaults to `default`). Alone: only the projects of that organization" },
+                    "project": { "type": "string", "description": "Project name; omit for every accessible project" },
+                    "days": { "type": "integer", "minimum": 1, "maximum": 365, "description": "Length of the period the resolution figures are taken over, ending today (default 90); refused outside 1 to 365" } }),
+            &[],
+        ),
+        tool(
             "get_state_at",
-            "State of the tracked CVEs as it was at the end of a given day: each CVE with its status then, since when, decided by whom and why.",
+            "State of the tracked CVEs as it was at the end of a given day: each CVE with its status then, since when, decided by whom and why; one still to review then has its remediation deadline (`due_at`) and how many days past it that day was (`overdue_days`).",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
                     "date": { "type": "string", "description": "YYYY-MM-DD" } }),
             &["date"],
@@ -583,12 +647,21 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         "list_weaknesses" => json!(db.list_weaknesses(50, offset(args, 50))?),
         "list_projects" => {
             let mut out = Vec::new();
-            for (id, org, project) in self.projects()? {
+            let readable = self.projects()?;
+            for (id, org, project) in &readable {
                 out.push(json!({
                     "org": org,
                     "project": project,
-                    "subscriptions": db.list_subscriptions(id)?,
+                    "subscriptions": db.list_subscriptions(*id)?,
                 }));
+            }
+            // The projects the caller is only executive of: their names, for `get_summary`
+            if let Caller::User(account) = &self.caller {
+                for held in db.held_projects(account.id)? {
+                    if !readable.iter().any(|(id, _, _)| *id == held.id) {
+                        out.push(json!({ "org": held.org, "project": held.name, "summary_only": true }));
+                    }
+                }
             }
             json!(out)
         }
@@ -620,21 +693,29 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                 entries.retain(|e| e.app_name.to_lowercase() == wanted);
             }
             let (limit, offset) = page_of(args, 50)?;
-            let total = entries.len();
+            let overdue = args.get("overdue").and_then(Value::as_bool).unwrap_or(false);
             // The start of each description is enough to recognise a CVE in a list; `get_cve` has the rest
-            let entries: Vec<_> = entries
-                .into_iter()
-                .skip(offset)
-                .take(limit)
-                .map(|mut e| {
-                    e.cve_description = e.cve_description.map(|d| match d.char_indices().nth(DESCRIPTION_CHARS) {
-                        Some((cut, _)) => format!("{}…", &d[..cut]),
-                        None => d,
-                    });
-                    e
-                })
-                .collect();
+            let entries = crate::deadlines::entries_json(entries, &db.deadline_policies()?, overdue, Some(DESCRIPTION_CHARS));
+            let total = entries.len();
+            let entries: Vec<Value> = entries.into_iter().skip(offset).take(limit).collect();
             json!({ "total": total, "offset": offset, "limit": limit, "entries": entries })
+        }
+        "get_summary" => {
+            let project_id = match opt_str(args, "project") {
+                Some(_) => Some(self.summary_target(args)?),
+                None => None,
+            };
+            // Without a project, an organization narrows what the caller can read: it gives nothing more
+            let org = opt_str(args, "org").filter(|_| project_id.is_none());
+            let reader = match &self.caller {
+                Caller::Local => None,
+                Caller::User(account) => Some(account.id),
+            };
+            let days = match args.get("days").filter(|v| !v.is_null()) {
+                None => 90,
+                Some(v) => v.as_i64().filter(|n| (1..=365).contains(n)).ok_or_else(|| anyhow!("days must be an integer from 1 to 365"))?,
+            };
+            json!(db.figures(reader, project_id, org, days)?)
         }
         "get_evolution" | "get_state_at" | "get_audit_log" => {
             // One project, or everything the caller can read
@@ -656,15 +737,24 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                 "get_state_at" => {
                     let date = chrono::NaiveDate::parse_from_str(req_str(args, "date")?, "%Y-%m-%d")
                         .map_err(|_| anyhow!("date must be YYYY-MM-DD"))?;
+                    // Deadline of each entry, with the delays of its organization
+                    let tracks: std::collections::HashMap<i64, crate::deadlines::EntryTrack> =
+                        crate::deadlines::tracks(&events, &db.deadline_policies()?).into_iter().map(|t| (t.entry_id, t)).collect();
                     let items: Vec<Value> = crate::db::state_at(&events, date)
                         .into_iter()
                         .take(500)
                         .map(|i| {
-                            json!({
+                            let mut item = json!({
                                 "cve_id": i.event.cve_id, "application": i.event.app_name, "version": i.event.app_version,
                                 "project": i.event.project, "status": i.status, "since": i.event.at,
                                 "by": i.event.actor, "justification": i.event.comment, "cvss": i.event.cvss, "kev": i.event.kev,
-                            })
+                            });
+                            // To review that day: when it was due, and how late it was then
+                            if let Some(track) = tracks.get(&i.event.entry_id).filter(|_| i.status == "untreated") {
+                                item["due_at"] = track.due.to_string().into();
+                                item["overdue_days"] = if track.overdue_on(date) { (date - track.due).num_days() } else { 0 }.into();
+                            }
+                            item
                         })
                         .collect();
                     json!({ "date": date.to_string(), "entries": items })
@@ -1025,13 +1115,13 @@ mod tests {
         let db = db();
         let list = call(&db, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         for t in tools {
             assert_eq!(t["inputSchema"]["type"], "object");
             assert!(!t["description"].as_str().unwrap().is_empty());
         }
         // Tools without required arguments all run on a fresh database
-        for name in ["search_cves", "list_vendors", "list_weaknesses", "list_projects", "list_watchlist", "database_status"] {
+        for name in ["search_cves", "list_vendors", "list_weaknesses", "list_projects", "list_watchlist", "get_summary", "get_evolution", "database_status"] {
             let (is_error, text) = tool_text(&db, name, json!({}));
             assert!(!is_error, "{name}: {text}");
         }
@@ -1068,7 +1158,7 @@ mod tests {
         let ask = |msg: Value| server.handle(&msg.to_string()).unwrap();
         let list = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
         let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         assert!(!names.contains(&"list_inventory") && !names.contains(&"choose_components"));
         for name in INVENTORY_TOOLS {
             let answer = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": name, "arguments": {} } }));
@@ -1087,7 +1177,7 @@ mod tests {
                 // read
                 "search_cves", "get_cve", "list_vendors", "list_products", "list_weaknesses", "list_projects",
                 "list_reports", "get_report", "list_applications", "list_watchlist",
-                "get_evolution", "get_state_at", "get_audit_log", "list_inventory", "list_notifications",
+                "get_evolution", "get_summary", "get_state_at", "get_audit_log", "list_inventory", "list_notifications",
                 "get_security_log", "database_status",
                 // write
                 "create_project", "subscribe", "unsubscribe", "add_application",
@@ -1114,7 +1204,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 18);
         assert!(!names.contains(&"subscribe"));
 
         let refused = handle_line(
@@ -1382,5 +1472,177 @@ mod tests {
         assert!(status.contains("\"failed\"") && !status.contains("internal.example"));
         let local = Mcp { db: &db, caller: Caller::Local, allow_write: false, request_sync: None, inventory: true };
         assert!(run(&local, "database_status", json!({})).unwrap().to_string().contains("internal.example"));
+    }
+
+    #[test]
+    fn the_watchlist_tells_what_is_due() {
+        use crate::models::{AffectedProduct, Application};
+
+        let db = db();
+        let alice = db.create_account("alice", None, "h", false).unwrap();
+        let org = db.create_org("acme", alice).unwrap();
+        let project = db.create_org_project(org, alice, "infra", None).unwrap();
+        for (id, cvss) in [("CVE-2024-6001", 9.8), ("CVE-2024-6002", 5.0)] {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw in widget".into());
+            cve.cvss_v3_score = Some(cvss);
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        let mut app = Application::new(project, "widget".into());
+        app.version = Some("1.0".into());
+        app.id = Some(db.create_application(&app).unwrap());
+        db.scan_app_for_cves(&app).unwrap();
+        // Detected ten days ago: the critical one was due after 7 days
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-10 days')", []).unwrap();
+        db.conn().execute("UPDATE watchlist_events SET at = datetime('now', '-10 days')", []).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let day = |from_detection: i64| (today + chrono::Duration::days(from_detection - 10)).to_string();
+
+        let mcp = Mcp {
+            db: &db,
+            caller: Caller::User(crate::db::Account { id: alice, username: "alice".into(), is_admin: false }),
+            allow_write: true,
+            request_sync: None,
+            inventory: false,
+        };
+        let run = |tool: &str, args: Value| mcp.call_tool(tool, &args).unwrap();
+        let of = |list: &Value, key: &str, cve: &str| -> Value {
+            list["entries"].as_array().unwrap().iter().find(|e| e[key] == cve || e["entry"][key] == cve).cloned().unwrap()
+        };
+        let list = run("list_watchlist", json!({ "org": "acme", "project": "infra" }));
+        assert_eq!(list["total"], 2);
+        let critical = of(&list, "cve_id", "CVE-2024-6001");
+        assert_eq!((critical["due_at"].as_str(), critical["days_left"].as_i64(), critical["overdue_days"].as_i64()), (Some(day(7).as_str()), Some(-3), Some(3)));
+        let medium = of(&list, "cve_id", "CVE-2024-6002");
+        assert_eq!((medium["due_at"].as_str(), medium["days_left"].as_i64(), medium["overdue_days"].as_i64()), (Some(day(90).as_str()), Some(80), Some(0)));
+        // Only the overdue ones, in one project or in all of them
+        for scope in [json!({ "org": "acme", "project": "infra", "overdue": true }), json!({ "overdue": true })] {
+            let overdue = run("list_watchlist", scope);
+            assert_eq!((overdue["total"].as_i64(), overdue["entries"][0]["entry"]["cve_id"].as_str()), (Some(1), Some("CVE-2024-6001")));
+        }
+        // The delays of the organization apply
+        db.set_org_delay_override(org, &crate::deadlines::DelayOverride { critical: Some(30), ..Default::default() }, &Actor::system("test")).unwrap();
+        assert_eq!(run("list_watchlist", json!({ "overdue": true }))["total"], 0);
+        db.set_org_delay_override(org, &Default::default(), &Actor::system("test")).unwrap();
+
+        // The state of a past day says how late an entry was then
+        let state = |date: String| run("get_state_at", json!({ "org": "acme", "project": "infra", "date": date }));
+        let now = of(&state(today.to_string()), "cve_id", "CVE-2024-6001");
+        assert_eq!((now["due_at"].as_str(), now["overdue_days"].as_i64()), (Some(day(7).as_str()), Some(3)));
+        let before = of(&state(day(5)), "cve_id", "CVE-2024-6001");
+        assert_eq!((before["due_at"].as_str(), before["overdue_days"].as_i64()), (Some(day(7).as_str()), Some(0)));
+
+        // Decided: how long it took, and no deadline any more
+        run("set_cve_status", json!({ "org": "acme", "project": "infra", "cve_id": "CVE-2024-6001", "status": "treated" }));
+        let closed = of(&run("list_watchlist", json!({ "org": "acme", "project": "infra", "status": "treated" })), "cve_id", "CVE-2024-6001");
+        assert_eq!(closed["resolved_in_days"], 10);
+        assert!(closed.get("due_at").is_none());
+        assert!(of(&state(today.to_string()), "cve_id", "CVE-2024-6001").get("due_at").is_none());
+        assert_eq!(run("list_watchlist", json!({ "overdue": true }))["total"], 0);
+    }
+
+    #[test]
+    fn the_summary_gives_the_figures_and_nothing_else() {
+        use crate::models::{AffectedProduct, Application};
+
+        let db = db();
+        let alice = db.create_account("alice", None, "h", false).unwrap();
+        db.create_account("bob", None, "h", false).unwrap();
+        let carol = db.create_account("carol", None, "h", false).unwrap();
+        let org = db.create_org("acme", alice).unwrap();
+        let project = db.create_org_project(org, alice, "infra", None).unwrap();
+        db.add_member(org, "bob", "viewer").unwrap();
+        let bob = db.get_credentials("bob").unwrap().unwrap().0.id;
+        for (id, cvss) in [("CVE-2024-6001", 9.8), ("CVE-2024-6002", 5.0)] {
+            let mut cve = Cve::new(id.into());
+            cve.description = Some("Flaw in widget".into());
+            cve.cvss_v3_score = Some(cvss);
+            cve.affected_products.push(AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        let mut app = Application::new(project, "widget".into());
+        app.version = Some("1.0".into());
+        app.id = Some(db.create_application(&app).unwrap());
+        db.scan_app_for_cves(&app).unwrap();
+        // Detected ten days ago: the critical one was due after 7 days
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-10 days')", []).unwrap();
+        db.conn().execute("UPDATE watchlist_events SET at = datetime('now', '-10 days')", []).unwrap();
+
+        let as_user = |id: i64, name: &str| Mcp {
+            db: &db,
+            caller: Caller::User(crate::db::Account { id, username: name.into(), is_admin: false }),
+            allow_write: true,
+            request_sync: None,
+            inventory: false,
+        };
+        let (alice_mcp, bob_mcp, carol_mcp) = (as_user(alice, "alice"), as_user(bob, "bob"), as_user(carol, "carol"));
+        let local = Mcp { db: &db, caller: Caller::Local, allow_write: false, request_sync: None, inventory: false };
+        let scope = json!({ "org": "acme", "project": "infra" });
+        let today = chrono::Utc::now().date_naive().to_string();
+        let expected = json!({
+            "as_of": today,
+            "open": { "total": 2, "critical": 1, "high": 0, "medium": 1, "low": 0, "none": 0 },
+            "overdue": { "total": 1, "critical": 1, "high": 0, "medium": 0, "low": 0, "none": 0 },
+            "overdue_days": { "avg": 3.0, "max": 3 },
+            "period_days": 90,
+            "resolved": { "total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "none": 0 },
+            "resolved_avg_days": { "total": null, "critical": null, "high": null, "medium": null, "low": null, "none": null },
+        });
+        // A reader of the project gets it, for the project, for everything readable, for the organization
+        for server in [&alice_mcp, &bob_mcp, &local] {
+            for args in [scope.clone(), json!({}), json!({ "org": "acme" }), json!({ "days": 90 })] {
+                assert_eq!(server.call_tool("get_summary", &args).unwrap(), expected, "{args}");
+            }
+        }
+        // Figures only: no CVE, no application, no project
+        let text = alice_mcp.call_tool("get_summary", &scope).unwrap().to_string();
+        for leaked in ["CVE-", "widget", "infra", "acme", "Flaw"] {
+            assert!(!text.contains(leaked), "{leaked}");
+        }
+        // Who is not a member is refused the project, and reads figures of nothing elsewhere
+        assert!(carol_mcp.call_tool("get_summary", &scope).unwrap_err().to_string().contains("not found"));
+        for args in [json!({}), json!({ "org": "acme" }), json!({ "org": "nowhere" })] {
+            let nothing = carol_mcp.call_tool("get_summary", &args).unwrap();
+            assert_eq!((nothing["open"]["total"].as_i64(), nothing["overdue"]["total"].as_i64()), (Some(0), Some(0)), "{args}");
+            assert!(nothing["overdue_days"]["avg"].is_null() && nothing["resolved_avg_days"]["total"].is_null(), "{args}");
+        }
+        assert_eq!(alice_mcp.call_tool("get_summary", &json!({ "org": "nowhere" })).unwrap()["open"]["total"], 0);
+        // The period is the caller's to choose, within bounds
+        assert_eq!(alice_mcp.call_tool("get_summary", &json!({ "days": 30 })).unwrap()["period_days"], 30);
+        for bad in [json!({ "days": 0 }), json!({ "days": 366 }), json!({ "days": "ten" }), json!({ "days": 1.5 })] {
+            assert!(alice_mcp.call_tool("get_summary", &bad).unwrap_err().to_string().contains("days must be an integer"), "{bad}");
+        }
+
+        // The evolution splits what is to review by severity, each day
+        let evolution = bob_mcp.call_tool("get_evolution", &json!({ "org": "acme", "project": "infra", "days": 12 })).unwrap();
+        let days = evolution.as_array().unwrap();
+        assert_eq!(days.len(), 12);
+        for day in days {
+            let by_severity: Vec<i64> = day["open_by_severity"].as_array().unwrap().iter().map(|n| n.as_i64().unwrap()).collect();
+            assert_eq!((by_severity.len(), by_severity.iter().sum::<i64>()), (5, day["open"].as_i64().unwrap()), "{day}");
+        }
+        assert_eq!((&days[0]["open_by_severity"], &days[1]["open_by_severity"], &days[11]["open_by_severity"]), (&json!([0, 0, 0, 0, 0]), &json!([1, 0, 1, 0, 0]), &json!([1, 0, 1, 0, 0])));
+        assert!(carol_mcp.call_tool("get_evolution", &scope).is_err());
+        assert_eq!(carol_mcp.call_tool("get_evolution", &json!({ "days": 1 })).unwrap()[0]["open_by_severity"], json!([0, 0, 0, 0, 0]));
+
+        // A decision: one less open, nothing overdue, and how long it took
+        alice_mcp.call_tool("set_cve_status", &json!({ "org": "acme", "project": "infra", "cve_id": "CVE-2024-6001", "status": "treated" })).unwrap();
+        let after = bob_mcp.call_tool("get_summary", &scope).unwrap();
+        assert_eq!((after["open"]["total"].as_i64(), after["overdue"]["total"].as_i64(), after["resolved"]["critical"].as_i64()), (Some(1), Some(0), Some(1)));
+        assert_eq!((after["resolved_avg_days"]["critical"].as_f64(), after["resolved_avg_days"]["total"].as_f64()), (Some(10.0), Some(10.0)));
+        assert!(after["overdue_days"]["avg"].is_null() && after["overdue_days"]["max"].is_null() && after["resolved_avg_days"]["medium"].is_null());
     }
 }

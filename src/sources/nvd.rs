@@ -212,10 +212,6 @@ impl NvdSource {
 }
 
 impl CveSource for NvdSource {
-    fn name(&self) -> &'static str {
-        "nvd"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         use chrono::Duration;
 
@@ -420,10 +416,7 @@ impl NvdSource {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 struct NvdResponse {
-    results_per_page: u32,
-    start_index: u32,
     total_results: u32,
     vulnerabilities: Vec<NvdVulnerability>,
 }

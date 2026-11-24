@@ -222,13 +222,17 @@ header.top .user { display: flex; flex-wrap: wrap; justify-content: flex-end; ga
 header.top .user a { padding: 4px 10px; border-radius: 6px; color: var(--text); }
 header.top .user a:hover { background: var(--bg); text-decoration: none; }
 header.top .user a.active { background: var(--bg); font-weight: 600; color: var(--accent); }
+/* Invitations waiting for an answer */
+header.top .user a.invited { border: 1px solid var(--accent); color: var(--accent); font-size: 13px; padding: 2px 9px; }
 
 .sync { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 
 /* Two visibly separate sides: what I run (products) / reference information */
 header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--border); }
-.zone { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 6px 16px 9px 24px; }
-.zone a { padding: 5px 9px; border-radius: 6px; color: var(--text); font-size: 14px; white-space: nowrap; }
+/* Tight enough for the products side to hold on one row in a 1280 px window,
+   with both menus and every view */
+.zone { display: flex; flex-wrap: wrap; align-items: center; gap: 1px; padding: 6px 10px 9px 24px; }
+.zone a { padding: 5px 6px; border-radius: 6px; color: var(--text); font-size: 14px; white-space: nowrap; }
 .zone a:hover { text-decoration: none; background: var(--zone-hover); }
 .zone a.active { font-weight: 600; background: var(--zone-active); color: var(--zone-ink); }
 .zone-label {
@@ -237,7 +241,7 @@ header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--zone-ink);
-  margin-right: 10px;
+  margin-right: 8px;
 }
 .zone.product {
   flex: 1;
@@ -253,9 +257,10 @@ header.top .zones { display: flex; flex-wrap: wrap; border-top: 1px solid var(--
   background: var(--info-bg);
   border-left: 1px solid var(--border);
   box-shadow: inset 0 -3px 0 var(--info-ink);
+  padding-left: 14px;
 }
 
-details.menu { position: relative; margin-right: 8px; }
+details.menu { position: relative; margin-right: 6px; }
 details.menu summary {
   list-style: none;
   cursor: pointer;
@@ -264,7 +269,7 @@ details.menu summary {
   border-radius: 6px;
   font-weight: 600;
   font-size: 14px;
-  min-width: 130px;
+  min-width: 96px;
   position: relative;
 }
 details.menu summary::-webkit-details-marker { display: none; }
@@ -363,9 +368,12 @@ table.fit col.cvss { width: 122px; }
 table.fit col.when { width: 186px; }
 table.fit col.day { width: 124px; }
 table.fit col.num { width: 116px; }
+/* A figure among several in a row (a count per severity) */
+table.fit col.fig { width: 84px; }
 table.fit col.flag { width: 96px; }
 table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
+table.fit col.due { width: 124px; }
 table.fit col.name { width: 20%; }
 table.fit col.app { width: 16%; }
 table.fit col.who { width: 13%; }
@@ -411,6 +419,12 @@ table.dense col.project { width: 10%; }
   font-size: 13px; font-weight: 400; line-height: 1.4; white-space: normal; text-align: left; overflow-wrap: break-word;
 }
 .info:hover .bubble, .info:focus .bubble, .info:focus-within .bubble { display: block; }
+/* Between a phone and a small laptop, a list of all projects has no room left
+   for a text beside the project and the deadline: the page of the CVE has it */
+@media (min-width: 761px) and (max-width: 899px) {
+  table.triage:has(col.project) col.desc { visibility: collapse; }
+}
+
 /* Between the phone layout and a wide window: tighter cells, a date over its
    time, the buttons one under the other, a project name kept on one line and
    a description cut after four lines (their title attribute holds the whole
@@ -424,9 +438,11 @@ table.dense col.project { width: 10%; }
   table.fit col.when { width: 104px; }
   table.fit col.day { width: 104px; }
   table.fit col.num { width: 104px; }
+  table.fit col.fig { width: 72px; }
   table.fit col.flag { width: 84px; }
   table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
+  table.fit col.due { width: 88px; }
   table.fit col.name { width: 19%; }
   table.fit col.app { width: 15%; }
   table.fit col.who { width: 12%; }
@@ -465,6 +481,7 @@ dl.meta dd { margin: 0; overflow-wrap: anywhere; }
 .tag { background: var(--tag-bg); color: var(--text); }
 .tag.kev { background: var(--badge-critical); color: var(--badge-critical-ink); }
 .tag.warn { background: var(--badge-medium); color: var(--badge-medium-ink); }
+.tag.late { background: var(--badge-critical); color: var(--badge-critical-ink); }
 
 form.filters, form.row {
   display: flex;
@@ -545,6 +562,19 @@ nav.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); fo
 .tile .label { color: var(--muted); font-size: 13px; }
 .tile.alert { border-color: var(--danger); }
 .tile.alert .value { color: var(--danger); }
+/* A figure leading to the list of what it counts keeps its color; the unit is said next to it, smaller */
+.tile .value a { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+.unit { font-size: 0.6em; font-weight: 600; color: var(--muted); }
+table.list .unit { font-size: inherit; font-weight: 400; }
+.nodata { color: var(--muted); }
+table.list tr.total td { font-weight: 600; }
+.chips.period { align-items: center; }
+p.narrowed { margin: -4px 0 14px; }
+/* The figures of a chart, for who cannot read it: folded under it */
+details.daily { margin-top: 10px; }
+details.daily summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+details.daily[open] summary { margin-bottom: 8px; }
+.card h3.next { margin-top: 16px; }
 
 .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; justify-content: space-between; }
 .head h1, .head h2 { margin-bottom: 8px; }
@@ -798,6 +828,7 @@ footer.bottom a:hover { color: var(--accent); }
   table.triage td { grid-column: 1 / -1; }
   table.triage td.cve { grid-column: 1; }
   table.triage td.cvss { grid-column: 2; text-align: right; }
+  table.triage td.due:not(.late):not(:empty)::before { content: "Due "; color: var(--muted); }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
   table.triage td.actions { margin-top: 4px; }
   table.list.triage td[data-label]::before { content: none; }
@@ -833,3 +864,8 @@ table.events td.tick input { margin: 0; vertical-align: middle; }
 /* The gear opening the configuration of a destination */
 a.gear { font-size: 15px; line-height: 1.2; padding: 1px 7px; }
 a.gear:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
+
+/* Steps shown above a field that needs something from another service */
+.guide { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; background: var(--info-bg); color: var(--text); }
+.guide ol { margin: 6px 0 0; padding-left: 20px; }
+.guide li { margin: 4px 0; overflow-wrap: anywhere; }

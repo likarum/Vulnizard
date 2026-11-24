@@ -254,10 +254,6 @@ fn statements_of(advisory: &OsvVulnerability, ecosystem: &str) -> Vec<OsvStateme
 }
 
 impl CveSource for OsvSource {
-    fn name(&self) -> &'static str {
-        "osv"
-    }
-
     fn sync(&self, db: &Database, opts: &SyncOptions) -> Result<SyncResult> {
         let mut result = SyncResult::default();
         if opts.may_skip_if_fresh() {
@@ -321,7 +317,6 @@ struct OsvAffected {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct OsvPackage {
     name: String,
     #[serde(default)]

@@ -6,9 +6,12 @@ use std::path::Path;
 
 mod access;
 mod admin_ops;
+mod deadlines;
 mod destinations;
 mod distro;
+mod executive;
 mod inventory;
+mod invitations;
 mod lifecycle;
 mod mfa;
 mod osv;
@@ -21,7 +24,9 @@ mod trail;
 pub use access::*;
 pub use destinations::*;
 pub use distro::*;
+pub use executive::*;
 pub use inventory::*;
+pub use invitations::*;
 pub use lifecycle::*;
 pub use mfa::*;
 pub use osv::*;
@@ -655,6 +660,24 @@ impl Database {
             self.migrate_remove_browser_notifications()?;
         }
 
+        // Migration v28 -> v29: remediation delays an organization replaces
+        if schema_version < 29 {
+            tracing::info!("Upgrading database schema to v29 (remediation deadlines)");
+            self.migrate_deadlines()?;
+        }
+
+        // Migration -> v30: a member is invited, and accepts
+        if schema_version < 30 {
+            tracing::info!("Upgrading database schema to v30 (invitations)");
+            self.migrate_invitations()?;
+        }
+
+        // Migration -> v31: the executive role, which reads the figures and nothing else
+        if schema_version < 31 {
+            tracing::info!("Upgrading database schema to v31 (executive role)");
+            self.migrate_executive()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -747,7 +770,7 @@ impl Database {
     }
 
     /// Ouvre une base de données en mémoire (pour tests)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         register_functions(&conn)?;
@@ -804,6 +827,9 @@ impl Database {
         self.migrate_sync_unchanged()?;
         self.migrate_destination_settings()?;
         self.migrate_remove_browser_notifications()?;
+        self.migrate_deadlines()?;
+        self.migrate_invitations()?;
+        self.migrate_executive()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1732,14 +1758,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 28
+        // Check schema version is 31
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "28");
+        assert_eq!(version, "31");
     }
 
     #[test]

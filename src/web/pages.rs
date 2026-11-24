@@ -995,6 +995,7 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
         html! {
             h1 { "Settings" }
             @if let Some(m) = message { p { strong { (m) } } }
+            (super::invitations::received_section(db, user)?)
 
             h2 { "API tokens" }
             @if let Some(token) = new_token {
@@ -1116,7 +1117,7 @@ pub(super) fn load_org(db: &Database, user: &Account, org: &str) -> Result<Org, 
     Ok(org)
 }
 
-/// Project the user can access, by names. The returned `Org` carries the
+/// Project the user can read (viewer or more), by names. The returned `Org` carries the
 /// user's effective role *on this project* (instance, organization or
 /// project level), which the permission checks of project pages use.
 pub fn load_project(
@@ -1126,6 +1127,15 @@ pub fn load_project(
     project: &str,
 ) -> Result<(Org, OrgProject), AppError> {
     db.get_project_for_user(org, project, user.id)?.ok_or(AppError::NotFound)
+}
+
+/// Project the user may read the figures of, by names: any role on it,
+/// executive included. Only the Overview and the summary of the API load a
+/// project this way; everything else reads it (`load_project`).
+pub fn load_summary_project(db: &Database, user: &Account, org: &str, project: &str) -> Result<(Org, OrgProject), AppError> {
+    db.get_project_for_summary(org, project, user.id)?
+        .filter(|(org, _)| org.can(Permission::Summary))
+        .ok_or(AppError::NotFound)
 }
 
 /// Permission check against the user's role in the organization
@@ -1141,7 +1151,6 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
     blocking(|| {
         let db = st.db()?;
         let orgs = db.list_orgs(user.id)?;
-        let awaiting = db.orgs_awaiting_mfa(user.id)?;
         let own = db.own_org_memberships(user.id)?;
         Ok(views::layout(
             views::Nav::PRODUCTS,
@@ -1169,18 +1178,7 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
                                 }
                             }
                         }
-                        @for name in &awaiting {
-                            tr {
-                                td { (name) }
-                                td { span.muted { "closed: requires two-step sign-in — " } a href="/settings/mfa" { "set it up" } }
-                                td.right {
-                                    form.inline method="post" action={ "/orgs/" (enc(name)) "/leave" } {
-                                        button.small.secondary type="submit" { "Leave" }
-                                    }
-                                }
-                            }
-                        }
-                        @if orgs.is_empty() && awaiting.is_empty() { tr { td colspan="3" .muted { "You are not a member of any organization yet." } } }
+                        @if orgs.is_empty() { tr { td colspan="3" .muted { "You are not a member of any organization yet." } } }
                     }
                 }
                 h2 { "New organization" }
@@ -1258,6 +1256,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                     }
                 }
 
+                (super::deadlines::org_section(&db, &org)?)
+
                 h2 { "Members" }
                 table.list.fit {
                     (views::columns("- - act", true))
@@ -1310,11 +1310,12 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                         input type="text" name="username" placeholder="username" required;
                         select name="role" {
                             @for role in Role::ALL.iter().rev() {
-                                option value=(role.as_str()) { (role.as_str()) }
+                                option value=(role.as_str()) selected[*role == Role::Viewer] { (role.as_str()) }
                             }
                         }
-                        button type="submit" { "Add member" }
+                        button type="submit" { "Invite" }
                     }
+                    (super::invitations::pending_section(&db, crate::db::Scope::Organization(org.id), &base)?)
                 }
                 @if org.can(Permission::DeleteOrganization) {
                     h2 { "Danger zone" }
@@ -1353,6 +1354,9 @@ pub struct MemberForm {
     role: String,
 }
 
+/// A name with a role, from the members of an organization. The name of a
+/// member — the list shows it — changes its role, as before. Any other name
+/// is invited: the same answer whether an account bears it or not.
 pub async fn member_add(
     State(st): St,
     User(user): User,
@@ -1363,14 +1367,17 @@ pub async fn member_add(
         let db = st.db()?;
         let org = load_org(&db, &user, &org)?;
         require(&org, Permission::ManageMembers)?;
-        if let Some(account) = db.get_credentials_or_sso(form.username.trim())? {
-            if !db.may_hold_right(account.id, crate::db::Scope::Organization(org.id))? {
-                return Err(AppError::Bad("This account belongs to another project or organization.".into()));
-            }
+        let role = Role::parse(&form.role).ok_or_else(|| AppError::Bad("Unknown role".into()))?;
+        let name = super::invitations::typed_name(&form.username)?;
+        let page = format!("/orgs/{}", enc(&org.name));
+        let Some(member) = db.list_members(org.id)?.into_iter().find(|m| m.username.eq_ignore_ascii_case(name)) else {
+            return super::invitations::invite(&db, &user, crate::db::Scope::Organization(org.id), name, role, page);
+        };
+        if !db.may_hold_right(member.user_id, crate::db::Scope::Organization(org.id))? {
+            return Err(AppError::Bad("This account belongs to another project or organization.".into()));
         }
-        db.add_member(org.id, form.username.trim(), &form.role)
-            .map_err(AppError::bad)?;
-        Ok(redirect(format!("/orgs/{}", enc(&org.name))))
+        db.add_member(org.id, &member.username, role.as_str()).map_err(AppError::bad)?;
+        Ok(redirect(page))
     })
 }
 
@@ -1410,6 +1417,14 @@ pub async fn logo() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_str!("logo.svg"),
+    )
+}
+
+/// The logo as an image file, for the services that take no SVG (the icon of a Slack app)
+pub async fn logo_png() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")],
+        include_bytes!("logo.png").as_slice(),
     )
 }
 

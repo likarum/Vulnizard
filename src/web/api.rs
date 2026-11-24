@@ -96,6 +96,94 @@ pub async fn project(
     })
 }
 
+#[derive(Deserialize, Default)]
+pub struct WatchlistQuery {
+    /// untreated | accepted | treated | not_applicable; all of them when absent
+    status: Option<String>,
+    /// "1" or "true": only the entries to review that are past their deadline
+    overdue: Option<String>,
+    page: Option<i64>,
+}
+
+/// Watchlist entries of a project, 200 per page, each with where it stands
+/// against its remediation deadline
+pub async fn watchlist(
+    State(st): St,
+    ApiUser(user): ApiUser,
+    Path((org, project)): Path<(String, String)>,
+    Query(q): Query<WatchlistQuery>,
+) -> ApiResult {
+    blocking(|| {
+        let db = st.db()?;
+        let (_, project) = load_project(&db, &user, &org, &project)?;
+        let status = match q.status.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => Some(crate::models::CveStatus::from_str(s).ok_or_else(|| AppError::Bad(format!("invalid status '{s}'")))?),
+            None => None,
+        };
+        let overdue = matches!(q.overdue.as_deref(), Some("1" | "true"));
+        let entries = db.list_watchlist_entries(None, Some(project.id), None, status)?;
+        let entries = crate::deadlines::entries_json(entries, &db.deadline_policies()?, overdue, None);
+        let total = entries.len();
+        let page: Vec<&Value> = entries.iter().skip(offset(q.page, 200) as usize).take(200).collect();
+        Ok(Json(json!({ "total": total, "entries": page })))
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub struct SummaryQuery {
+    /// Length in days of the period the resolution figures are taken over (default 90)
+    days: Option<String>,
+    /// All readable projects: only those of this organization
+    org: Option<String>,
+}
+
+fn summary_period(days: Option<&str>) -> Result<i64, AppError> {
+    match days.filter(|d| !d.is_empty()) {
+        None => Ok(90),
+        Some(d) => d
+            .parse::<i64>()
+            .ok()
+            .filter(|n| (1..=365).contains(n))
+            .ok_or_else(|| AppError::Bad("days must be a whole number from 1 to 365".into())),
+    }
+}
+
+/// The projects the caller may ask the figures of: every project it holds a
+/// role on, executive included. Names and role only.
+pub async fn summary_projects(State(st): St, ApiUser(user): ApiUser) -> ApiResult {
+    blocking(|| {
+        let held = st.db()?.held_projects(user.id)?;
+        Ok(Json(json!(held.iter().map(|p| json!({ "org": p.org, "project": p.name, "role": p.role })).collect::<Vec<_>>())))
+    })
+}
+
+/// Executive figures of every project the caller holds a role on (executive
+/// or more), or of those of one organization: figures only (see
+/// `crate::deadlines::Figures`). An organization the caller holds nothing in
+/// answers as one without anything.
+pub async fn summary(State(st): St, ApiUser(user): ApiUser, Query(q): Query<SummaryQuery>) -> ApiResult {
+    blocking(|| {
+        let days = summary_period(q.days.as_deref())?;
+        let org = q.org.as_deref().filter(|o| !o.is_empty());
+        Ok(Json(json!(st.db()?.figures(Some(user.id), None, org, days)?)))
+    })
+}
+
+/// Executive figures of one project
+pub async fn project_summary(
+    State(st): St,
+    ApiUser(user): ApiUser,
+    Path((org, project)): Path<(String, String)>,
+    Query(q): Query<SummaryQuery>,
+) -> ApiResult {
+    blocking(|| {
+        let db = st.db()?;
+        let (_, project) = super::pages::load_summary_project(&db, &user, &org, &project)?;
+        let days = summary_period(q.days.as_deref())?;
+        Ok(Json(json!(db.figures(Some(user.id), Some(project.id), None, days)?)))
+    })
+}
+
 pub async fn reports(
     State(st): St,
     ApiUser(user): ApiUser,

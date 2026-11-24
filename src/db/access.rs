@@ -74,6 +74,13 @@ pub struct TriageItem {
     pub group: String,
     /// Kept without any source giving the affected versions
     pub version_unknown: bool,
+    /// When the entry was detected: the start of its remediation delay
+    pub detected_at: String,
+    /// When the decision in force was taken (`None` while to review)
+    pub decided_at: Option<String>,
+    /// Where the entry stands against its remediation deadline today, with
+    /// the delays of its organization (see `crate::deadlines`)
+    pub deadline: Option<crate::deadlines::Deadline>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,14 +94,6 @@ pub struct ProjectSummary {
     pub subscriptions: i64,
     pub untreated: i64,
     pub last_report: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Breakdown {
-    pub project_id: i64,
-    pub status: String,
-    pub severity: String,
-    pub count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -447,7 +446,8 @@ impl Database {
 
 const TRIAGE_SELECT: &str = "
     SELECT w.id, w.cve_id, w.status, w.priority, a.name, a.version, o.name, p.name,
-           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown
+           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown,
+           w.created_at, CASE WHEN w.status != 'untreated' THEN COALESCE(w.treated_at, w.updated_at) END
     FROM watchlist_entries w
     JOIN applications a ON a.id = w.app_id
     JOIN projects p ON p.id = a.project_id
@@ -472,6 +472,9 @@ fn triage_row(r: &rusqlite::Row) -> rusqlite::Result<TriageItem> {
         description: r.get(10)?,
         group: r.get(11)?,
         version_unknown: r.get(12)?,
+        detected_at: r.get(13)?,
+        decided_at: r.get(14)?,
+        deadline: None,
     })
 }
 
@@ -485,44 +488,14 @@ impl Database {
         let rows = stmt
             .query_map(params![project_id], triage_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    /// Watchlist counts per (project id, status, severity level) for the
-    /// user's projects, or one project.
-    pub fn watch_breakdown(&self, user_id: i64, project_id: Option<i64>) -> Result<Vec<Breakdown>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT p.id, w.status,
-                    CASE WHEN c.cvss_v3_score >= 9.0 THEN 'critical'
-                         WHEN c.cvss_v3_score >= 7.0 THEN 'high'
-                         WHEN c.cvss_v3_score >= 4.0 THEN 'medium'
-                         WHEN c.cvss_v3_score > 0 THEN 'low'
-                         ELSE 'none' END,
-                    COUNT(*)
-             FROM watchlist_entries w
-             JOIN applications a ON a.id = w.app_id
-             JOIN projects p ON p.id = a.project_id
-             JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
-             LEFT JOIN cves c ON c.cve_id = w.cve_id
-             WHERE (?2 IS NULL OR p.id = ?2)
-             GROUP BY 1, 2, 3",
-        )?;
-        let rows = stmt
-            .query_map(params![user_id, project_id], |r| {
-                Ok(Breakdown {
-                    project_id: r.get(0)?,
-                    status: r.get(1)?,
-                    severity: r.get(2)?,
-                    count: r.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_deadlines(rows)
     }
 
     /// Untreated entries of the user's projects, optionally for one project
     /// or for the projects of one organization. The organization only narrows
-    /// what the user's rights give: it is never what gives access.
+    /// what the user's rights give: it is never what gives access. Each entry
+    /// carries its remediation deadline (`TriageItem::deadline`); a negative
+    /// `limit` lists them all.
     pub fn scoped_triage(
         &self,
         user_id: i64,
@@ -541,7 +514,7 @@ impl Database {
         let rows = stmt
             .query_map(params![user_id, project_id, limit, org], triage_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_deadlines(rows)
     }
 
     /// Applications of the user's projects (or one project): (org, project, application)
@@ -671,11 +644,11 @@ impl Database {
         Ok((last, running))
     }
 
-    /// Every project the user can access, with its counters
+    /// Every project the user can read (viewer or more), with its counters
     pub fn project_summaries(&self, user_id: i64) -> Result<Vec<ProjectSummary>> {
-        let mut stmt = self.conn().prepare(
+        let mut stmt = self.conn().prepare(&format!(
             "SELECT p.id, o.name, p.name, p.description,
-                    CASE pa.rank WHEN 3 THEN 'owner' WHEN 2 THEN 'editor' ELSE 'viewer' END,
+                    {role},
                     (SELECT COUNT(*) FROM applications a WHERE a.project_id = p.id),
                     (SELECT COUNT(*) FROM subscriptions s WHERE s.project_id = p.id),
                     (SELECT COUNT(*) FROM watchlist_entries w JOIN applications a ON a.id = w.app_id
@@ -685,7 +658,8 @@ impl Database {
              JOIN organizations o ON o.id = p.organization_id
              JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
              ORDER BY o.name, p.name",
-        )?;
+            role = super::roles::role_of("pa.rank")
+        ))?;
         let rows = stmt
             .query_map(params![user_id], |r| {
                 Ok(ProjectSummary {
@@ -757,6 +731,7 @@ mod tests {
         db.conn()
             .execute_batch(
                 "DROP VIEW project_access; DROP VIEW org_access;
+                 DROP VIEW project_summary_access; DROP VIEW org_summary_access;
                  DROP INDEX idx_users_oidc; DROP TABLE oidc_states;
                  DROP TRIGGER identity_project_deleted; DROP TRIGGER identity_organization_deleted;
                  ALTER TABLE users DROP COLUMN disabled; ALTER TABLE users DROP COLUMN oidc_subject;
@@ -900,14 +875,7 @@ mod tests {
         assert!(db.scoped_triage(bob, None, Some("acme"), false, 10).unwrap().is_empty());
         assert_eq!(items.len(), 1);
         assert_eq!((items[0].project.as_str(), items[0].kev), ("infra", true));
-        let breakdown = db.watch_breakdown(alice, None).unwrap();
-        assert_eq!(breakdown.len(), 1);
-        assert_eq!(
-            (breakdown[0].project_id, breakdown[0].status.as_str(), breakdown[0].severity.as_str(), breakdown[0].count),
-            (project, "untreated", "critical", 1)
-        );
         assert!(db.scoped_triage(bob, None, None, false, 10).unwrap().is_empty());
-        assert!(db.watch_breakdown(bob, None).unwrap().is_empty());
         assert!(db.scoped_triage(alice, Some(other_project), None, false, 10).unwrap().is_empty());
         assert_eq!(db.scoped_applications(alice, None).unwrap()[0].untreated, 1);
         // A run left "running" by a stopped process no longer shows as in progress
@@ -925,7 +893,6 @@ mod tests {
         assert!(db.set_watchlist_status(project, entry, CveStatus::NotApplicable, &actor, None).unwrap());
         assert!(db.project_triage(project, false).unwrap().is_empty());
         assert_eq!(db.project_triage(project, true).unwrap()[0].status, "not_applicable");
-        assert_eq!(db.watch_breakdown(alice, None).unwrap()[0].status, "not_applicable");
 
         let summary = &db.project_summaries(alice).unwrap()[0];
         assert_eq!((summary.applications, summary.untreated, summary.role.as_str()), (1, 0, "owner"));
