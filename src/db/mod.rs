@@ -176,6 +176,17 @@ CREATE INDEX IF NOT EXISTS idx_applications_project ON applications(project_id);
 CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id);
 "#;
 
+/// What storing a CVE did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stored {
+    /// The CVE was not known
+    Created,
+    /// It was known and something of it changed
+    Changed,
+    /// It was known and is as it was: nothing was written
+    Same,
+}
+
 pub struct Database {
     conn: Connection,
     /// Key of the secrets stored in this database (see `crate::secrets`)
@@ -229,6 +240,14 @@ impl Database {
     /// Get a reference to the underlying connection (for watchlist module)
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// A transaction that writes: it takes the write lock when it opens, and
+    /// waits its turn for it. A deferred one that reads first is refused at
+    /// once on its first write when another connection (a synchronization)
+    /// committed meanwhile: "database is locked", whatever the time allowed.
+    pub(crate) fn write_tx(&self) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
     }
 }
 
@@ -535,7 +554,7 @@ impl Database {
             self.migrate_roles()?;
         }
 
-        // Migration v12 -> v13: notification destinations, Web Push
+        // Migration v12 -> v13: notification destinations
         if schema_version < 13 {
             tracing::info!("Upgrading database schema to v13 (notification destinations)");
             self.migrate_destinations()?;
@@ -618,6 +637,24 @@ impl Database {
             self.migrate_osv_advisories()?;
         }
 
+        // Migration v25 -> v26: how many CVEs a run read again and found as they were
+        if schema_version < 26 {
+            tracing::info!("Upgrading database schema to v26 (unchanged CVEs counted apart)");
+            self.migrate_sync_unchanged()?;
+        }
+
+        // Migration v26 -> v27: a destination receives by its scope, and holds what it sends
+        if schema_version < 27 {
+            tracing::info!("Upgrading database schema to v27 (destinations receive by their scope; the per-project rules are gone)");
+            self.migrate_destination_settings()?;
+        }
+
+        // Migration v27 -> v28: browser notifications are removed
+        if schema_version < 28 {
+            tracing::info!("Upgrading database schema to v28 (browser notifications removed)");
+            self.migrate_remove_browser_notifications()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -664,6 +701,19 @@ impl Database {
             "BEGIN;
              ALTER TABLE watchlist_entries ADD COLUMN version_unknown INTEGER NOT NULL DEFAULT 0;
              INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '24');
+             COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    /// v26: a run counts apart the CVEs it created, those it changed and
+    /// those it read again and found as they were. Earlier runs counted every
+    /// CVE read as added: their figures stay as they were written.
+    fn migrate_sync_unchanged(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE sync_history ADD COLUMN cves_unchanged INTEGER DEFAULT 0;
+             INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '26');
              COMMIT;",
         )?;
         Ok(())
@@ -751,23 +801,36 @@ impl Database {
         self.migrate_bounds()?;
         self.migrate_version_unknown()?;
         self.migrate_osv_advisories()?;
+        self.migrate_sync_unchanged()?;
+        self.migrate_destination_settings()?;
+        self.migrate_remove_browser_notifications()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
     }
 
     /// Insère ou met à jour une CVE
-    pub fn upsert_cve(&self, cve: &Cve) -> Result<bool> {
+    pub fn upsert_cve(&self, cve: &Cve) -> Result<Stored> {
         self.upsert(cve, true)
+    }
+
+    /// Whether a description is stored for this CVE
+    pub fn has_description(&self, cve_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM cves WHERE cve_id = ?1 AND description IS NOT NULL AND description != '')")?
+            .query_row(params![cve_id], |r| r.get(0))?)
     }
 
     /// Same, without recording anything as a change of the CVE: for the
     /// history read long after the fact, which is not news
-    pub fn upsert_cve_untracked(&self, cve: &Cve) -> Result<bool> {
+    pub fn upsert_cve_untracked(&self, cve: &Cve) -> Result<Stored> {
         self.upsert(cve, false)
     }
 
-    fn upsert(&self, cve: &Cve, record_changes: bool) -> Result<bool> {
+    fn upsert(&self, cve: &Cve, record_changes: bool) -> Result<Stored> {
+        let existed: bool =
+            self.conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM cves WHERE cve_id = ?1)")?.query_row(params![cve.cve_id], |r| r.get(0))?;
         // Only upserts touching tracked fields can produce change events
         // (an EPSS-only update skips the before/after comparison entirely).
         let touches_tracked = cve.description.is_some()
@@ -829,6 +892,27 @@ impl Database {
                 ssvc_automatable = COALESCE(excluded.ssvc_automatable, ssvc_automatable),
                 ssvc_technical_impact = COALESCE(excluded.ssvc_technical_impact, ssvc_technical_impact),
                 updated_in_db = datetime('now')
+            -- Only a row that would really differ is written: what follows repeats the
+            -- assignments above, one by one. A row left alone counts as unchanged.
+            WHERE description IS NOT COALESCE(excluded.description, description)
+                OR cvss_v3_score IS NOT COALESCE(excluded.cvss_v3_score, cvss_v3_score)
+                OR cvss_v3_vector IS NOT COALESCE(excluded.cvss_v3_vector, cvss_v3_vector)
+                OR epss_score IS NOT COALESCE(excluded.epss_score, epss_score)
+                OR epss_percentile IS NOT COALESCE(excluded.epss_percentile, epss_percentile)
+                OR (excluded.cwe_ids != '[]' AND cwe_ids IS NOT excluded.cwe_ids)
+                OR (excluded.affected_products != '[]' AND affected_products IS NOT excluded.affected_products)
+                OR (excluded.references_json != '[]' AND references_json IS NOT excluded.references_json)
+                OR kev_known_exploited IS NOT MAX(kev_known_exploited, excluded.kev_known_exploited)
+                OR kev_date_added IS NOT COALESCE(excluded.kev_date_added, kev_date_added)
+                OR published_at IS NOT COALESCE(excluded.published_at, published_at)
+                OR modified_at IS NOT COALESCE(excluded.modified_at, modified_at)
+                OR exploit_public IS NOT MAX(exploit_public, excluded.exploit_public)
+                OR (excluded.exploit_urls != '[]' AND exploit_urls IS NOT excluded.exploit_urls)
+                OR metasploit_module IS NOT COALESCE(excluded.metasploit_module, metasploit_module)
+                OR nuclei_template IS NOT COALESCE(excluded.nuclei_template, nuclei_template)
+                OR ssvc_exploitation IS NOT COALESCE(excluded.ssvc_exploitation, ssvc_exploitation)
+                OR ssvc_automatable IS NOT COALESCE(excluded.ssvc_automatable, ssvc_automatable)
+                OR ssvc_technical_impact IS NOT COALESCE(excluded.ssvc_technical_impact, ssvc_technical_impact)
             "#,
             params![
                 cve.cve_id,
@@ -936,7 +1020,11 @@ impl Database {
             }
         }
 
-        Ok(rows_affected > 0)
+        Ok(match (existed, rows_affected > 0) {
+            (false, _) => Stored::Created,
+            (true, true) => Stored::Changed,
+            (true, false) => Stored::Same,
+        })
     }
 
     /// Tracked state of a CVE, used for change detection
@@ -1279,10 +1367,11 @@ impl Database {
         sync_id: i64,
         cves_added: i64,
         cves_updated: i64,
+        cves_unchanged: i64,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE sync_history SET completed_at = datetime('now'), status = 'completed', cves_added = ?2, cves_updated = ?3 WHERE id = ?1",
-            params![sync_id, cves_added, cves_updated],
+            "UPDATE sync_history SET completed_at = datetime('now'), status = 'completed', cves_added = ?2, cves_updated = ?3, cves_unchanged = ?4 WHERE id = ?1",
+            params![sync_id, cves_added, cves_updated, cves_unchanged],
         )?;
         Ok(())
     }
@@ -1471,6 +1560,9 @@ impl Database {
                     ssvc_technical_impact = COALESCE(?4, ssvc_technical_impact),
                     updated_in_db = datetime('now')
                 WHERE cve_id = ?1
+                    AND (ssvc_exploitation IS NOT COALESCE(?2, ssvc_exploitation)
+                        OR ssvc_automatable IS NOT COALESCE(?3, ssvc_automatable)
+                        OR ssvc_technical_impact IS NOT COALESCE(?4, ssvc_technical_impact))
                 "#,
                 params![cve_id, exploitation, automatable, technical_impact],
             )?;
@@ -1610,17 +1702,44 @@ mod tests {
     }
 
     #[test]
+    fn a_writing_transaction_waits_its_turn_instead_of_failing() {
+        let (db, dir) = create_test_db();
+        let other = Database::connect(&dir.path().join("test.db")).unwrap();
+        other.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        db.conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+        // What used to happen: a transaction reads, a synchronization commits, the transaction's
+        // first write is refused at once, with or without time to wait
+        let deferred = db.conn.unchecked_transaction().unwrap();
+        let _: i64 = deferred.query_row("SELECT COUNT(*) FROM metadata", [], |r| r.get(0)).unwrap();
+        other.set_metadata("sync", "wrote meanwhile").unwrap();
+        let refused = deferred.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('k', 'v')", []);
+        assert!(refused.unwrap_err().to_string().contains("locked"));
+        drop(deferred);
+
+        // A writing transaction holds the lock from its opening: the other side waits for it
+        // (here, with no time to wait, it is told to come back), and its own writes pass
+        let tx = db.write_tx().unwrap();
+        let _: i64 = tx.query_row("SELECT COUNT(*) FROM metadata", [], |r| r.get(0)).unwrap();
+        assert!(other.set_metadata("sync", "second").is_err());
+        tx.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('k', 'v')", []).unwrap();
+        tx.commit().unwrap();
+        other.set_metadata("sync", "third").unwrap();
+        assert_eq!(db.get_metadata("k").unwrap().as_deref(), Some("v"));
+    }
+
+    #[test]
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 25
+        // Check schema version is 28
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "25");
+        assert_eq!(version, "28");
     }
 
     #[test]
@@ -1652,13 +1771,76 @@ mod tests {
         cve.ssvc_technical_impact = Some("total".to_string());
 
         let is_new = db.upsert_cve(&cve).unwrap();
-        assert!(is_new);
+        assert_eq!(is_new, Stored::Created);
 
         // Retrieve and verify
         let retrieved = db.get_cve("CVE-2024-12345").unwrap().unwrap();
         assert_eq!(retrieved.ssvc_exploitation, Some("active".to_string()));
         assert_eq!(retrieved.ssvc_automatable, Some("yes".to_string()));
         assert_eq!(retrieved.ssvc_technical_impact, Some("total".to_string()));
+    }
+
+    #[test]
+    fn storing_a_cve_says_whether_it_was_created_changed_or_left_alone() {
+        let (db, _temp_dir) = create_test_db();
+        let mut cve = Cve::new("CVE-2024-11111".to_string());
+        cve.description = Some("Test vulnerability".to_string());
+        cve.cvss_v3_score = Some(7.5);
+        cve.cwe_ids = vec!["CWE-79".to_string()];
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Created);
+        let written = |db: &Database| -> String {
+            db.conn.query_row("SELECT updated_in_db FROM cves WHERE cve_id = 'CVE-2024-11111'", [], |r| r.get(0)).unwrap()
+        };
+        db.conn.execute("UPDATE cves SET updated_in_db = 'before'", []).unwrap();
+
+        // Read again as it is: nothing is written
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Same);
+        assert_eq!(db.upsert_cve_untracked(&cve).unwrap(), Stored::Same);
+        // A source that knows less than what is stored changes nothing either
+        assert_eq!(db.upsert_cve(&Cve::new("CVE-2024-11111".to_string())).unwrap(), Stored::Same);
+        assert_eq!(written(&db), "before");
+
+        // Each kind of field, once new, is a change, and only once
+        let mut scored = Cve::new("CVE-2024-11111".to_string());
+        scored.epss_score = Some(0.42);
+        assert_eq!(db.upsert_cve(&scored).unwrap(), Stored::Changed);
+        assert_eq!(db.upsert_cve(&scored).unwrap(), Stored::Same);
+        assert_ne!(written(&db), "before");
+        let mut exploited = Cve::new("CVE-2024-11111".to_string());
+        exploited.kev_known_exploited = true;
+        exploited.exploit_public = true;
+        assert_eq!(db.upsert_cve(&exploited).unwrap(), Stored::Changed);
+        assert_eq!(db.upsert_cve(&exploited).unwrap(), Stored::Same);
+        // A flag once raised is not lowered by a source that does not raise it
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Same);
+        let mut template = Cve::new("CVE-2024-11111".to_string());
+        template.nuclei_template = Some("http/cves/2024/CVE-2024-11111.yaml".to_string());
+        assert_eq!(db.upsert_cve(&template).unwrap(), Stored::Changed);
+        assert_eq!(db.upsert_cve(&template).unwrap(), Stored::Same);
+        cve.cwe_ids = vec!["CWE-79".to_string(), "CWE-80".to_string()];
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Changed);
+        cve.cvss_v3_score = Some(9.8);
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Changed);
+        assert_eq!(db.upsert_cve(&cve).unwrap(), Stored::Same);
+
+        // What was stored along the way is all there
+        let stored = db.get_cve("CVE-2024-11111").unwrap().unwrap();
+        assert_eq!(stored.cvss_v3_score, Some(9.8));
+        assert_eq!(stored.epss_score, Some(0.42));
+        assert!(stored.kev_known_exploited && stored.exploit_public);
+        assert_eq!(stored.nuclei_template.as_deref(), Some("http/cves/2024/CVE-2024-11111.yaml"));
+        assert_eq!(stored.cwe_ids.len(), 2);
+    }
+
+    #[test]
+    fn a_run_keeps_created_changed_and_unchanged_apart() {
+        let (db, _temp_dir) = create_test_db();
+        let run = db.start_sync("nvd").unwrap();
+        db.complete_sync(run, 3, 12, 340).unwrap();
+        let last = &db.recent_syncs(1).unwrap()[0];
+        assert_eq!((last.added, last.updated, last.same), (3, 12, 340));
+        let latest = &db.last_sync_runs().unwrap()[0];
+        assert_eq!((latest.added, latest.updated, latest.same), (3, 12, 340));
     }
 
     #[test]
@@ -1705,6 +1887,8 @@ mod tests {
 
         let updated = db.batch_update_ssvc(&updates).unwrap();
         assert_eq!(updated, 3);
+        // The same values again change nothing
+        assert_eq!(db.batch_update_ssvc(&updates).unwrap(), 0);
 
         // Verify updates
         let cve1 = db.get_cve("CVE-2024-00001").unwrap().unwrap();

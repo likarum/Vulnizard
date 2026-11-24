@@ -147,7 +147,7 @@ const CAN_LOG_IN: &str = "(password_hash IS NOT NULL OR oidc_subject IS NOT NULL
 
 impl Database {
     pub(super) fn migrate_access(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(ACCESS_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -192,7 +192,7 @@ impl Database {
     /// Runs an account change and refuses it (rolled back) if it leaves the
     /// instance without any enabled administrator.
     fn guarded_account_change(&self, sql: &str, user_id: i64, value: bool) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let changed = tx.execute(sql, params![value as i32, user_id])?;
         if changed == 0 {
             return Err(anyhow!("Unknown account"));
@@ -416,7 +416,7 @@ impl Database {
         if current == is_admin {
             return Ok(());
         }
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "UPDATE users SET is_admin = ?1 WHERE id = ?2",
             params![is_admin as i32, user_id],
@@ -521,16 +521,25 @@ impl Database {
     }
 
     /// Untreated entries of the user's projects, optionally for one project
-    pub fn scoped_triage(&self, user_id: i64, project_id: Option<i64>, handled: bool, limit: i64) -> Result<Vec<TriageItem>> {
+    /// or for the projects of one organization. The organization only narrows
+    /// what the user's rights give: it is never what gives access.
+    pub fn scoped_triage(
+        &self,
+        user_id: i64,
+        project_id: Option<i64>,
+        org: Option<&str>,
+        handled: bool,
+        limit: i64,
+    ) -> Result<Vec<TriageItem>> {
         let filter = if handled { "w.status != 'untreated'" } else { "w.status = 'untreated'" };
         let sql = format!(
             "{TRIAGE_SELECT}
              JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
-             WHERE {filter} AND (?2 IS NULL OR p.id = ?2) {TRIAGE_ORDER} LIMIT ?3"
+             WHERE {filter} AND (?2 IS NULL OR p.id = ?2) AND (?4 IS NULL OR o.name = ?4) {TRIAGE_ORDER} LIMIT ?3"
         );
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt
-            .query_map(params![user_id, project_id, limit], triage_row)?
+            .query_map(params![user_id, project_id, limit, org], triage_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -602,7 +611,7 @@ impl Database {
     /// Latest run of each source
     pub fn last_sync_runs(&self) -> Result<Vec<crate::db::SyncRun>> {
         let mut stmt = self.conn().prepare(
-            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message
+            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message, cves_unchanged
              FROM sync_history WHERE id IN (SELECT MAX(id) FROM sync_history GROUP BY source)",
         )?;
         let rows = stmt
@@ -614,6 +623,7 @@ impl Database {
                     status: r.get(3)?,
                     added: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     updated: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    same: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
                     error: r.get(6)?,
                 })
             })?
@@ -695,11 +705,12 @@ impl Database {
     }
 
     /// Latest changes on CVEs matching the subscriptions of the user's
-    /// projects (or of one project).
+    /// projects (or of one project, or of the projects of one organization).
     pub fn recent_project_changes(
         &self,
         user_id: i64,
         project_id: Option<i64>,
+        org: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ProjectChange>> {
         let mut stmt = self.conn().prepare(
@@ -711,11 +722,11 @@ impl Database {
              JOIN organizations o ON o.id = p.organization_id
              JOIN project_access pa ON pa.project_id = p.id AND pa.user_id = ?1
              LEFT JOIN cves c ON c.cve_id = ch.cve_id
-             WHERE (?2 IS NULL OR p.id = ?2)
+             WHERE (?2 IS NULL OR p.id = ?2) AND (?4 IS NULL OR o.name = ?4)
              ORDER BY ch.id DESC LIMIT ?3",
         )?;
         let rows = stmt
-            .query_map(params![user_id, project_id, limit], |r| {
+            .query_map(params![user_id, project_id, limit, org], |r| {
                 Ok(ProjectChange {
                     org: r.get(0)?,
                     project: r.get(1)?,
@@ -882,7 +893,11 @@ mod tests {
         app.id = Some(db.create_application(&app).unwrap());
         assert_eq!(db.scan_app_for_cves(&app).unwrap().0, 1);
 
-        let items = db.scoped_triage(alice, None, false, 10).unwrap();
+        let items = db.scoped_triage(alice, None, None, false, 10).unwrap();
+        // An organization narrows the list, and one that is not the user's shows nothing more
+        assert_eq!(db.scoped_triage(alice, None, Some("acme"), false, 10).unwrap().len(), 1);
+        assert!(db.scoped_triage(alice, None, Some("elsewhere"), false, 10).unwrap().is_empty());
+        assert!(db.scoped_triage(bob, None, Some("acme"), false, 10).unwrap().is_empty());
         assert_eq!(items.len(), 1);
         assert_eq!((items[0].project.as_str(), items[0].kev), ("infra", true));
         let breakdown = db.watch_breakdown(alice, None).unwrap();
@@ -891,9 +906,9 @@ mod tests {
             (breakdown[0].project_id, breakdown[0].status.as_str(), breakdown[0].severity.as_str(), breakdown[0].count),
             (project, "untreated", "critical", 1)
         );
-        assert!(db.scoped_triage(bob, None, false, 10).unwrap().is_empty());
+        assert!(db.scoped_triage(bob, None, None, false, 10).unwrap().is_empty());
         assert!(db.watch_breakdown(bob, None).unwrap().is_empty());
-        assert!(db.scoped_triage(alice, Some(other_project), false, 10).unwrap().is_empty());
+        assert!(db.scoped_triage(alice, Some(other_project), None, false, 10).unwrap().is_empty());
         assert_eq!(db.scoped_applications(alice, None).unwrap()[0].untreated, 1);
         // A run left "running" by a stopped process no longer shows as in progress
         db.start_sync("nvd").unwrap();

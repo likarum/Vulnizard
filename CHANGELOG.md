@@ -39,9 +39,38 @@ The sources are asked for much less. With the default settings an instance downl
   refuses an action without a selection, as before.
 - Colours of the severity badges and tags were adjusted for contrast (the "medium" badge was
   white on amber, 2.8:1; it is now 8.3:1), in every theme, by day and by night.
+- **A destination of the instance receives the notifications of every project, by itself**
+  (#95); one of an organization, those of its projects. No project has to pick it any more.
+  What it sends (event types, minimum CVSS, instance events, enabled or not) is set on the
+  destination, behind the gear in Administration → Notifications → Destinations; a new
+  destination has everything checked. Projects no longer see or set these destinations.
+  **At the upgrade every existing destination of the instance or of an organization starts
+  receiving everything for every project it covers**, and the per-project choices that
+  pointed at it are discarded: review them with the gear. A destination with no event
+  checked sends nothing (it used to mean "all"). Schema v27, automatic, no way back
+  without a backup.
+- **Project settings: notifications are one table** (#96), one destination of the project
+  per row, one checkbox per event type and the minimum CVSS, saved together. A project
+  destination that notified nothing before stays silent.
+- MCP `list_notifications`: each entry carries its `scope`; destinations of the instance and
+  of organizations are listed to instance administrators only.
+- **Sources page: how often a source downloads and what** is in a bubble opened by a small
+  "i" (pointer, keyboard, touch) instead of a paragraph under "enabled" (#94).
+
+### Removed
+
+- **Browser notifications (Web Push) are removed** (#101): the destination type, the
+  "Browser notifications" box of the settings, the service worker and the `web.push_contact`
+  option (ignored if still set). **At the upgrade the destinations of that type are deleted**
+  with the registered browsers (schema v28, automatic, no way back without a backup).
+  E-mail, ntfy, Slack and webhook destinations are unchanged. Whoever starts a manual sync
+  is no longer told personally when it ends; destinations that receive instance events are.
 
 ### Added
 
+- **An organization menu in the "My products" bar** (#97), for an account that sees
+  projects of several organizations: it narrows the project menu and every "All projects"
+  view to one organization. It only narrows what the account already sees.
 - **A "+" button adds an application or a subscription from the page.** It sits at the top
   of the Applications and Subscriptions views and opens the form in place, without
   JavaScript too. On "All projects" the form asks for the project, among those the user may
@@ -49,7 +78,7 @@ The sources are asked for much less. With the default settings an instance downl
   subscriptions now says what a subscription is and how it differs from a tracked
   application.
 - **Colour themes and a day/night button**, in the header of every page: Classic, Forest,
-  Plum, Sand and High contrast. The choice is kept by the browser; without one, day or night
+  Plum, Sand, Dracula, Nord, Noctis and High contrast. The choice is kept by the browser; without one, day or night
   follows the system. Without JavaScript the page is Classic and follows the system.
 
 ### Fixed
@@ -63,6 +92,39 @@ The sources are asked for much less. With the default settings an instance downl
   followed at all). Each package is now recorded with its own ecosystem only.
 - An ecosystem of OSV that could not be read no longer passes silently: the run is recorded
   as failed, names the ecosystem, and the next cycle reads it again from the same point.
+- **"Added" counted every CVE a run read** (#82). A run showed "174 added, 0 updated" when
+  most of these CVEs were already known, and KEV, EPSS, Exploit-DB, Metasploit and Nuclei
+  showed the size of their whole file as "added" each time. A run now counts apart the CVEs
+  it made known, those of which something changed, and those it read again and found as
+  they were, in the history of runs, on the sources page and in the logs. A CVE found as it
+  was is no longer written again. Runs recorded before the upgrade keep their old figures
+  (schema v26, automatic). Vulnrichment counted as "added" the CVEs it could not find.
+- **Reading the KEV catalog replaced the description the NVD gave** (#92) with the catalog's
+  own wording, every time, and recorded it as a change of the CVE; the NVD then put its text
+  back at the next modification. The catalog now describes only a CVE nobody described yet.
+  CVEs of the catalog already stored keep the catalog's wording until the NVD modifies them
+  or the history is read again (`sync --source nvd --full`).
+- A failed run now records the cause of the failure, not only "cannot fetch <source>".
+- **The vulnerabilities list was wider than the window** (#90): at 1280 px on "All projects"
+  the page was 1463 px wide and the action buttons were cut. Both lists (to review, decided)
+  now fit any width; long names wrap or are cut with the full text under the pointer.
+- **"Used by: 0 of 3 projects available to all"** (#87) is gone: the list of destinations
+  says what each one covers and what it sends.
+- **Other lists were wider than the window between 760 and 1200 px** (#93): applications,
+  history, audit, project settings, CVE list, and most administration pages. No page scrolls
+  sideways any more. Eight lists with many columns (history, audit, recent syncs, users,
+  notifications of all projects, destinations, sign-in providers, inventory sources) scroll
+  inside their own box below about 1000 px. Columns now have set widths, so tables look
+  somewhat different on wide screens too.
+- Action buttons of a list are aligned to the right, as the pages always asked.
+- **After an upgrade a page could run with the scripts of the release before** for an hour.
+  Scripts and the stylesheet are now checked at each use.
+- **"database is locked" and an error 500 during a synchronization** (#99). An operation
+  that read and then wrote was refused at once when the synchronization had written in
+  between. Such operations now wait their turn.
+- MCP `get_audit_log` without a filter returned the accepted risks only, which looked like
+  an empty log (#100). It returns every decision; `decision: accepted` keeps the former
+  answer.
 
 ## 0.2.5
 

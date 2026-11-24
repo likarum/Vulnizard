@@ -186,16 +186,17 @@ pub struct Subscription {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Notification {
+    /// Id of the destination
     pub id: i64,
     pub name: String,
     pub kind: String,
     pub target: String,
-    /// Event types to notify; empty = all
+    /// Event types to notify; empty = none
     pub events: Vec<String>,
     pub min_cvss: Option<f64>,
     pub enabled: bool,
-    /// Destination the rule sends to
-    pub destination_id: i64,
+    /// What the destination belongs to: instance | organization | project
+    pub scope: String,
     /// Settings of the destination (may hold an SMTP password): never serialized
     #[serde(skip)]
     pub config: serde_json::Value,
@@ -343,6 +344,8 @@ pub struct SyncRun {
     pub status: String,
     pub added: i64,
     pub updated: i64,
+    /// CVEs read again and found as they were
+    pub same: i64,
     pub error: Option<String>,
 }
 
@@ -368,7 +371,6 @@ pub struct WeaknessInfo {
 #[derive(Debug, Clone)]
 pub struct Dispatch {
     pub notification: Notification,
-    pub project_id: i64,
     pub org: String,
     pub project: String,
     pub changes: Vec<ChangeRow>,
@@ -385,7 +387,7 @@ fn parse_events(json: &str) -> Vec<Event> {
 impl Database {
     /// Schema v6: web platform tables. Runs once (fresh DB or upgrade from v5).
     pub(super) fn migrate_platform(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(PLATFORM_SCHEMA)?;
         tx.commit()?;
         self.rebuild_catalog()?;
@@ -394,7 +396,7 @@ impl Database {
 
     /// Rebuilds the vendor/product catalog from the normalized products table
     pub fn rebuild_catalog(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(
             r#"
             DELETE FROM products;
@@ -624,7 +626,7 @@ impl Database {
         if self.user_origin(owner_id)? != super::Scope::Instance {
             return Err(anyhow!("This account cannot create organizations"));
         }
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM organizations WHERE name = ?1 COLLATE NOCASE)",
             params![name],
@@ -719,7 +721,7 @@ impl Database {
 
     pub fn add_member(&self, org_id: i64, username: &str, role: &str) -> Result<()> {
         // One transaction: a refused change (last owner demoted) is rolled back
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let user_id: Option<i64> = tx
             .query_row(
                 "SELECT id FROM users WHERE username = ?1 COLLATE NOCASE
@@ -748,7 +750,7 @@ impl Database {
     }
 
     pub fn remove_member(&self, org_id: i64, user_id: i64) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             "DELETE FROM memberships WHERE organization_id = ?1 AND user_id = ?2",
             params![org_id, user_id],
@@ -910,22 +912,6 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-
-    pub fn delete_notification(&self, project_id: i64, id: i64) -> Result<()> {
-        self.conn().execute(
-            "DELETE FROM notifications WHERE id = ?1 AND project_id = ?2",
-            params![id, project_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn toggle_notification(&self, project_id: i64, id: i64) -> Result<()> {
-        self.conn().execute(
-            "UPDATE notifications SET enabled = 1 - enabled WHERE id = ?1 AND project_id = ?2",
-            params![id, project_id],
-        )?;
-        Ok(())
-    }
 }
 
 // ==========================================
@@ -1024,7 +1010,7 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let mut per_project: BTreeMap<i64, Vec<ChangeRow>> = BTreeMap::new();
         {
             let mut changes = tx.prepare(
@@ -1085,6 +1071,7 @@ impl Database {
                 params![project_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
+            // Each destination covering the project, once: a change leaves once per destination
             for notification in self.list_notifications(project_id)? {
                 if !notification.enabled {
                     continue;
@@ -1097,7 +1084,6 @@ impl Database {
                 if !matching.is_empty() {
                     dispatches.push(Dispatch {
                         notification,
-                        project_id,
                         org: org.clone(),
                         project: project.clone(),
                         changes: matching,
@@ -1110,8 +1096,8 @@ impl Database {
 }
 
 fn notification_matches(n: &Notification, change: &ChangeRow) -> bool {
-    let event_ok = n.events.is_empty()
-        || change.events.iter().any(|e| n.events.iter().any(|k| k == e.kind()));
+    // No event type chosen: the destination sends nothing
+    let event_ok = change.events.iter().any(|e| n.events.iter().any(|k| k == e.kind()));
     let cvss_ok = match n.min_cvss {
         Some(min) if min > 0.0 => change.cvss.is_some_and(|s| s >= min),
         _ => true,
@@ -1374,7 +1360,7 @@ impl Database {
 
     pub fn recent_syncs(&self, limit: i64) -> Result<Vec<SyncRun>> {
         let mut stmt = self.conn().prepare(
-            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message
+            "SELECT source, started_at, completed_at, status, cves_added, cves_updated, error_message, cves_unchanged
              FROM sync_history ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -1386,6 +1372,7 @@ impl Database {
                     status: r.get(3)?,
                     added: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     updated: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    same: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
                     error: r.get(6)?,
                 })
             })?
@@ -1528,6 +1515,74 @@ mod tests {
         assert_eq!(orgs.len(), 1);
         assert_eq!(orgs[0].name, "default");
         assert_eq!(db.list_org_projects(orgs[0].id).unwrap()[0].name, "default");
+    }
+
+    /// (organization/project, destination, CVEs) of each batch, in the order they leave
+    fn sent(dispatches: &[Dispatch]) -> Vec<(String, String, Vec<String>)> {
+        dispatches
+            .iter()
+            .map(|d| (format!("{}/{}", d.org, d.project), d.notification.name.clone(), d.changes.iter().map(|c| c.cve_id.clone()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn destinations_receive_the_changes_of_the_projects_they_cover_without_any_rule() {
+        let db = Database::open_in_memory().unwrap();
+        let alice = db.create_account("alice", None, "hash", false).unwrap();
+        let acme = db.create_org("acme", alice).unwrap();
+        let infra = db.create_org_project(acme, alice, "infra", None).unwrap();
+        let beta = db.create_org("beta", alice).unwrap();
+        let edge = db.create_org_project(beta, alice, "edge", None).unwrap();
+        db.subscribe(infra, "apache", "").unwrap();
+        db.subscribe(edge, "apache", "").unwrap();
+        let hook = serde_json::json!({ "url": "https://example.org/h" });
+        let everyone = db.create_destination("instance", None, "everyone", "webhook", &hook, false).unwrap();
+        let team = db.create_destination("organization", Some(acme), "team", "webhook", &hook, false).unwrap();
+        let solo = db.create_destination("project", Some(edge), "solo", "webhook", &hook, false).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+
+        // One change, two projects of two organizations: the instance destination gets it for
+        // both, the organization one for its organization only, the project one for its project only
+        db.upsert_cve(&cve("CVE-2024-0201", Some(5.0))).unwrap();
+        let dispatches = db.process_changes().unwrap();
+        let one = |name: &str| vec![name.to_string()];
+        assert_eq!(
+            sent(&dispatches),
+            [
+                ("acme/infra".to_string(), "team".to_string(), one("CVE-2024-0201")),
+                ("acme/infra".to_string(), "everyone".to_string(), one("CVE-2024-0201")),
+                ("beta/edge".to_string(), "solo".to_string(), one("CVE-2024-0201")),
+                ("beta/edge".to_string(), "everyone".to_string(), one("CVE-2024-0201")),
+            ]
+        );
+        // Never twice through the same destination for the same project
+        let mut pairs: Vec<(String, i64)> = dispatches.iter().map(|d| (format!("{}/{}", d.org, d.project), d.notification.id)).collect();
+        pairs.sort();
+        pairs.dedup();
+        assert_eq!(pairs.len(), dispatches.len());
+        // Nothing is left to send again
+        assert!(db.process_changes().unwrap().is_empty());
+
+        // What each destination says it sends is obeyed: event types, minimum CVSS, enabled
+        db.update_destination_settings(everyone, &["created".into()], Some(7.0), true, None).unwrap();
+        db.update_destination_settings(team, &crate::db::all_events(), None, false, None).unwrap();
+        db.update_destination_settings(solo, &[], None, true, None).unwrap();
+        // Under the minimum CVSS: nobody; a disabled destination and one without any event send nothing
+        db.upsert_cve(&cve("CVE-2024-0202", Some(5.0))).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+        db.upsert_cve(&cve("CVE-2024-0203", Some(9.0))).unwrap();
+        assert_eq!(
+            sent(&db.process_changes().unwrap()),
+            [
+                ("acme/infra".to_string(), "everyone".to_string(), one("CVE-2024-0203")),
+                ("beta/edge".to_string(), "everyone".to_string(), one("CVE-2024-0203")),
+            ]
+        );
+        // A score change is not a new CVE: the event type is not one it sends
+        db.upsert_cve(&cve("CVE-2024-0203", Some(9.5))).unwrap();
+        assert!(db.process_changes().unwrap().is_empty());
+        // The reports of the projects hold every change all the same
+        assert_eq!(db.list_reports(edge, 10).unwrap()[0].changes, 4);
     }
 
     #[test]

@@ -112,11 +112,7 @@ impl CveSource for MetasploitSource {
             cve.exploit_public = true;
             cve.metasploit_module = Some(module_path);
 
-            match db.upsert_cve(&cve) {
-                Ok(true) => result.added += 1,
-                Ok(false) => result.updated += 1,
-                Err(_) => result.errors += 1,
-            }
+            result.count(db.upsert_cve(&cve));
             pb.inc(1);
         }
 

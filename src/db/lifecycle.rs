@@ -189,14 +189,14 @@ pub struct StateItem {
 
 impl Database {
     pub(super) fn migrate_lifecycle(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(LIFECYCLE_SCHEMA)?;
         tx.commit()?;
         Ok(())
     }
 
     pub(super) fn migrate_history(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(HISTORY_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -245,7 +245,7 @@ impl Database {
         actor: &Actor,
         comment: Option<&str>,
     ) -> Result<bool> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let current: Option<String> = tx
             .query_row("SELECT status FROM watchlist_entries WHERE id = ?1", params![entry_id], |r| r.get(0))
             .optional()?;
@@ -323,7 +323,7 @@ impl Database {
     /// Deletes a project. Its decision history is kept (shown as a deleted
     /// project), and its entries are recorded as removed.
     pub fn delete_project_by_id(&self, project_id: i64, actor: &Actor) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         self.log_removed("p.id", project_id, actor, "project deleted")?;
         tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
         tx.commit()?;
@@ -332,7 +332,7 @@ impl Database {
 
     /// Removes an application of the project, keeping the history of its entries
     pub fn delete_application_by_id(&self, project_id: i64, app_id: i64, actor: &Actor) -> Result<bool> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM applications WHERE id = ?1 AND project_id = ?2)",
             params![app_id, project_id],

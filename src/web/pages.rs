@@ -279,12 +279,13 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
 
                 @if !vendors.is_empty() {
                     h2 { "Affected vendors & products" }
-                    table.list {
+                    table.list.fit {
+                        (views::columns("name -", true))
                         thead { tr { th { "Vendor" } th { "Products" } } }
                         tbody {
                             @for (vendor, products) in &vendors {
                                 tr {
-                                    td.nowrap { a href={ "/vendors/" (enc(vendor)) } { (vendor) } }
+                                    td { a href={ "/vendors/" (enc(vendor)) } { (vendor) } }
                                     td {
                                         @for product in products {
                                             a href={ "/cve?vendor=" (enc(vendor)) "&product=" (enc(product)) } { (product) } " "
@@ -298,7 +299,8 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
 
                 @if !cve.affected_packages.is_empty() {
                     h2 { "Affected packages" }
-                    table.list {
+                    table.list.fit {
+                        (views::columns("kind - - -", true))
                         thead { tr { th { "Ecosystem" } th { "Package" } th { "Vulnerable range" } th { "Fixed in" } } }
                         tbody {
                             @for pkg in &cve.affected_packages {
@@ -419,7 +421,8 @@ pub async fn vendors(State(st): St, User(user): User, Query(q): Query<ListQuery>
                     input type="search" name="search" placeholder="Vendor name" value=[search.clone()];
                     button type="submit" { "Search" }
                 }
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("vendor", "Vendor")) (listing.th("products", "Products")) th {} } }
                     tbody {
                         @for v in &vendors {
@@ -530,7 +533,8 @@ pub async fn vendor_detail(
                     }
                 }
                 (listing.filter_box("Filter products…", products.len(), product_total))
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("product", "Product")) (listing.th("cves", "CVEs")) th {} } }
                     tbody {
                         @for p in &products {
@@ -627,7 +631,8 @@ pub async fn weaknesses(State(st): St, User(user): User, Query(q): Query<ListQue
                     input type="search" name="search" placeholder="CWE-79" value=[search.clone()];
                     button type="submit" { "Search" }
                 }
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("cwe", "CWE")) (listing.th("cves", "CVEs")) th {} } }
                     tbody {
                         @for w in &items {
@@ -833,24 +838,26 @@ pub(super) fn auth_page(
     )
 }
 
-pub async fn filter_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("filter.js"),
-    )
+/// A script or the stylesheet. The browser keeps it but asks at each use
+/// whether it is still the one of this release: after an upgrade a page is
+/// never run with the script of the release before.
+pub fn asset(headers: &axum::http::HeaderMap, content_type: &'static str, body: &'static str) -> axum::response::Response {
+    let etag = format!("\"{}-{}\"", env!("CARGO_PKG_VERSION"), body.len());
+    let cached = [(header::CACHE_CONTROL, "no-cache".to_string()), (header::ETAG, etag.clone())];
+    if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+        return (axum::http::StatusCode::NOT_MODIFIED, cached).into_response();
+    }
+    (cached, [(header::CONTENT_TYPE, content_type)], body).into_response()
 }
 
-pub async fn theme_script() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        include_str!("theme.js"),
-    )
+const JAVASCRIPT: &str = "text/javascript; charset=utf-8";
+
+pub async fn filter_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, JAVASCRIPT, include_str!("filter.js"))
+}
+
+pub async fn theme_script(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, JAVASCRIPT, include_str!("theme.js"))
 }
 
 pub async fn login_form(State(st): St) -> ActionResult {
@@ -997,7 +1004,8 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
                 }
             }
             p.muted { "Use with " code { "Authorization: Bearer <token>" } " on " code { "/api/…" } " (HTTP Basic with your password also works)." }
-            table.list {
+            table.list.fit {
+                (views::columns("- when when act", true))
                 thead { tr { th { "Name" } th { "Created" } th { "Last used" } th {} } }
                 tbody {
                     @for t in &tokens {
@@ -1022,8 +1030,6 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
                 }
                 button type="submit" { "Create token" }
             }
-
-            (super::notifications::settings_section(db, user)?)
 
             (super::mfa::settings_summary(db, user)?)
 
@@ -1145,7 +1151,8 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
                 p { a href="/projects" { "← Projects" } }
                 h1 { "Organizations" }
                 p.muted { "An organization groups projects and the people who can access them." }
-                table.list {
+                table.list.fit {
+                    (views::columns("- - act", true))
                     thead { tr { th { "Name" } th { "Your role" } th {} } }
                     tbody {
                         @for o in &orgs {
@@ -1229,7 +1236,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                 (super::admin::log_integrity(&audit_integrity, &fingerprint, &format!("{base}/audit/export")))
 
                 h2 { "Projects" }
-                table.list {
+                table.list.fit {
+                    (views::columns("name - kind", true))
                     thead { tr { th { "Project" } th { "Description" } th { "Subscriptions" } } }
                     tbody {
                         @for p in &projects {
@@ -1251,7 +1259,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                 }
 
                 h2 { "Members" }
-                table.list {
+                table.list.fit {
+                    (views::columns("- - act", true))
                     thead { tr { th { "User" } th { "Role" } th {} } }
                     tbody {
                         @for m in &members {
@@ -1404,12 +1413,6 @@ pub async fn logo() -> impl IntoResponse {
     )
 }
 
-pub async fn stylesheet() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        views::STYLESHEET,
-    )
+pub async fn stylesheet(headers: axum::http::HeaderMap) -> impl IntoResponse {
+    asset(&headers, "text/css; charset=utf-8", views::STYLESHEET)
 }

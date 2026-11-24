@@ -2,8 +2,6 @@
 //! (schema v11 adds the `ntfy` notification type).
 
 use anyhow::Result;
-use rusqlite::params;
-
 use crate::db::{Database, Notification};
 
 const NOTIFICATION_SCHEMA: &str = r#"
@@ -28,9 +26,10 @@ ALTER TABLE notifications_v11 RENAME TO notifications;
 INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '11');
 "#;
 
-/// A rule with the project it belongs to
+/// What notifies a project: one destination covering it
 #[derive(Debug, Clone)]
 pub struct AdminNotification {
+    pub project_id: i64,
     pub org: String,
     pub project: String,
     pub notification: Notification,
@@ -38,34 +37,22 @@ pub struct AdminNotification {
 
 impl Database {
     pub(super) fn migrate_notifications(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(NOTIFICATION_SCHEMA)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Every rule of the instance (administrators only)
+    /// For every project of the instance, each destination that receives its
+    /// notifications, its own or not (administrators only)
     pub fn list_all_notifications(&self) -> Result<Vec<AdminNotification>> {
-        Ok(self
-            .list_all_rules()?
-            .into_iter()
-            .map(|(org, project, notification)| AdminNotification { org, project, notification })
-            .collect())
-    }
-
-    pub fn get_notification(&self, id: i64) -> Result<Option<AdminNotification>> {
-        Ok(self.list_all_notifications()?.into_iter().find(|n| n.notification.id == id))
-    }
-
-    pub fn admin_toggle_notification(&self, id: i64) -> Result<bool> {
-        Ok(self
-            .conn()
-            .execute("UPDATE notifications SET enabled = 1 - enabled WHERE id = ?1", params![id])?
-            > 0)
-    }
-
-    pub fn admin_delete_notification(&self, id: i64) -> Result<bool> {
-        Ok(self.conn().execute("DELETE FROM notifications WHERE id = ?1", params![id])? > 0)
+        let mut all = Vec::new();
+        for p in self.list_all_projects()? {
+            for notification in self.list_notifications(p.id)? {
+                all.push(AdminNotification { project_id: p.id, org: p.org.clone(), project: p.name.clone(), notification });
+            }
+        }
+        Ok(all)
     }
 }
 
@@ -82,15 +69,25 @@ mod tests {
         db.create_notification(project, "phone", "ntfy", "https://ntfy.example.org/vulns", &[], None)
             .unwrap();
         assert!(db.create_notification(project, "bad", "pager", "x", &[], None).is_err());
+        // A destination of the instance is listed with every project, one of a project with its own
+        db.create_destination("instance", None, "ops", "ntfy", &serde_json::json!({ "url": "https://ntfy.example.org/ops" }), false)
+            .unwrap();
+        let web = db.create_org_project(org, alice, "web", None).unwrap();
 
-        let all = db.list_all_notifications().unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!((all[0].org.as_str(), all[0].project.as_str(), all[0].notification.kind.as_str()), ("acme", "infra", "ntfy"));
-        let id = all[0].notification.id;
-        assert!(db.admin_toggle_notification(id).unwrap());
-        assert!(!db.get_notification(id).unwrap().unwrap().notification.enabled);
-        assert!(db.admin_delete_notification(id).unwrap());
-        assert!(!db.admin_delete_notification(id).unwrap());
-        assert!(db.get_notification(id).unwrap().is_none());
+        let all: Vec<(i64, String, String)> = db
+            .list_all_notifications()
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.org == "acme")
+            .map(|n| (n.project_id, n.notification.name, n.notification.scope))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (project, "phone".to_string(), "project".to_string()),
+                (project, "ops".to_string(), "instance".to_string()),
+                (web, "ops".to_string(), "instance".to_string()),
+            ]
+        );
     }
 }

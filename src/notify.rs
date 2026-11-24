@@ -11,8 +11,8 @@ use crate::db::{ChangeRow, Database, Dispatch, Notification};
 /// Maximum number of changes detailed in a Slack/email message
 const MAX_LISTED: usize = 30;
 
-/// Sends a batch of changes through the destination of its rule
-pub fn send(config: &Config, db: &Database, d: &Dispatch) -> Result<()> {
+/// Sends a batch of changes of a project through one destination covering it
+pub fn send(config: &Config, d: &Dispatch) -> Result<()> {
     let n = &d.notification;
     match n.kind.as_str() {
         "webhook" => post_json(config, url_of(n)?, &webhook_payload(config, d)),
@@ -22,21 +22,12 @@ pub fn send(config: &Config, db: &Database, d: &Dispatch) -> Result<()> {
             .first()
             .map(|c| cve_url(config, &c.cve_id))),
         "email" => send_email(config, n, &format!("[Vulnizard] {}", title_of(d)), &text_summary(config, d)),
-        "browser" => {
-            // Every member who can read the project, on each of their subscribed browsers
-            let url = format!("/product/{}/{}?view=history", d.org, d.project);
-            for user_id in db.users_with_project_access(d.project_id)? {
-                crate::push::deliver(db, config, user_id, &title_of(d), &browser_summary(d), &url)?;
-            }
-            Ok(())
-        }
         other => bail!("unknown notification type: {other}"),
     }
 }
 
 /// Sends a project event that is not a CVE change (a new probable service…)
-/// through the rules of the project that want this kind of event. `view` is
-/// the project view the message points to.
+/// through the destinations covering the project that send this kind of event.
 pub fn project_event(
     config: &Config,
     db: &Database,
@@ -44,7 +35,6 @@ pub fn project_event(
     kind: &str,
     title: &str,
     body: &str,
-    view: &str,
 ) -> Result<()> {
     let (org, project): (String, String) = db.conn().query_row(
         "SELECT COALESCE(o.name, ''), p.name FROM projects p
@@ -54,19 +44,10 @@ pub fn project_event(
     )?;
     let title = format!("{org}/{project}: {title}");
     for n in db.list_notifications(project_id)? {
-        if !n.enabled || !(n.events.is_empty() || n.events.iter().any(|e| e == kind)) {
+        if !n.enabled || !n.events.iter().any(|e| e == kind) {
             continue;
         }
         let sent = match n.kind.as_str() {
-            "browser" => {
-                let url = format!("/product/{org}/{project}?view={view}");
-                db.users_with_project_access(project_id).and_then(|users| {
-                    for user_id in users {
-                        crate::push::deliver(db, config, user_id, &title, body, &url)?;
-                    }
-                    Ok(())
-                })
-            }
             "webhook" => url_of(&n).and_then(|url| {
                 post_json(config, url, &json!({ "event": kind, "organization": org, "project": project, "title": title, "message": body }))
             }),
@@ -84,24 +65,13 @@ pub fn project_event(
 
 /// Sends an instance event (sync finished…) to a destination
 pub fn send_system(config: &Config, destination: &crate::db::Destination, title: &str, body: &str) -> Result<()> {
-    let n = Notification {
-        id: 0,
-        name: destination.name.clone(),
-        kind: destination.kind.clone(),
-        target: destination.target(),
-        events: Vec::new(),
-        min_cvss: None,
-        enabled: true,
-        destination_id: destination.id,
-        config: destination.config.clone(),
-    };
+    let n = destination.notification();
     match n.kind.as_str() {
         "webhook" => post_json(config, url_of(&n)?, &json!({ "event": "system", "title": title, "message": body })),
         "slack" => post_json(config, url_of(&n)?, &json!({ "text": format!("{title}\n{body}") })),
         "ntfy" => post_ntfy(config, url_of(&n)?, title, body, 0.0, None),
         "email" => send_email(config, &n, &format!("[Vulnizard] {title}"), body),
-        // Browsers are addressed per user by the caller
-        _ => Ok(()),
+        other => bail!("unknown notification type: {other}"),
     }
 }
 
@@ -118,16 +88,6 @@ fn title_of(d: &Dispatch) -> String {
 
 fn worst_cvss(d: &Dispatch) -> f64 {
     d.changes.iter().filter_map(|c| c.cvss).fold(0.0, f64::max)
-}
-
-fn browser_summary(d: &Dispatch) -> String {
-    let ids: Vec<&str> = d.changes.iter().take(4).map(|c| c.cve_id.as_str()).collect();
-    let more = d.changes.len().saturating_sub(ids.len());
-    if more > 0 {
-        format!("{} and {more} more", ids.join(", "))
-    } else {
-        ids.join(", ")
-    }
 }
 
 fn cve_url(config: &Config, cve_id: &str) -> String {
@@ -327,10 +287,9 @@ fn post_ntfy(config: &Config, url: &str, title: &str, body: &str, worst: f64, cl
 }
 
 /// Sample batch used by the "send a test" buttons
-pub fn test_dispatch(notification: Notification, project_id: i64, org: &str, project: &str) -> Dispatch {
+pub fn test_dispatch(notification: Notification, org: &str, project: &str) -> Dispatch {
     Dispatch {
         notification,
-        project_id,
         org: org.to_string(),
         project: project.to_string(),
         changes: vec![ChangeRow {

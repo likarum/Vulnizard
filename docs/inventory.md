@@ -33,8 +33,8 @@ review stay hidden in the *Applications* view.
 Discovered components appear in a **checklist**, most likely to matter first: exposed on the network,
 well-known service (ssh, nginx…), product with a CVE history. Ticked components become tracked
 applications that follow the source (a new version closes the CVEs it fixes, a removed component
-stops being tracked). A **new probable service** is announced through the project's notification
-rules (event *New probable service discovered*).
+stops being tracked). A **new probable service** is announced through the destinations
+that receive the project's notifications and send the event *New probable service discovered*.
 
 Any tool producing a CycloneDX JSON SBOM can feed a source, for instance
 [Syft](https://github.com/anchore/syft) (`syft <image or dir> -o cyclonedx-json`),

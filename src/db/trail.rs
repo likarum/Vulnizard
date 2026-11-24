@@ -94,7 +94,7 @@ fn check(log: &str, entries: &[Value]) -> ChainCheck {
 
 impl Database {
     pub(super) fn migrate_trail(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(TRAIL_SCHEMA)?;
         tx.commit()?;
         // Entries written before chaining existed are linked in the order they were written

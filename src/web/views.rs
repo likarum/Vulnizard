@@ -23,11 +23,14 @@ pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
 
 /// Color themes, in the order of the menu: (key, label). The first one is the
 /// default. Each has a day and a night palette in `app.css`.
-pub const THEMES: [(&str, &str); 5] = [
+pub const THEMES: [(&str, &str); 8] = [
     ("classic", "Classic"),
     ("forest", "Forest"),
     ("plum", "Plum"),
     ("sand", "Sand"),
+    ("dracula", "Dracula"),
+    ("nord", "Nord"),
+    ("noctis", "Noctis"),
     ("contrast", "High contrast"),
 ];
 
@@ -68,13 +71,29 @@ pub struct PageContext {
     pub sync_running: bool,
     /// (organization, project) the user can access
     pub projects: Vec<(String, String)>,
+    /// Organization the lists of "all projects" are narrowed to. Always one
+    /// of those of `projects`: it is checked on every request, and it only
+    /// hides rows; it never gives access to anything.
+    pub org: Option<String>,
     /// Path and query of the current page (to come back after an action)
     pub path: String,
+}
+
+impl PageContext {
+    /// Organizations the user sees a project of, in the order of the menu
+    pub fn orgs(&self) -> Vec<&str> {
+        let mut orgs: Vec<&str> = self.projects.iter().map(|(org, _)| org.as_str()).collect();
+        orgs.dedup();
+        orgs
+    }
 }
 
 tokio::task_local! {
     pub static PAGE: PageContext;
 }
+
+/// Cookie holding the organization chosen in the menu (its name, percent-encoded)
+pub const ORG_COOKIE: &str = "vz_org";
 
 /// Key of a product view as written in an address. Views were renamed: the
 /// addresses people bookmarked, and those in notifications already sent,
@@ -97,6 +116,17 @@ pub fn product_url(scope: Option<(&str, &str)>, view: &str) -> String {
         base
     } else {
         format!("{base}?view={view}")
+    }
+}
+
+/// A small "i" in a circle: the note shows in a bubble under the pointer, on
+/// keyboard focus and on touch. No script.
+pub fn info(note: Markup) -> Markup {
+    html! {
+        span.info tabindex="0" {
+            span.i aria-hidden="true" { "i" }
+            span.bubble role="note" { (note) }
+        }
     }
 }
 
@@ -155,20 +185,54 @@ fn sync_status(ctx: &PageContext, user: Option<&Account>) -> Markup {
     }
 }
 
+/// Organization selector, for who sees the projects of several: a no-script
+/// dropdown whose entries are the buttons of one form. Choosing one narrows
+/// the project menu and the lists of "all projects"; nothing else.
+fn org_menu(ctx: &PageContext, back: &str) -> Markup {
+    let orgs = ctx.orgs();
+    html! {
+        @if orgs.len() > 1 {
+            details.menu.org {
+                summary title="Switch organization" {
+                    @match &ctx.org {
+                        Some(org) => { (org) }
+                        None => { "All organizations" }
+                    }
+                }
+                form method="post" action="/org-filter" {
+                    input type="hidden" name="back" value=(back);
+                    ul {
+                        li { button type="submit" name="org" value="" class=[ctx.org.is_none().then_some("active")] { "All organizations" } }
+                        @for org in orgs {
+                            li { button type="submit" name="org" value=(org) class=[(ctx.org.as_deref() == Some(org)).then_some("active")] { (org) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Project selector: a no-script dropdown keeping the current view
 fn project_menu(ctx: &PageContext, scope: Option<(&str, &str)>, view: &str) -> Markup {
-    let several_orgs = ctx.projects.iter().any(|(org, _)| Some(org) != ctx.projects.first().map(|(o, _)| o));
+    let listed = || ctx.projects.iter().filter(|(org, _)| ctx.org.as_ref().is_none_or(|chosen| chosen == org));
+    let several_orgs = listed().any(|(org, _)| Some(org) != listed().next().map(|(o, _)| o));
     html! {
         details.menu {
             summary title="Switch project" {
-                @match scope {
-                    Some((_, project)) => { (project) }
-                    None => { "All projects" span.muted { " (*)" } }
+                @match (scope, &ctx.org) {
+                    (Some((_, project)), _) => { (project) }
+                    (None, Some(org)) => { "All projects" span.muted { " of " (org) } }
+                    (None, None) => { "All projects" span.muted { " (*)" } }
                 }
             }
             ul {
-                li { a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] { "All projects (*)" } }
-                @for (org, project) in &ctx.projects {
+                li {
+                    a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] {
+                        "All projects" @if let Some(org) = &ctx.org { " of " (org) } " (*)"
+                    }
+                }
+                @for (org, project) in listed() {
                     @let current = scope == Some((org.as_str(), project.as_str()));
                     li {
                         a href=(product_url(Some((org, project)), view)) class=[current.then_some("active")] {
@@ -252,6 +316,9 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                         div.zones {
                             nav.zone.product {
                                 span.zone-label { "My products" }
+                                // From a products page the choice leads to all the projects of the view
+                                // shown; from any other page, back to that page
+                                (org_menu(&ctx, &if on_products && !view.is_empty() { product_url(None, view) } else { ctx.path.clone() }))
                                 (project_menu(&ctx, scope, if view.is_empty() { "overview" } else { view }))
                                 @for (key, label) in PRODUCT_VIEWS {
                                     a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }
@@ -517,7 +584,8 @@ pub fn th(listing: Option<&Listing>, key: &str, label: &str) -> Markup {
 
 pub fn cve_table(cves: &[CveSummary], listing: Option<&Listing>) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (columns("cve cvss flag - day", true))
             thead {
                 tr {
                     (th(listing, "id", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "epss", "EPSS"))
@@ -527,7 +595,7 @@ pub fn cve_table(cves: &[CveSummary], listing: Option<&Listing>) -> Markup {
             tbody {
                 @for c in cves {
                     tr {
-                        td.nowrap {
+                        td.cve {
                             a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) }
                             @if c.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
                         }
@@ -626,7 +694,8 @@ pub fn event_tags(events: &[Event]) -> Markup {
 /// Latest changes on subscribed CVEs, across projects
 pub fn project_changes(changes: &[ProjectChange], show_project: bool) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (columns("cve cvss - project when", show_project))
             thead {
                 tr {
                     th { "CVE" } th { "CVSS" } th { "What changed" }
@@ -637,12 +706,12 @@ pub fn project_changes(changes: &[ProjectChange], show_project: bool) -> Markup 
             tbody {
                 @for c in changes {
                     tr {
-                        td.nowrap { a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) } }
+                        td.cve { a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) } }
                         td.nowrap { (cvss_badge(c.cvss)) }
                         td { (event_tags(&c.events)) }
                         @if show_project {
-                            td.nowrap {
-                                a href={ "/orgs/" (enc(&c.org)) "/projects/" (enc(&c.project)) } { (c.project) }
+                            td.project {
+                                a href={ "/orgs/" (enc(&c.org)) "/projects/" (enc(&c.project)) } title=(c.project) { (c.project) }
                             }
                         }
                         td.nowrap { (c.created_at.replace('T', " ").trim_end_matches('Z')) }
@@ -683,6 +752,29 @@ pub fn triage_key(item: &TriageItem, column: &str) -> Option<SortKey> {
     }
 }
 
+/// Columns of a list of vulnerabilities to decide on. Their widths are set
+/// by the stylesheet (`table.fit`): the table is as wide as its box at any
+/// window width, and it is the long texts that wrap.
+pub fn triage_columns(show_project: bool, middle: &str) -> Markup {
+    columns(&format!("cve cvss app project {middle} actions"), show_project)
+}
+
+/// Column group of a list sized by the stylesheet (`table.fit`): one word per
+/// column, separated by spaces. A name gives the column its width (`cve`,
+/// `when`, `num`, `name`, `act`…: see the stylesheet); a dash is a column of
+/// free text, which takes what is left. The `project` column is dropped when
+/// the list is the one of a single project.
+pub fn columns(names: &str, show_project: bool) -> Markup {
+    html! {
+        colgroup {
+            @for name in names.split_whitespace().filter(|n| show_project || *n != "project") {
+                col class=[(name != "-").then_some(name)];
+            }
+        }
+    }
+}
+
+/// Vulnerabilities to review, with the buttons deciding on each
 pub fn triage_table(
     items: &[TriageItem],
     show_project: bool,
@@ -690,7 +782,8 @@ pub fn triage_table(
     actions: impl Fn(&TriageItem) -> Markup,
 ) -> Markup {
     html! {
-        table.list.triage {
+        table.list.triage.fit {
+            (triage_columns(show_project, "desc"))
             thead {
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
@@ -700,21 +793,23 @@ pub fn triage_table(
             }
             tbody {
                 @for item in items {
+                    @let description = item.description.as_deref().unwrap_or("");
                     tr {
-                        td.nowrap.cve {
+                        td.cve {
                             a href={ "/cve/" (enc(&item.cve_id)) } { (item.cve_id) }
                             @if item.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
                             @if item.version_unknown { " " span.tag.warn title="No source gives the versions this CVE affects: the application is kept out of caution. Read the CVE before deciding." { "version not given" } }
                         }
                         td.nowrap.cvss { (cvss_badge(item.cvss)) }
-                        td.nowrap.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
+                        td.app { (item.app_name) " " span.muted { (item.app_version.as_deref().unwrap_or("")) } @if !item.group.is_empty() { div { span.tag title="Group of inventory sources this decision holds for" { (item.group) } } } }
                         @if show_project {
-                            td.nowrap.project {
-                                a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } { (item.project) }
+                            td.project {
+                                a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } title=(item.project) { (item.project) }
                             }
                         }
-                        td.desc { (truncate(item.description.as_deref().unwrap_or(""), 160)) }
-                        td.right.nowrap.actions { (actions(item)) }
+                        // The title gives the text back where a narrow window cuts it after a few lines
+                        td.desc { @if !description.is_empty() { div.clamp title=(truncate(description, 160)) { (truncate(description, 160)) } } }
+                        td.right.actions { (actions(item)) }
                     }
                 }
                 @if items.is_empty() {
@@ -748,6 +843,131 @@ mod tests {
         let evil = Listing::parse("/x?q=%22%3E%3Cscript%3E&tab=%22%3E", "a", false);
         let html = format!("{}{}", evil.th("a", "A").into_string(), evil.filter_box("f", 0, 0).into_string());
         assert!(!html.contains("<script>") && html.contains("&quot;&gt;&lt;script&gt;"));
+    }
+
+    #[test]
+    fn the_vulnerabilities_table_is_sized_by_the_stylesheet() {
+        let item = TriageItem {
+            entry_id: 1,
+            cve_id: "CVE-2024-6387".into(),
+            status: "untreated".into(),
+            priority: None,
+            app_name: "org.apache.logging.log4j:log4j-core-enterprise-distribution".into(),
+            app_version: Some("2.17.1".into()),
+            org: "acme".into(),
+            project: "customer-facing-payment-platform".into(),
+            cvss: Some(8.1),
+            kev: true,
+            description: Some("A race condition. ".repeat(30)),
+            group: "web".into(),
+            version_unknown: true,
+        };
+        let all = triage_table(std::slice::from_ref(&item), true, None, |_| html! { button { "Close" } }).into_string();
+        // The columns are named for the stylesheet, which gives each its width
+        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        // Only the score is kept on one line: names, tags and buttons wrap inside their column
+        assert_eq!(all.matches("nowrap").count(), 1, "{all}");
+        assert!(all.contains("title=\"customer-facing-payment-platform\">customer-facing-payment-platform</a>"));
+        for cell in ["<td class=\"cve\">", "<td class=\"nowrap cvss\">", "<td class=\"app\">", "<td class=\"project\">", "<td class=\"right actions\">"] {
+            assert!(all.contains(cell), "{cell}");
+        }
+        // The description is cut at 160 characters, and its title keeps that text where the window cuts further
+        let shown = format!("{}…", "A race condition. ".repeat(30).chars().take(160).collect::<String>());
+        assert!(all.contains(&format!("<td class=\"desc\"><div class=\"clamp\" title=\"{shown}\">{shown}</div></td>")), "{all}");
+
+        // One project: no project column, in the column group as in the rows
+        let one = triage_table(&[item], false, None, |_| html! {}).into_string();
+        assert!(one.contains("<col class=\"app\"><col class=\"desc\">") && !one.contains("class=\"project\""));
+        let empty = triage_table(&[], false, None, |_| html! {}).into_string();
+        assert!(empty.contains("colspan=\"5\"") && empty.contains("Nothing to review."));
+        assert!(triage_columns(true, "decision").into_string().contains("<col class=\"project\"><col class=\"decision\"><col class=\"actions\">"));
+
+        // The stylesheet fixes the layout, sizes every named column and lets long words break
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let css = comments.replace_all(STYLESHEET, "").into_owned();
+        assert!(css.contains("table.list.fit { table-layout: fixed; }") && css.contains("table.fit td { overflow-wrap: anywhere; }"));
+        for column in ["cve", "cvss", "app", "project", "desc", "decision", "actions"] {
+            // The description is the one column left without a width: it takes what remains
+            assert_eq!(css.contains(&format!("table.fit col.{column} {{ width:")), column != "desc", "{column}");
+        }
+        // On a phone the rows are cards: the column group must not take part in them
+        assert!(css.contains("table.list colgroup { display: none; }"));
+    }
+
+    #[test]
+    fn a_list_names_its_columns_and_the_stylesheet_sizes_them() {
+        // One name per column; the project column is dropped for a single project
+        assert_eq!(
+            columns("when who project -", true).into_string(),
+            "<colgroup><col class=\"when\"><col class=\"who\"><col class=\"project\"><col></colgroup>"
+        );
+        assert_eq!(columns("when who project -", false).into_string(), "<colgroup><col class=\"when\"><col class=\"who\"><col></colgroup>");
+
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let css = comments.replace_all(STYLESHEET, "").into_owned();
+        // Between the phone layout and a wide window the same columns are tighter
+        let narrow = css.split("@media (min-width: 761px) and (max-width: 1199px) {").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
+        for column in sized {
+            assert!(css.contains(&format!("\ntable.fit col.{column} {{ width:")), "{column}");
+            // One button keeps its width: its text has to fit
+            assert_eq!(narrow.contains(&format!("table.fit col.{column} {{ width:")), column != "act", "{column} in a narrow window");
+        }
+        // No name is also a class of the page: a column that became a flex box would shift every column after it
+        for column in sized.iter().chain(["desc"].iter()) {
+            assert!(!css.contains(&format!("\n.{column} ")) && !css.contains(&format!(", .{column} ")), "{column}");
+        }
+        // A date goes over its time, and the header never sticks out of its column
+        assert!(narrow.contains("table.fit td.nowrap { white-space: normal; }") && css.contains("table.fit th { overflow-wrap: break-word; }"));
+        // Names cut on one line where the window is narrow carry a title
+        assert!(narrow.contains("table.fit td.project a, table.fit .cut { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"));
+
+        // The lists of seven or eight columns keep a width they can be read at, and scroll in their own box below it
+        assert!(css.contains("\n.scroll { overflow-x: auto; }") && narrow.contains("table.fit.dense { min-width: 960px; }"));
+        assert!(!css.split("@media (max-width: 760px)").nth(1).unwrap().contains("min-width: 960px"));
+
+        // Cells asking for it are aligned on the right: the rule comes after the one aligning every cell on the
+        // left (same weight, the later wins), and the cards of a phone put them back on the left
+        let left = css.find("table.list th, table.list td {").unwrap();
+        let right = css.find("table.list td.right { text-align: right; }").unwrap();
+        let phone = css.find("@media (max-width: 760px)").unwrap();
+        assert!(left < right && right < phone);
+        // The form a decision opens follows its buttons
+        assert!(css.contains("table.list td.right form.row { justify-content: flex-end; }"));
+        assert!(css[phone..].contains("table.list td, table.list td.nowrap, table.list td.right {") && css[phone..].contains("text-align: left;"));
+    }
+
+    #[test]
+    fn the_lists_of_cves_and_of_changes_fit_the_window() {
+        let cve = CveSummary {
+            cve_id: "CVE-2024-6387".into(),
+            description: Some("A race condition. ".repeat(30)),
+            cvss: Some(8.1),
+            epss: Some(0.42),
+            kev: true,
+            published_at: Some("2024-07-01T08:15:00Z".into()),
+            modified_at: None,
+        };
+        let list = cve_table(&[cve], None).into_string();
+        assert!(list.starts_with("<table class=\"list fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"flag\"><col><col class=\"day\"></colgroup>"), "{list}");
+        // The identifier is kept whole by the stylesheet (td.cve a), its tag may go under it
+        assert!(list.contains("<td class=\"cve\"><a href=\"/cve/CVE%2D2024%2D6387\">CVE-2024-6387</a>"), "{list}");
+        assert_eq!(list.matches("<col").count() - 1, list.matches("<th").count() - 1);
+
+        let change = ProjectChange {
+            cve_id: "CVE-2024-6387".into(),
+            cvss: Some(8.1),
+            org: "acme".into(),
+            project: "customer-facing-payment-platform".into(),
+            created_at: "2026-11-22T15:13:41Z".into(),
+            events: vec![Event::Kev],
+        };
+        let all = project_changes(std::slice::from_ref(&change), true).into_string();
+        assert!(all.starts_with("<table class=\"list fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col><col class=\"project\"><col class=\"when\"></colgroup>"), "{all}");
+        // A long project name no longer widens the table: it wraps, or is cut with its title where the window is narrow
+        assert!(all.contains("<td class=\"project\"><a href=\"/orgs/acme/projects/customer%2Dfacing%2Dpayment%2Dplatform\" title=\"customer-facing-payment-platform\">"), "{all}");
+        let one = project_changes(&[change], false).into_string();
+        assert!(one.contains("<col class=\"cvss\"><col><col class=\"when\">") && !one.contains("class=\"project\""));
     }
 
     #[test]

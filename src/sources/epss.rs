@@ -119,11 +119,7 @@ impl CveSource for EpssSource {
             cve.epss_score = Some(score.epss);
             cve.epss_percentile = Some(score.percentile);
 
-            match db.upsert_cve(&cve) {
-                Ok(true) => result.added += 1,
-                Ok(false) => result.updated += 1,
-                Err(_) => result.errors += 1,
-            }
+            result.count(db.upsert_cve(&cve));
             pb.inc(1);
         }
 

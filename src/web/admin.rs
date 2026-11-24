@@ -48,6 +48,7 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                 "status" => Some(views::SortKey::text(&r.status)),
                 "added" => Some(views::SortKey::num(r.added as f64)),
                 "updated" => Some(views::SortKey::num(r.updated as f64)),
+                "unchanged" => Some(views::SortKey::num(r.same as f64)),
                 _ => None,
             },
         );
@@ -89,27 +90,31 @@ pub async fn admin(State(st): St, User(user): User) -> HtmlResult {
                 }
                 h2 { "Recent syncs" }
                 (listing.filter_box("Filter: source, status, error…", syncs.len(), sync_total))
-                table.list {
-                    thead {
-                        tr {
-                            (listing.th("source", "Source")) (listing.th("started", "Started (UTC)")) th { "Completed" }
-                            (listing.th("status", "Status")) (listing.th("added", "Added")) (listing.th("updated", "Updated"))
-                            th { "Error" }
-                        }
-                    }
-                    tbody {
-                        @for s in &syncs {
+                div.scroll {
+                    table.list.fit.dense {
+                        (views::columns("kind when when kind num num num -", true))
+                        thead {
                             tr {
-                                td { (s.source) }
-                                td.nowrap { (s.started_at) }
-                                td.nowrap { (s.completed_at.as_deref().unwrap_or("—")) }
-                                td { (s.status) }
-                                td { (s.added) }
-                                td { (s.updated) }
-                                td { (s.error.as_deref().unwrap_or("")) }
+                                (listing.th("source", "Source")) (listing.th("started", "Started (UTC)")) th { "Completed" }
+                                (listing.th("status", "Status")) (listing.th("added", "Added")) (listing.th("updated", "Updated")) (listing.th("unchanged", "Unchanged"))
+                                th { "Error" }
                             }
                         }
-                        @if syncs.is_empty() { tr { td colspan="7" .muted { "No sync yet." } } }
+                        tbody {
+                            @for s in &syncs {
+                                tr {
+                                    td { (s.source) }
+                                    td.nowrap { (s.started_at) }
+                                    td.nowrap { (s.completed_at.as_deref().unwrap_or("—")) }
+                                    td { (s.status) }
+                                    td { (s.added) }
+                                    td { (s.updated) }
+                                    td { (s.same) }
+                                    td { (s.error.as_deref().unwrap_or("")) }
+                                }
+                            }
+                            @if syncs.is_empty() { tr { td colspan="8" .muted { "No sync yet." } } }
+                        }
                     }
                 }
             },
@@ -314,36 +319,39 @@ pub async fn users(
                         button type="submit" { "Apply" }
                         span.muted.selection-count {}
                     }
-                    table.list {
-                        thead {
-                            tr {
-                                th {}
-                                (listing.th("user", "User")) th { "Sign-in" } (listing.th("admin", "Administrator"))
-                                (listing.th("instance", "Instance role")) (listing.th("rights", "Other rights"))
-                                (listing.th("status", "Status")) (listing.th("login", "Last login (UTC)"))
-                            }
-                        }
-                        tbody {
-                            @for a in &accounts {
+                    div.scroll {
+                        table.list.fit.dense {
+                            (views::columns("check - kind kind kind flag flag when", true))
+                            thead {
                                 tr {
-                                    td { input type="checkbox" name="ids" value=(a.id) aria-label={ "Select " (a.username) }; }
-                                    td {
-                                        a href={ "/admin/users/" (a.id) } { strong { (a.username) } }
-                                        @if a.id == user.id { " " span.muted { "(you)" } }
-                                        @if let Some(email) = &a.email { div.muted { (email) } }
-                                    }
-                                    td {
-                                        @if a.has_password { span.tag { "password" } " " }
-                                        @if a.sso { span.tag { "SSO" } }
-                                    }
-                                    td { @if a.is_admin { "yes" } @else { span.muted { "no" } } }
-                                    td { @if let Some(role) = &a.instance_role { (role) } @else { span.muted { "—" } } }
-                                    td { @if a.assignments > 0 { (a.assignments) } @else { span.muted { "none" } } }
-                                    td { @if a.disabled { span.error { "disabled" } } @else { "active" } }
-                                    td.nowrap { (a.last_login_at.as_deref().unwrap_or("never")) }
+                                    th {}
+                                    (listing.th("user", "User")) th { "Sign-in" } (listing.th("admin", "Administrator"))
+                                    (listing.th("instance", "Instance role")) (listing.th("rights", "Other rights"))
+                                    (listing.th("status", "Status")) (listing.th("login", "Last login (UTC)"))
                                 }
                             }
-                            @if accounts.is_empty() { tr { td colspan="8" .muted { "No user matches." } } }
+                            tbody {
+                                @for a in &accounts {
+                                    tr {
+                                        td { input type="checkbox" name="ids" value=(a.id) aria-label={ "Select " (a.username) }; }
+                                        td {
+                                            a href={ "/admin/users/" (a.id) } { strong { (a.username) } }
+                                            @if a.id == user.id { " " span.muted { "(you)" } }
+                                            @if let Some(email) = &a.email { div.muted { (email) } }
+                                        }
+                                        td {
+                                            @if a.has_password { span.tag { "password" } " " }
+                                            @if a.sso { span.tag { "SSO" } }
+                                        }
+                                        td { @if a.is_admin { "yes" } @else { span.muted { "no" } } }
+                                        td { @if let Some(role) = &a.instance_role { (role) } @else { span.muted { "—" } } }
+                                        td { @if a.assignments > 0 { (a.assignments) } @else { span.muted { "none" } } }
+                                        td { @if a.disabled { span.error { "disabled" } } @else { "active" } }
+                                        td.nowrap { (a.last_login_at.as_deref().unwrap_or("never")) }
+                                    }
+                                }
+                                @if accounts.is_empty() { tr { td colspan="8" .muted { "No user matches." } } }
+                            }
                         }
                     }
                     p.muted { "The actions above apply to the checked users. The right and the role only apply to “Give or change a right”. Your own account is skipped for status and administrator changes." }
@@ -671,7 +679,8 @@ pub async fn user_detail(State(st): St, User(user): User, Path(id): Path<i64>) -
                 (super::mfa::events_table(&security_events, false))
 
                 h2 { "Rights" }
-                table.list {
+                table.list.fit {
+                    (views::columns("kind - kind act", true))
                     thead { tr { th { "Level" } th { "On" } th { "Role" } th {} } }
                     tbody {
                         @for r in &rights {
@@ -810,13 +819,14 @@ pub async fn sources(
                     strong { "Sync now downloads at once, without waiting" } ": not to be used repeatedly on the sources that fetch a whole file. "
                     "A disabled source can still be synchronized on demand."
                 }
-                table.list {
+                table.list.fit {
+                    (views::columns("name - - when - actions", true))
                     thead { tr { th { "Source" } th { "Provides" } th { "Periodic sync" } th { "Last run (UTC)" } th { "State" } th {} } }
                     tbody {
                         @let inventory = st.config.inventory.enabled;
                         @for (key, label, description) in settings::SOURCES.into_iter().filter(|(k, _, _)| !inventory && *k == settings::INVENTORY_SOURCE) {
                             tr.unavailable {
-                                td.nowrap { strong { (label) } div.muted { code { (key) } } }
+                                td { strong { (label) } div.muted { code { (key) } } }
                                 td { (description) }
                                 td colspan="4" { span.tag { "Not in this release" } }
                             }
@@ -827,15 +837,15 @@ pub async fn sources(
                             @let is_running = running.contains(&key);
                             @let is_queued = queued.iter().any(|q| q == key);
                             tr {
-                                td.nowrap { strong { (label) } div.muted { code { (key) } } }
+                                td { strong { (label) } div.muted { code { (key) } } }
                                 td { (description) }
                                 td {
                                     @if enabled { "enabled" } @else { span.muted { "disabled" } }
                                     @let hours = crate::sources::min_hours(key);
-                                    div.muted {
-                                        @if hours == 0 { "at every cycle" } @else { "at most every " (hours) " h" }
-                                        ": " (crate::sources::fetches(key))
-                                    }
+                                    (views::info(html! {
+                                        @if hours == 0 { "At every cycle" } @else { "At most every " (hours) " h" }
+                                        ": " (crate::sources::fetches(key)) "."
+                                    }))
                                 }
                                 td.nowrap { @if let Some(r) = run { (r.started_at) } @else { span.muted { "never" } } }
                                 td {
@@ -845,7 +855,7 @@ pub async fn sources(
                                         span.status { span.dot.waiting {} "waiting to start" }
                                     } @else if let Some(r) = run {
                                         @if r.status == "completed" {
-                                            span.status { span.dot {} (r.added) " added, " (r.updated) " updated" }
+                                            span.status { span.dot {} (r.added) " added, " (r.updated) " updated, " (r.same) " unchanged" }
                                         } @else if r.status == "unchanged" {
                                             span.status { span.dot {} "unchanged upstream, nothing downloaded" }
                                         } @else {
@@ -854,7 +864,7 @@ pub async fn sources(
                                         }
                                     }
                                 }
-                                td.right.nowrap {
+                                td.right.actions {
                                     form.inline method="post" action={ "/admin/sources/" (key) } {
                                         @if enabled {
                                             button.small.secondary type="submit" name="action" value="disable" { "Disable" }
@@ -1054,12 +1064,13 @@ pub async fn mcp(State(st): St, User(user): User) -> HtmlResult {
                 }
 
                 h2 { "Tools" }
-                table.list {
+                table.list.fit {
+                    (views::columns("name flag kind -", true))
                     thead { tr { th { "Tool" } th { "Access" } th { "Over HTTP" } th { "Description" } } }
                     tbody {
                         @for (name, description, write) in &tools {
                             tr {
-                                td.nowrap { code { (name) } }
+                                td { code { (name) } }
                                 td { @if *write { span.tag { "write" } } @else { "read" } }
                                 td.nowrap {
                                     @if current.http_enabled && (!*write || current.allow_write) { "available" } @else { span.muted { "off" } }
@@ -1234,7 +1245,7 @@ pub async fn sso(State(st): St, User(user): User, Query(q): Query<SsoQuery>) -> 
                         @if let Some(group) = &p.admin_group { ", admins: " code { (group) } }
                     }
                     td { @if p.enabled { "enabled" } @else { span.muted { "disabled" } } }
-                    td.right.nowrap {
+                    td.right.actions {
                         @if p.from_config {
                             span.muted { "configuration file" }
                         } @else {
@@ -1266,13 +1277,16 @@ pub async fn sso(State(st): St, User(user): User, Query(q): Query<SsoQuery>) -> 
                     "Entra ID…) or a public one such as Google. A provider belongs to the whole instance, an organization or a "
                     "single project: the accounts it creates only exist there, and only instance accounts can hold instance rights."
                 }
-                table.list {
-                    thead { tr { th { "Provider" } th { "Issuer" } th { "Belongs to" } th { "Email domains" } th { "Accounts" } th { "Status" } th {} } }
-                    tbody {
-                        @if let Some(p) = &from_config { (row(p)) }
-                        @for p in &providers { (row(p)) }
-                        @if providers.is_empty() && from_config.is_none() {
-                            tr { td colspan="7" .muted { "No provider yet." } }
+                div.scroll {
+                    table.list.fit.dense {
+                        (views::columns("name - who - - flag actions", true))
+                        thead { tr { th { "Provider" } th { "Issuer" } th { "Belongs to" } th { "Email domains" } th { "Accounts" } th { "Status" } th {} } }
+                        tbody {
+                            @if let Some(p) = &from_config { (row(p)) }
+                            @for p in &providers { (row(p)) }
+                            @if providers.is_empty() && from_config.is_none() {
+                                tr { td colspan="7" .muted { "No provider yet." } }
+                            }
                         }
                     }
                 }
@@ -1396,7 +1410,8 @@ fn scim_page(
                     code.token { (token) }
                 }
             }
-            table.list {
+            table.list.fit {
+                (views::columns("name - when when act", true))
                 thead { tr { th { "Name" } th { "Belongs to" } th { "Created (UTC)" } th { "Last used (UTC)" } th {} } }
                 tbody {
                     @for t in &tokens {
@@ -1436,7 +1451,8 @@ fn scim_page(
 
             h2 { "Groups and the rights they give" }
             p.muted { "Groups are created by the identity provider. Every member of a group gets the rights listed for it, inside what the group belongs to." }
-            table.list {
+            table.list.fit {
+                (views::columns("name who who -", true))
                 thead { tr { th { "Group" } th { "Belongs to" } th { "Members" } th { "Rights given to its members" } } }
                 tbody {
                     @for (group, roles) in &group_rows {

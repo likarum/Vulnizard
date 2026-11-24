@@ -209,7 +209,7 @@ fn scope_label(table: &str) -> String {
 
 impl Database {
     pub(super) fn migrate_provisioning(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(PROVISIONING_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -441,7 +441,7 @@ impl Database {
         external_id: Option<Option<&str>>,
         active: Option<bool>,
     ) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         if let Some(user_name) = user_name {
             let taken: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM users u, users me
@@ -482,7 +482,7 @@ impl Database {
     /// from its groups and no longer visible to SCIM. The account itself and
     /// the history of its decisions are kept.
     pub fn scim_delete_user(&self, id: i64) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute(
             // provisioned = 2: deprovisioned, still listed for administrators, gone for SCIM
             "UPDATE users SET disabled = 1, provisioned = 2, updated_at = datetime('now') WHERE id = ?1",
@@ -660,7 +660,7 @@ impl Database {
 
     /// Replaces the members of a group
     pub fn scim_set_members(&self, group_id: i64, user_ids: &[i64]) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute("DELETE FROM scim_group_members WHERE group_id = ?1", params![group_id])?;
         self.scim_add_members(group_id, user_ids)?;
         tx.commit()?;

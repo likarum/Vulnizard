@@ -460,7 +460,7 @@ fn read_tool_definitions() -> Vec<Value> {
             "get_audit_log",
             "Decisions taken on tracked CVEs, most recent first: who accepted a risk, closed or reopened a CVE, when, on which version of the application and with which justification. With `event`, also the entries a scan added (`detected`) or that left with their application (`removed`). Answers one page (`events`) with the `total`; ask for the next with `offset`.",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
-                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default: accepted risks)" },
+                    "decision": { "type": "string", "enum": ["accepted", "treated", "not_applicable", "untreated", "all"], "description": "Kind of decision (default `all`: every decision)" },
                     "event": { "type": "string", "enum": ["status", "detected", "removed", "all"], "description": "Kind of event (default `status`: decisions only). `decision` only filters the decisions" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Events returned (default 100); refused outside 1 to 500" },
                     "offset": { "type": "integer", "minimum": 0, "description": "Events skipped (default 0)" } }),
@@ -474,7 +474,7 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_notifications",
-            "Notifications of a project: which destinations it notifies, for which events and from which CVSS.",
+            "Destinations that receive the notifications of a project, with what each one sends (event types, minimum CVSS, enabled). The project's own destinations (scope `project`); for instance administrators and the local operator, also the destinations of its organization and of the instance, which receive them too. No event = the destination sends nothing. Targets are never returned.",
             json!({ "org": org, "project": project }),
             &["project"],
         ),
@@ -670,7 +670,10 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                     json!({ "date": date.to_string(), "entries": items })
                 }
                 _ => {
-                    let wanted = opt_str(args, "decision").unwrap_or("accepted");
+                    let wanted = opt_str(args, "decision").unwrap_or("all");
+                    if !["accepted", "treated", "not_applicable", "untreated", "all"].contains(&wanted) {
+                        return Err(anyhow!("invalid decision '{wanted}'"));
+                    }
                     let kind = opt_str(args, "event").unwrap_or("status");
                     if !["status", "detected", "removed", "all"].contains(&kind) {
                         return Err(anyhow!("invalid event '{kind}'"));
@@ -710,11 +713,14 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         }
         "list_notifications" => {
             let target = self.target(args)?;
-            // Targets (webhook URLs, ntfy topics) are secrets of whoever owns the destination
+            // Targets (webhook URLs, ntfy topics) are secrets of whoever owns the destination,
+            // and so is the very existence of a destination managed outside the project
+            let internals = self.sees_internals();
             let rules: Vec<Value> = db
                 .list_notifications(target.id)?
                 .into_iter()
-                .map(|n| json!({ "destination": n.name, "kind": n.kind, "events": n.events, "min_cvss": n.min_cvss, "enabled": n.enabled }))
+                .filter(|n| n.scope == "project" || internals)
+                .map(|n| json!({ "destination": n.name, "kind": n.kind, "scope": n.scope, "events": n.events, "min_cvss": n.min_cvss, "enabled": n.enabled }))
                 .collect();
             json!(rules)
         }
@@ -1248,6 +1254,10 @@ mod tests {
         assert_eq!((audit[0]["by"].as_str(), audit[0]["justification"].as_str()), (Some("alice"), Some("isolated network")));
         // Each event carries the version it was decided on; entries a scan added are asked for by name
         assert!(audit[0].get("version").is_some() && audit[0]["event"] == "status");
+        // Asked without a filter, the log gives every decision, not only the accepted risks
+        let decisions = run(&alice_mcp, "get_audit_log", with(json!({ "decision": "all" }))).unwrap()["total"].clone();
+        assert_eq!(run(&alice_mcp, "get_audit_log", scope.clone()).unwrap()["total"], decisions);
+        assert!(run(&alice_mcp, "get_audit_log", with(json!({ "decision": "bogus" }))).is_err());
         let detected = run(&alice_mcp, "get_audit_log", with(json!({ "event": "detected" }))).unwrap();
         assert!(detected["total"].as_u64().unwrap() >= 1 && detected["events"][0]["event"] == "detected");
         let everything = run(&alice_mcp, "get_audit_log", with(json!({ "event": "all", "decision": "all" }))).unwrap();
@@ -1346,6 +1356,19 @@ mod tests {
         assert!(run(&carol_mcp, "get_audit_log", scope.clone()).is_err());
         assert_eq!(run(&carol_mcp, "get_audit_log", json!({ "decision": "all", "event": "all" })).unwrap()["total"], 0);
         assert!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap().as_array().unwrap().is_empty());
+        // A project lists its own destinations with what they send, never a target; those of the
+        // instance and of the organization, which receive its notifications too, only for administrators
+        let infra_id = db.find_project("acme", "infra").unwrap().unwrap();
+        let phone = db.create_notification(infra_id, "phone", "ntfy", "https://ntfy.example.org/secret-topic", &["kev".into()], Some(7.0)).unwrap();
+        db.create_destination("instance", None, "ops", "ntfy", &json!({ "url": "https://ntfy.example.org/ops-topic" }), true).unwrap();
+        let own = json!({ "destination": "phone", "kind": "ntfy", "scope": "project", "events": ["kev"], "min_cvss": 7.0, "enabled": true });
+        assert_eq!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap(), json!([own]));
+        let seen_by_admin = run(&admin_mcp, "list_notifications", scope.clone()).unwrap();
+        assert_eq!(seen_by_admin[0], own);
+        assert_eq!((seen_by_admin[1]["destination"].as_str(), seen_by_admin[1]["scope"].as_str()), (Some("ops"), Some("instance")));
+        assert_eq!(seen_by_admin.as_array().unwrap().len(), 2);
+        assert!(!seen_by_admin.to_string().contains("topic"));
+        db.delete_destination(phone).unwrap();
 
         // Same length limits as the web forms
         let long = "x".repeat(300);

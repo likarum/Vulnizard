@@ -223,7 +223,7 @@ impl IntoResponse for ApiError {
 // Authentication extractors
 // ==========================================
 
-pub fn session_token(parts: &Parts) -> Option<String> {
+fn cookie_value(parts: &Parts, name: &str) -> Option<String> {
     parts
         .headers
         .get_all(header::COOKIE)
@@ -231,8 +231,23 @@ pub fn session_token(parts: &Parts) -> Option<String> {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == SESSION_COOKIE)
+        .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_string())
+}
+
+pub fn session_token(parts: &Parts) -> Option<String> {
+    cookie_value(parts, SESSION_COOKIE)
+}
+
+/// Organization asked for by the menu of the products bar. What the browser
+/// sends is only a wish: it is kept when it names an organization the account
+/// sees a project of, and several are seen; anything else, unknown or not
+/// visible alike, is no filter at all.
+fn chosen_org(parts: &Parts, projects: &[(String, String)]) -> Option<String> {
+    let asked = cookie_value(parts, views::ORG_COOKIE)?;
+    let asked = percent_encoding::percent_decode_str(&asked).decode_utf8().ok()?;
+    let several = projects.iter().any(|(org, _)| Some(org) != projects.first().map(|(first, _)| first));
+    (several && projects.iter().any(|(org, _)| *org == asked)).then(|| asked.into_owned())
 }
 
 /// Account resolved once per request by the `page_context` middleware
@@ -250,17 +265,6 @@ fn session_account(parts: &Parts, state: &AppState) -> Result<Option<Account>, A
     match parts.extensions.get::<ResolvedSession>() {
         Some(resolved) => Ok(resolved.0.clone()),
         None => lookup_session(parts, state),
-    }
-}
-
-/// Optional web session
-pub struct MaybeUser(pub Option<Account>);
-
-impl FromRequestParts<Arc<AppState>> for MaybeUser {
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, AppError> {
-        Ok(MaybeUser(session_account(parts, state)?))
     }
 }
 
@@ -421,16 +425,18 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
         let account = lookup_session(&parts, &state)?;
         let db = state.db()?;
         let (last_sync, sync_running) = db.sync_status()?;
-        let projects = match &account {
+        let projects: Vec<(String, String)> = match &account {
             Some(a) => db.list_user_projects(a.id)?.into_iter().map(|p| (p.org, p.name)).collect(),
             None => Vec::new(),
         };
+        let org = chosen_org(&parts, &projects);
         Ok((
             account,
             views::PageContext {
                 last_sync,
                 sync_running,
                 projects,
+                org,
                 path,
             },
         ))
@@ -481,8 +487,8 @@ async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            // Scripts: only the two same-origin files of the browser notifications
-            "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            // Scripts are same-origin files only; connect-src is for their fetch (filter.js, mfa.js)
+            "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -549,6 +555,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(|| async { Redirect::to("/product") }))
         .route("/product", get(product::product_all))
         .route("/product/{org}/{project}", get(product::product_project))
+        .route("/org-filter", post(product::org_filter))
         .route("/projects", get(projects::projects).post(projects::project_create_any))
         .route("/orgs", get(pages::orgs).post(pages::org_create))
         .route("/orgs/{org}", get(pages::org_detail))
@@ -577,15 +584,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/members/{user_id}/delete",
             post(projects::project_member_remove),
         )
-        .route("/orgs/{org}/projects/{project}/notifications", post(notifications::rule_create))
-        .route(
-            "/orgs/{org}/projects/{project}/notifications/{id}/delete",
-            post(notifications::rule_delete),
-        )
-        .route(
-            "/orgs/{org}/projects/{project}/notifications/{id}/toggle",
-            post(notifications::rule_toggle),
-        )
+        .route("/orgs/{org}/projects/{project}/notifications", post(notifications::project_notifications_save))
         .route("/orgs/{org}/projects/{project}/inventory/sources", post(inventory::source_create))
         .route(
             "/orgs/{org}/projects/{project}/inventory/sources/{id}/delete",
@@ -604,13 +603,6 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/destinations/{id}/delete",
             post(notifications::project_destination_delete),
         )
-        // Browser notifications
-        .route("/push/key", get(notifications::push_key))
-        .route("/push/subscribe", post(notifications::push_subscribe))
-        .route("/push/unsubscribe", post(notifications::push_unsubscribe))
-        .route("/push/inbox", get(notifications::push_inbox))
-        .route("/static/push.js", get(notifications::push_script))
-        .route("/sw.js", get(notifications::service_worker))
         .route("/orgs/{org}/projects/{project}/reports/{day}", get(projects::report_detail))
         .route("/subscriptions", post(pages::subscription_update))
         // Reference database
@@ -669,9 +661,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/notifications/destinations", post(notifications::admin_destination_create))
         .route(
             "/admin/notifications/destinations/{id}",
-            post(notifications::admin_destination_action),
+            get(notifications::admin_destination).post(notifications::admin_destination_action),
         )
-        .route("/admin/notifications/{id}", post(notifications::admin_rule_action))
+        .route("/admin/notifications/{id}", post(notifications::admin_project_test))
         .route("/admin/mcp", get(admin::mcp).post(admin::mcp_save))
         .route("/admin/sso", get(admin::sso).post(admin::sso_save))
         .route("/admin/sso/scim/tokens", post(admin::scim_token_create))
@@ -1049,21 +1041,23 @@ mod tests {
         assert_eq!(subscribed.location.as_deref(), Some("/product/acme/infra?view=subscriptions"));
         assert_eq!(db.list_subscriptions(project_id).unwrap()[0].vendor, "apache");
 
-        // Notifications: private targets are refused, events are multi-valued
-        let base = "/orgs/acme/projects/infra/notifications";
+        // Notifications: private targets are refused; what a destination sends is saved from the table
+        let base = "/orgs/acme/projects/infra";
         let refused = app
-            .post(base, Some(&alice), "name=local&kind=webhook&target=http%3A%2F%2F127.0.0.1%2Fhook")
+            .post(&format!("{base}/destinations"), Some(&alice), "name=local&kind=webhook&url=http%3A%2F%2F127.0.0.1%2Fhook")
             .await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
         let ok = app
             .post(
-                base,
+                &format!("{base}/destinations"),
                 Some(&alice),
-                "name=mail&kind=email&target=sec%40example.org&smtp_host=smtp.example.org&smtp_port=587\
-                 &smtp_from=v%40example.org&events=created&events=kev&events=bogus&min_cvss=7",
+                "name=mail&kind=email&to=sec%40example.org&smtp_host=smtp.example.org&smtp_port=587&smtp_from=v%40example.org",
             )
             .await;
         assert_eq!(ok.status, StatusCode::SEE_OTHER, "{}", ok.body);
+        let mail = db.list_project_destinations(project_id).unwrap()[0].id;
+        let table = format!("id={mail}&enabled_{mail}=1&events_{mail}=created&events_{mail}=kev&events_{mail}=bogus&min_cvss_{mail}=7");
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(&alice), &table).await.status, StatusCode::SEE_OTHER);
         let notifications = db.list_notifications(project_id).unwrap();
         assert_eq!(notifications[0].events, ["created", "kev"]);
         assert_eq!(notifications[0].min_cvss, Some(7.0));
@@ -1607,7 +1601,7 @@ mod tests {
         // Pages are never kept by a cache; static files set their own lifetime
         assert_eq!(app.get("/settings", Some(&alice)).await.cache.as_deref(), Some("no-store"));
         assert_eq!(app.api("/api/cve", Some("Bearer nope")).await.cache.as_deref(), Some("no-store"));
-        assert!(app.get("/static/app.css", None).await.cache.unwrap().contains("max-age"));
+        assert!(app.get("/static/app.css", None).await.cache.as_deref() == Some("no-cache"));
 
         let page = app.post("/settings/tokens", Some(&alice), "name=ci&password=a-long-password").await;
         let token = page
@@ -1662,7 +1656,7 @@ mod tests {
         let db = Database::connect(&app.db_path).unwrap();
         let id = db.start_sync("nvd").unwrap();
         assert!(app.get("/cve", Some(&user)).await.body.contains("sync in progress"));
-        db.complete_sync(id, 1, 0).unwrap();
+        db.complete_sync(id, 1, 0, 0).unwrap();
         assert!(app.get("/cve", Some(&user)).await.body.contains("Database synced just now"));
 
         assert_eq!(app.post("/sync", Some(&user), "back=%2Fproduct").await.status, StatusCode::FORBIDDEN);
@@ -1695,7 +1689,8 @@ mod tests {
             ("/admin/notifications/delivery", "allow_private=1"),
             ("/admin/notifications/destinations", "owner=instance&kind=ntfy&name=x&url=https%3A%2F%2F8.8.8.8%2Fx"),
             ("/admin/notifications/destinations/1", "action=delete"),
-            ("/admin/notifications/1", "action=delete"),
+            ("/admin/notifications/destinations/1", "action=save&enabled=1"),
+            ("/admin/notifications/1", "action=test&project=1"),
             ("/admin/mcp", "http_enabled=1&allow_write=1"),
         ] {
             assert_eq!(app.post(path, Some(&user), form).await.status, StatusCode::FORBIDDEN, "{path}");
@@ -1712,9 +1707,11 @@ mod tests {
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("Not in this release"));
         // The page says how often each source downloads and what, and that "Sync now" does not wait
         let sources = app.get("/admin/sources", Some(&admin)).await.body;
-        for shown in ["at every cycle: only the CVEs changed", "at most every 12 h: only the advisories changed", "at most every 24 h: the whole file of scores", "at most every 6 h", "downloads at once, without waiting"] {
+        for shown in ["At every cycle: only the CVEs changed", "At most every 12 h: only the advisories changed", "At most every 24 h: the whole file of scores", "At most every 6 h", "downloads at once, without waiting"] {
             assert!(sources.contains(shown), "{shown}");
         }
+        // It says so in a bubble opened by a small "i", reachable from the keyboard, without script
+        assert!(sources.contains("<span class=\"info\" tabindex=\"0\"><span class=\"i\" aria-hidden=\"true\">i</span><span class=\"bubble\" role=\"note\">At every cycle"));
         let requested = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
         assert_eq!(requested.status, StatusCode::SEE_OTHER);
         let order = app.sync_rx.try_recv().unwrap();
@@ -1729,7 +1726,7 @@ mod tests {
         // Once running, then finished, the state follows and the page stops refreshing
         let run = db.start_sync("osv").unwrap();
         assert!(app.get("/admin/sources", Some(&admin)).await.body.contains("synchronizing…"));
-        db.complete_sync(run, 3, 0).unwrap();
+        db.complete_sync(run, 3, 0, 0).unwrap();
         // Asking again for a source that is waiting or just ran is not repeated, and says why
         let again = app.post("/admin/sources/osv", Some(&admin), "action=sync").await;
         let flash = again.cookie.expect("explanation");
@@ -1764,16 +1761,18 @@ mod tests {
         let infra = db.find_project("acme", "infra").unwrap().unwrap();
         let web = db.find_project("acme", "web").unwrap().unwrap();
         let create = "/orgs/acme/projects/infra/destinations";
-        let ntfy = "kind=ntfy&name=phone&url=http%3A%2F%2F127.0.0.1%3A9%2Fvulns&notify=1";
+        let ntfy = "kind=ntfy&name=phone&url=http%3A%2F%2F127.0.0.1%3A9%2Fvulns";
         assert_eq!(app.post(create, Some(&admin), ntfy).await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post("/admin/notifications/delivery", Some(&admin), "allow_private=1").await.status, StatusCode::SEE_OTHER);
         assert_eq!(app.post(create, Some(&admin), ntfy).await.status, StatusCode::SEE_OTHER);
-        // The destination belongs to its project: usable there, not in the other project
+        // The destination belongs to its project: it notifies that one, not the other, and starts with every event
         let phone = db.list_project_destinations(infra).unwrap()[0].id;
         assert_eq!(db.list_notifications(infra).unwrap().len(), 1);
-        assert!(db.list_project_destinations(web).unwrap().is_empty());
-        let foreign = format!("destination_id={phone}");
-        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &foreign).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(db.get_destination(phone).unwrap().unwrap().events, crate::db::all_events());
+        assert!(db.list_notifications(web).unwrap().is_empty());
+        let foreign = format!("id={phone}&events_{phone}=kev");
+        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &foreign).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.get_destination(phone).unwrap().unwrap().events, crate::db::all_events());
         assert_eq!(
             app.post(&format!("/orgs/acme/projects/web/destinations/{phone}/delete"), Some(&admin), "").await.status,
             StatusCode::NOT_FOUND
@@ -1797,12 +1796,13 @@ mod tests {
         );
         let stored = &db.list_project_destinations(web).unwrap()[0];
         assert_eq!(stored.config["smtp"]["password"], "smtp-secret");
-        for page in ["/product/acme/web?view=settings", "/admin/notifications", "/admin/notifications?tab=destinations"] {
+        let gear = format!("/admin/notifications/destinations/{}", stored.id);
+        for page in ["/product/acme/web?view=settings", "/admin/notifications", "/admin/notifications?tab=destinations", gear.as_str()] {
             let body = app.get(page, Some(&admin)).await.body;
             assert!(!body.contains("smtp-secret"), "{page}");
         }
 
-        // Administration: rules per project, every destination, instance destinations
+        // Administration: what notifies each project, every destination, instance destinations
         let rules = app.get("/admin/notifications", Some(&admin)).await.body;
         assert!(rules.contains("phone") && rules.contains("infra"));
         let destinations = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
@@ -1812,26 +1812,33 @@ mod tests {
         let ops = "owner=instance&kind=ntfy&name=ops&url=http%3A%2F%2F127.0.0.1%3A9%2Fops&system_events=1";
         assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), ops).await.status, StatusCode::SEE_OTHER);
         assert_eq!(app.post("/admin/notifications/destinations", Some(&user), ops).await.status, StatusCode::FORBIDDEN);
-        // An instance destination is usable by every project and receives instance events
+        // An instance destination receives the notifications of every project by itself, and instance events
         let ops_id = db.list_system_destinations().unwrap()[0].id;
-        assert!(db.list_project_destinations(web).unwrap().iter().any(|d| d.id == ops_id));
+        assert!(db.list_notifications(web).unwrap().iter().any(|n| n.id == ops_id));
+        assert!(db.list_notifications(infra).unwrap().iter().any(|n| n.id == ops_id));
         let org_scoped = "owner=organization%3Aacme&kind=ntfy&name=team&url=http%3A%2F%2F127.0.0.1%3A9%2Fteam&system_events=1";
         app.post("/admin/notifications/destinations", Some(&admin), org_scoped).await;
         assert_eq!(db.list_system_destinations().unwrap().len(), 1); // organization destinations never get instance events
 
-        // The target of a shared destination is its owner's secret: a project using it never sees it
-        let attach = format!("destination_id={ops_id}");
-        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &attach).await.status, StatusCode::SEE_OTHER);
+        // A destination managed elsewhere is its owner's: the project page shows neither its name nor its target,
+        // and cannot change it
         let web_settings = app.get("/product/acme/web?view=settings", Some(&admin)).await.body;
-        assert!(web_settings.contains("ops") && web_settings.contains("managed elsewhere"));
+        assert!(web_settings.contains("Destinations of the organization or of the whole instance, if there are any, also receive"));
+        assert!(!web_settings.contains("ops") && !web_settings.contains("team"), "{web_settings}");
         assert!(!web_settings.contains("127.0.0.1:9/ops") && !web_settings.contains("127.0.0.1:9/team"));
+        let not_ours = format!("id={ops_id}&events_{ops_id}=kev");
+        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &not_ours).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            app.post(&format!("/orgs/acme/projects/web/destinations/{ops_id}/delete"), Some(&admin), "").await.status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(db.get_destination(ops_id).unwrap().unwrap().events, crate::db::all_events());
         // The project's own destination shows its target to those who manage the project
         assert!(app.get("/product/acme/infra?view=settings", Some(&admin)).await.body.contains("127.0.0.1:9/vulns"));
 
         // A test send reports the failure (nothing listens on that port) instead of crashing
-        let id = db.list_notifications(infra).unwrap()[0].id;
-        let action = format!("/admin/notifications/{id}");
-        let tested = app.post(&action, Some(&admin), "action=test").await;
+        let action = format!("/admin/notifications/{phone}");
+        let tested = app.post(&action, Some(&admin), &format!("action=test&project={infra}")).await;
         assert_eq!(tested.status, StatusCode::SEE_OTHER);
         // The outcome comes back in a one-time cookie, never in the URL
         assert_eq!(tested.location.as_deref(), Some("/admin/notifications"));
@@ -1844,88 +1851,298 @@ mod tests {
         assert!(shown.body.contains("class=\"card notice\""));
         let dest_test = app.post(&format!("/admin/notifications/destinations/{ops_id}"), Some(&admin), "action=test").await;
         assert!(dest_test.cookie.unwrap().contains("failed"));
+        // The test of a project only goes through a destination that receives its notifications
+        assert_eq!(app.post(&action, Some(&admin), &format!("action=test&project={web}")).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&action, Some(&admin), "action=test&project=nope").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&action, Some(&admin), &format!("action=delete&project={infra}")).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            app.post(&format!("/admin/notifications/{ops_id}"), Some(&admin), &format!("action=test&project={web}")).await.status,
+            StatusCode::SEE_OTHER
+        );
 
-        assert_eq!(app.post(&action, Some(&admin), "action=toggle").await.status, StatusCode::SEE_OTHER);
-        assert!(!db.list_notifications(infra).unwrap()[0].enabled);
-        assert_eq!(app.post(&action, Some(&admin), "action=delete").await.status, StatusCode::SEE_OTHER);
-        assert_eq!(app.post(&action, Some(&admin), "action=delete").await.status, StatusCode::NOT_FOUND);
-        // Stopping a rule keeps the destination; deleting the destination removes its rules
-        assert!(db.get_destination(phone).unwrap().is_some());
-        app.post("/orgs/acme/projects/infra/notifications", Some(&admin), &format!("destination_id={phone}&events=kev")).await;
-        assert_eq!(db.list_notifications(infra).unwrap()[0].events, ["kev"]);
+        // Deleting the destination stops it
         let deleted = app.post(&format!("/orgs/acme/projects/infra/destinations/{phone}/delete"), Some(&admin), "").await;
         assert_eq!(deleted.status, StatusCode::SEE_OTHER);
-        assert!(db.list_notifications(infra).unwrap().is_empty());
+        assert!(db.list_notifications(infra).unwrap().iter().all(|n| n.scope != "project"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn browser_notifications_are_per_user() {
+    async fn a_destination_tells_what_it_covers_and_what_it_sends() {
         let app = app(open_registration());
-        let alice = app.register("alice").await;
-        let bob = app.register("bob").await;
-        let json = |path: &'static str, cookie: Option<String>, body: serde_json::Value| {
+        let admin = app.register("root").await;
+        let user = app.register("user").await;
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        for project in ["infra", "web"] {
+            app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
+        }
+        for form in [
+            "owner=instance&kind=ntfy&name=Everyone&url=https%3A%2F%2F8.8.8.8%2Feveryone&system_events=1",
+            "owner=organization%3Aacme&kind=ntfy&name=Team&url=https%3A%2F%2F8.8.8.8%2Fteam",
+            "owner=project%3Aacme%2Finfra&kind=ntfy&name=Solo&url=https%3A%2F%2F8.8.8.8%2Fsolo",
+        ] {
+            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let id_of = |name: &str| db.list_all_destinations().unwrap().into_iter().find(|d| d.name == name).unwrap().id;
+        let (everyone, team, solo) = (id_of("Everyone"), id_of("Team"), id_of("Solo"));
+        let list = "/admin/notifications?tab=destinations";
+        let row = |page: &str, name: &str| page.split("<tr>").find(|r| r.contains(&format!("<td>{name}</td>"))).unwrap().to_string();
+
+        // Nobody picked anything, and nobody has to: each row says what it covers and what it sends
+        let page = app.get(list, Some(&admin)).await.body;
+        assert!(page.contains("Covers<span") && page.contains("<th>Sends</th>"));
+        let row_everyone = row(&page, "Everyone");
+        assert!(row_everyone.contains("<td>all projects</td><td>every event<div class=\"muted\">and instance events (sync finished)</div></td>"), "{row_everyone}");
+        assert!(row(&page, "Team").contains("<td>projects of organization acme</td><td>every event</td>"));
+        assert!(row(&page, "Solo").contains("<td>project acme / infra</td><td>every event</td>"));
+        // What the former model said is no longer true, and no longer said
+        for gone in ["no project yet", "until a project picks it", "Offered to", "Used by", "It sends nothing"] {
+            assert!(!page.contains(gone), "{gone}");
+        }
+        // The gear of a row: a link with a name for those who do not see the glyph
+        let gear = format!("/admin/notifications/destinations/{everyone}");
+        assert!(row_everyone.contains(&format!(
+            "<a class=\"btn gear\" href=\"{gear}\" title=\"Configure what it sends\" aria-label=\"Configure Everyone\"><span aria-hidden=\"true\">\u{2699}\u{fe0e}</span></a>"
+        )), "{row_everyone}");
+
+        // Its page: everything checked on a new destination, no minimum CVSS
+        let config = app.get(&gear, Some(&admin)).await;
+        assert_eq!(config.status, StatusCode::OK);
+        assert!(config.body.contains("Destination “Everyone”") && config.body.contains("receives the notifications of all projects."));
+        assert!(config.body.contains("<input type=\"checkbox\" name=\"enabled\" value=\"1\" checked>"));
+        for (kind, _) in crate::changes::EVENT_TYPES {
+            assert!(config.body.contains(&format!("<input type=\"checkbox\" name=\"events\" value=\"{kind}\" checked>")), "{kind}");
+        }
+        assert_eq!(config.body.matches("name=\"events\"").count(), crate::changes::EVENT_TYPES.len());
+        assert!(config.body.contains("<input type=\"number\" name=\"min_cvss\" min=\"0\" max=\"10\" step=\"0.1\" value=\"\">"));
+        assert!(config.body.contains("<input type=\"checkbox\" name=\"system_events\" value=\"1\" checked>"));
+        // Instance events are only offered to a destination of the instance
+        let team_page = app.get(&format!("/admin/notifications/destinations/{team}"), Some(&admin)).await.body;
+        assert!(team_page.contains("projects of organization acme") && !team_page.contains("name=\"system_events\""));
+        // Closed to anyone but an administrator, and to nobody without a session
+        assert_eq!(app.get(&gear, Some(&user)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get(&gear, None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post(&gear, None, "action=save").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post(&gear, Some(&user), "action=save").await.status, StatusCode::FORBIDDEN);
+        assert_eq!(db.get_destination(everyone).unwrap().unwrap().events, crate::db::all_events());
+        assert_eq!(app.get("/admin/notifications/destinations/99999", Some(&admin)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post("/admin/notifications/destinations/99999", Some(&admin), "action=save").await.status, StatusCode::NOT_FOUND);
+
+        // Saving: what is checked is what it sends
+        let saved = app.post(&gear, Some(&admin), "action=save&enabled=1&events=kev&events=created&events=bogus&min_cvss=7.5").await;
+        assert_eq!(saved.location.as_deref(), Some(list));
+        let d = db.get_destination(everyone).unwrap().unwrap();
+        assert_eq!((d.events.clone(), d.min_cvss, d.enabled, d.system_events), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true, false));
+        let config = app.get(&gear, Some(&admin)).await.body;
+        assert!(config.contains("name=\"events\" value=\"kev\" checked>") && config.contains("name=\"events\" value=\"metrics\">"));
+        assert!(config.contains("name=\"min_cvss\" min=\"0\" max=\"10\" step=\"0.1\" value=\"7.5\">"));
+        let page = app.get(list, Some(&admin)).await.body;
+        assert!(row(&page, "Everyone").contains("<td>New CVE, CISA KEV, CVSS 7.5 and above</td>"), "{page}");
+        assert_eq!(app.post(&gear, Some(&admin), "action=save&enabled=1&min_cvss=11").await.status, StatusCode::BAD_REQUEST);
+        // Nothing checked, or disabled: it sends nothing, and the list says why
+        app.post(&gear, Some(&admin), "action=save&enabled=1").await;
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Everyone").contains("nothing: no event checked"));
+        app.post(&gear, Some(&admin), "action=save&enabled=1&system_events=1").await;
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Everyone").contains("only instance events (sync finished)"));
+        app.post(&format!("/admin/notifications/destinations/{team}"), Some(&admin), "action=save&events=kev&system_events=1").await;
+        let team_now = db.get_destination(team).unwrap().unwrap();
+        assert_eq!((team_now.enabled, team_now.system_events), (false, false));
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Team").contains("nothing: disabled"));
+
+        // Per project: every destination receiving its notifications, its own or not
+        let per_project = app.get("/admin/notifications", Some(&admin)).await.body;
+        let lines = |project: &str| per_project.split("<tr>").filter(|r| r.contains(&format!("title=\"{project}\""))).count();
+        assert_eq!((lines("infra"), lines("web")), (3, 2));
+        assert!(per_project.contains(&format!("<a href=\"/admin/notifications/destinations/{solo}\">Solo</a>")));
+        assert!(per_project.contains("<td>the instance</td>") && per_project.contains("<td>its organization</td>") && per_project.contains("<td>the project</td>"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_sets_what_its_own_destinations_send_in_one_table() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        for project in ["infra", "web"] {
+            app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
+        }
+        let mut cookies = std::collections::HashMap::new();
+        for (name, role) in [("editor", "editor"), ("viewer", "viewer"), ("stranger", "")] {
+            cookies.insert(name, app.register(name).await);
+            if !role.is_empty() {
+                app.post("/orgs/acme/members", Some(&admin), &format!("username={name}&role={role}")).await;
+            }
+        }
+        let (editor, viewer, stranger) = (&cookies["editor"], &cookies["viewer"], &cookies["stranger"]);
+        let db = Database::connect(&app.db_path).unwrap();
+        let infra = db.find_project("acme", "infra").unwrap().unwrap();
+        let base = "/orgs/acme/projects/infra";
+        let page = "/product/acme/infra?view=settings";
+
+        // Destinations of the instance and of the organization exist: the project page never names them
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=ntfy&name=Everyone&url=https%3A%2F%2F8.8.8.8%2Fsecret-topic").await;
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=organization%3Aacme&kind=ntfy&name=Teamwide&url=https%3A%2F%2F8.8.8.8%2Forg-topic").await;
+        let empty = app.get(page, Some(editor)).await.body;
+        assert!(empty.contains("This project has no destination of its own yet.") && !empty.contains("Save notifications"));
+
+        // Three destinations of the project, each starting with every event checked
+        for name in ["alpha", "bravo", "charlie"] {
+            let form = format!("kind=ntfy&name={name}&url=https%3A%2F%2F8.8.8.8%2F{name}");
+            assert_eq!(app.post(&format!("{base}/destinations"), Some(editor), &form).await.status, StatusCode::SEE_OTHER);
+        }
+        let ids: Vec<i64> = db.list_project_destinations(infra).unwrap().iter().map(|d| d.id).collect();
+        let (alpha, bravo, charlie) = (ids[0], ids[1], ids[2]);
+        let section = |body: &str| body.split("<h2>Notifications</h2>").nth(1).unwrap().split("<h2>Members</h2>").next().unwrap().to_string();
+        let shown = section(&app.get(page, Some(editor)).await.body);
+        // One table: a row per destination, a checkbox column per event type, a minimum CVSS, one Save
+        assert_eq!(shown.matches("<table").count(), 1);
+        assert_eq!(shown.split("<tbody>").nth(1).unwrap().split("</tbody>").next().unwrap().matches("<tr>").count(), 3);
+        for (kind, label) in crate::changes::EVENT_TYPES {
+            assert!(shown.contains(&format!("<th class=\"up\" title=\"{label}\">")), "{label}");
+            for id in &ids {
+                assert!(shown.contains(&format!("<input type=\"checkbox\" name=\"events_{id}\" value=\"{kind}\" checked aria-label=")), "{kind} {id}");
+            }
+        }
+        assert!(shown.contains(&format!("<input type=\"number\" name=\"min_cvss_{alpha}\" min=\"0\" max=\"10\" step=\"0.1\" value=\"\" aria-label=\"Minimum CVSS: alpha\">")));
+        assert_eq!(shown.matches("Save notifications").count(), 1);
+        assert!(shown.contains("A destination with no event checked sends nothing for this project."));
+        assert!(!shown.contains("none checked = all") && !shown.contains("Destinations of this project") && !shown.contains("Notify a destination"));
+        // Delete posts its own form: Enter in a field of the table saves, it never deletes
+        assert!(shown.contains(&format!("<button class=\"small danger\" type=\"submit\" form=\"delete-destination-{bravo}\">Delete</button>")));
+        assert!(shown.contains(&format!("<form id=\"delete-destination-{bravo}\" method=\"post\" action=\"{base}/destinations/{bravo}/delete\"></form>")));
+        // Works without JavaScript: nothing in the section but plain forms
+        assert!(!shown.contains("<script") && shown.contains(&format!("<form method=\"post\" action=\"{base}/notifications\">")));
+        // Managed elsewhere: neither a name nor a target, for anyone
+        for who in [&admin, editor, viewer] {
+            let body = app.get(page, Some(who)).await.body;
+            for secret in ["Everyone", "Teamwide", "secret-topic", "org-topic"] {
+                assert!(!body.contains(secret), "{secret}");
+            }
+            assert!(body.contains("They are managed by their administrators, not here."));
+        }
+
+        // Uncheck, check and set a minimum: the form comes back as it was sent
+        let form = format!(
+            "id={alpha}&enabled_{alpha}=1&events_{alpha}=kev&events_{alpha}=created&min_cvss_{alpha}=7.5\
+             &id={bravo}&events_{bravo}=metrics&min_cvss_{bravo}=\
+             &id={charlie}&enabled_{charlie}=1&min_cvss_{charlie}=0"
+        );
+        let saved = app.post(&format!("{base}/notifications"), Some(editor), &form).await;
+        assert_eq!(saved.location.as_deref(), Some(page));
+        let settings = |id: i64| {
+            let d = db.get_destination(id).unwrap().unwrap();
+            (d.events, d.min_cvss, d.enabled)
+        };
+        assert_eq!(settings(alpha), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true));
+        assert_eq!(settings(bravo), (vec!["metrics".to_string()], None, false));
+        assert_eq!(settings(charlie), (vec![], Some(0.0), true));
+        let shown = app.get(page, Some(editor)).await.body;
+        let checked = |id: i64, kind: &str| shown.contains(&format!("name=\"events_{id}\" value=\"{kind}\" checked"));
+        assert!(checked(alpha, "kev") && checked(alpha, "created") && !checked(alpha, "metrics") && !checked(alpha, "service"));
+        assert!(checked(bravo, "metrics") && !checked(bravo, "kev") && !checked(charlie, "kev"));
+        assert!(shown.contains(&format!("name=\"enabled_{alpha}\" value=\"1\" checked")) && !shown.contains(&format!("name=\"enabled_{bravo}\" value=\"1\" checked")));
+        assert!(shown.contains(&format!("name=\"min_cvss_{alpha}\" min=\"0\" max=\"10\" step=\"0.1\" value=\"7.5\"")));
+        // A row left out of the form is left as it is; a bad value changes nothing at all
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(editor), &format!("id={charlie}&events_{charlie}=kev")).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(settings(alpha).0, ["created", "kev"]);
+        let bad = format!("id={alpha}&events_{alpha}=metrics&id={bravo}&min_cvss_{bravo}=12");
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(editor), &bad).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(settings(alpha).0, ["created", "kev"]);
+
+        // Rights: a session, the right to manage the project, and a destination of this very project
+        let change = format!("id={alpha}&events_{alpha}=service");
+        let table = format!("{base}/notifications");
+        let delete = format!("{base}/destinations/{alpha}/delete");
+        let create = format!("{base}/destinations");
+        let new = "kind=ntfy&name=delta&url=https%3A%2F%2F8.8.8.8%2Fdelta";
+        for (path, body) in [(table.as_str(), change.as_str()), (delete.as_str(), ""), (create.as_str(), new)] {
+            let anonymous = app.post(path, None, body).await;
+            assert_eq!(anonymous.status, StatusCode::SEE_OTHER, "{path}");
+            assert!(anonymous.location.as_deref().is_some_and(|l| l.starts_with("/login")), "{path}");
+            assert_eq!(app.post(path, Some(viewer), body).await.status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(app.post(path, Some(stranger), body).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(app.get(page, None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get(page, Some(stranger)).await.status, StatusCode::NOT_FOUND);
+        // A viewer sees the table, cannot change it, and does not see the targets
+        let read_only = app.get(page, Some(viewer)).await.body;
+        assert!(read_only.contains("alpha") && !read_only.contains("8.8.8.8") && !read_only.contains("Save notifications"));
+        assert!(!read_only.contains("name=\"id\"") && !read_only.contains(">Delete</button>") && !read_only.contains("new=ntfy"));
+        assert!(read_only.contains(&format!("name=\"events_{alpha}\" value=\"kev\" checked disabled")));
+        // The id of a destination of another project, of the organization or of the instance: not found, nothing changed
+        let others: Vec<i64> = db.list_all_destinations().unwrap().iter().filter(|d| d.scope != "project").map(|d| d.id).collect();
+        assert_eq!(others.len(), 2);
+        for id in others.iter().copied().chain([alpha, 99999]) {
+            let foreign = format!("id={id}&min_cvss_{id}=9");
+            assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(editor), &foreign).await.status, StatusCode::NOT_FOUND, "{id}");
+            assert_eq!(app.post(&format!("/orgs/acme/projects/web/destinations/{id}/delete"), Some(editor), "").await.status, StatusCode::NOT_FOUND, "{id}");
+        }
+        assert_eq!(app.post(&table, Some(editor), "id=abc").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.list_all_destinations().unwrap().len(), 5);
+        assert_eq!(settings(alpha), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true));
+        assert!(others.iter().all(|id| settings(*id) == (crate::db::all_events(), None, true)));
+
+        // Delete per row
+        assert_eq!(app.post(&delete, Some(editor), "").await.status, StatusCode::SEE_OTHER);
+        assert!(db.get_destination(alpha).unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn browser_notifications_are_gone() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        app.post("/projects", Some(&admin), "org=acme&name=infra").await;
+
+        // Their addresses answer like any address that never existed, signed in or not
+        let unknown = |cookie: Option<String>, post: bool| {
             let app = &app;
             async move {
-                let mut req = HttpRequest::post(path)
-                    .header(header::HOST, "localhost")
-                    .header(header::ORIGIN, "http://localhost")
-                    .header(header::CONTENT_TYPE, "application/json");
-                if let Some(c) = cookie {
-                    req = req.header(header::COOKIE, c);
-                }
-                app.send(req.body(Body::from(body.to_string())).unwrap()).await
+                let r = if post { app.post("/no/such/page", cookie.as_deref(), "").await } else { app.get("/no/such/page", cookie.as_deref()).await };
+                (r.status, r.location, r.body)
             }
         };
-
-        // The page offers the feature with same-origin scripts only
-        let settings = app.get("/settings", Some(&alice)).await;
-        assert!(settings.body.contains("id=\"push-box\"") && settings.body.contains("src=\"/static/push.js\""));
-        assert!(!settings.body.contains("<script>"));
-        for (path, needle) in [("/static/push.js", "pushManager"), ("/sw.js", "showNotification")] {
-            let script = app.get(path, None).await;
-            assert_eq!(script.status, StatusCode::OK);
-            assert!(script.body.contains(needle));
+        for cookie in [Some(admin.clone()), None] {
+            for path in ["/push/key", "/push/inbox", "/static/push.js", "/sw.js"] {
+                let r = app.get(path, cookie.as_deref()).await;
+                assert_eq!((r.status, r.location, r.body), unknown(cookie.clone(), false).await, "GET {path}");
+            }
+            for path in ["/push/subscribe", "/push/unsubscribe"] {
+                let r = app.post(path, cookie.as_deref(), "").await;
+                assert_eq!((r.status, r.location, r.body), unknown(cookie.clone(), true).await, "POST {path}");
+            }
         }
-        let key = app.get("/push/key", Some(&alice)).await;
-        assert!(serde_json::from_str::<serde_json::Value>(&key.body).unwrap()["key"].as_str().unwrap().len() > 80);
-        assert_eq!(app.get("/push/key", None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get("/sw.js", Some(&admin)).await.status, StatusCode::NOT_FOUND);
 
-        // Subscribing needs a session and a public https push service
-        let good = serde_json::json!({ "endpoint": "https://8.8.8.8/push/abc", "label": "laptop" });
-        assert_eq!(json("/push/subscribe", None, good.clone()).await.status, StatusCode::SEE_OTHER);
-        for bad in ["http://8.8.8.8/push", "https://127.0.0.1/push", "https://10.0.0.1/x", "nonsense"] {
-            let r = json("/push/subscribe", Some(alice.clone()), serde_json::json!({ "endpoint": bad })).await;
-            assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+        // No page offers them or loads their script
+        let pages = [
+            "/settings",
+            "/admin/notifications",
+            "/admin/notifications?tab=destinations",
+            "/admin/notifications?tab=destinations&new=browser",
+            "/admin/notifications?tab=destinations&enable=1",
+            "/product/acme/infra?view=settings",
+            "/product/acme/infra?view=settings&new=browser",
+        ];
+        for path in pages {
+            let page = app.get(path, Some(&admin)).await;
+            assert_eq!(page.status, StatusCode::OK, "{path}");
+            let body = page.body.to_lowercase();
+            // (the address asked for is repeated by the filter of a list: only what is offered counts)
+            for gone in ["browser notification", "new destination", "name=\"kind\"", "push", "sw.js", "serviceworker"] {
+                assert!(!body.contains(gone), "{path}: {gone}");
+            }
         }
-        assert_eq!(json("/push/subscribe", Some(alice.clone()), good.clone()).await.status, StatusCode::OK);
+
+        // And such a destination can no longer be created, by the administration or by a project
+        for (path, form) in [
+            ("/admin/notifications/destinations", "owner=instance&kind=browser&name=Browsers"),
+            ("/orgs/acme/projects/infra/destinations", "kind=browser&name=Browsers"),
+        ] {
+            assert_eq!(app.post(path, Some(&admin), form).await.status, StatusCode::BAD_REQUEST, "{path}");
+        }
         let db = Database::connect(&app.db_path).unwrap();
-        let alice_id = db.get_credentials("alice").unwrap().unwrap().0.id;
-        assert_eq!(db.list_push_subscriptions(alice_id).unwrap().len(), 1);
-        assert!(app.get("/settings", Some(&alice)).await.body.contains("laptop"));
-
-        // A test through a browser destination says so when nobody is there to receive it
-        let admin = app.register("zadmin").await; // not the first account: grant it below
-        db.set_admin(db.get_credentials("zadmin").unwrap().unwrap().0.id, true).unwrap();
-        let admin = app.post("/login", None, "username=zadmin&password=a-long-password").await.cookie.unwrap_or(admin);
-        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Browsers").await;
-        let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
-        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
-        let flash = tested.cookie.unwrap();
-        assert!(flash.contains("failed") && flash.contains("none%20of%20your%20browsers"), "{flash}");
-        // The list tells how many projects a shared destination serves
-        let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
-        assert!(listed.contains("available to all") && listed.contains("0 of 1 project"));
-
-        // The inbox is read once, by its owner only; signed out, nothing answers
-        db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
-        assert_eq!(app.get("/push/inbox", None).await.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(app.get("/push/inbox", Some(&bob)).await.body, "[]");
-        let inbox = app.get("/push/inbox", Some(&alice)).await.body;
-        assert!(inbox.contains("Synchronization finished"));
-        assert_eq!(app.get("/push/inbox", Some(&alice)).await.body, "[]");
-
-        assert_eq!(json("/push/unsubscribe", Some(alice.clone()), good).await.status, StatusCode::OK);
-        assert!(db.list_push_subscriptions(alice_id).unwrap().is_empty());
+        assert!(db.list_all_destinations().unwrap().is_empty());
+        assert!(db.create_destination("instance", None, "Browsers", "browser", &serde_json::json!({}), false).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2281,17 +2498,33 @@ mod tests {
         // And it only delivers: it is not an API credential
         assert_eq!(app.api("/api/cve", bearer().as_deref()).await.status, StatusCode::UNAUTHORIZED);
 
-        // A project rule receives the announcement of new probable services in the browser inbox
-        app.post("/orgs/acme/projects/infra/destinations", Some(&admin), "kind=browser&name=browsers&notify=1").await;
+        // A destination of the project receives the announcement of new probable services
+        let received = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hook = format!("http://{}/hook", listener.local_addr().unwrap());
+        let sink = received.clone();
+        let receiver = Router::new().route(
+            "/hook",
+            post(move |Json(body): Json<serde_json::Value>| async move {
+                sink.lock().unwrap().push(body);
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+        app.post("/admin/notifications/delivery", Some(&admin), "allow_private=1").await;
+        let form = format!("kind=webhook&name=hook&url={}", percent_encoding::utf8_percent_encode(&hook, percent_encoding::NON_ALPHANUMERIC));
+        assert_eq!(app.post("/orgs/acme/projects/infra/destinations", Some(&admin), &form).await.status, StatusCode::SEE_OTHER);
         let delivered = push(bearer(), inventory.clone()).await;
         assert_eq!(delivered.status, StatusCode::OK, "{}", delivered.body);
         let outcome: serde_json::Value = serde_json::from_str(&delivered.body).unwrap();
         assert_eq!((outcome["added"].as_i64(), outcome["new_probable_services"].as_array().map(Vec::len)), (Some(3), Some(2)));
-        let inbox = app.get("/push/inbox", Some(&viewer)).await.body;
-        assert!(inbox.contains("2 new probable service(s)") && inbox.contains("nginx 1.30.6"));
+        let announced = received.lock().unwrap().clone();
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!((announced[0]["event"].as_str(), announced[0]["title"].as_str()), (Some("service"), Some("acme/infra: 2 new probable service(s)")));
+        assert!(announced[0]["message"].as_str().unwrap().contains("nginx 1.30.6"));
         // Delivering the same list again announces nothing
         push(bearer(), inventory.clone()).await;
-        assert_eq!(app.get("/push/inbox", Some(&viewer)).await.body, "[]");
+        assert_eq!(received.lock().unwrap().len(), 1);
+        app.post("/admin/notifications/delivery", Some(&admin), "").await;
         assert_eq!(push(bearer(), "not json".into()).await.status, StatusCode::BAD_REQUEST);
 
         // The checklist ranks exposed components and known services first
@@ -2901,7 +3134,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 19] = [
+    const PUBLIC_ROUTES: [&str; 17] = [
         "/login",
         "/register",
         "/setup",
@@ -2918,8 +3151,6 @@ mod tests {
         "/static/mfa.js",
         "/static/filter.js",
         "/static/theme.js",
-        "/static/push.js",
-        "/sw.js",
         "/favicon.ico",
     ];
 
@@ -2932,7 +3163,7 @@ mod tests {
         let token = tokens_of(&app.post("/settings/tokens", Some(&admin), "name=t&password=a-long-password").await.body).remove(0);
 
         let routes = declared_routes();
-        assert!(routes.len() >= 120, "only {} routes found: the source is no longer read correctly", routes.len());
+        assert!(routes.len() >= 110, "only {} routes found: the source is no longer read correctly", routes.len());
         for expected in ["/cve", "/admin/users", "/api/cve", "/api/security-log", "/mcp", "/scim/v2/Users", "/setup"] {
             assert!(routes.iter().any(|r| r == expected), "{expected} is not among the routes found");
         }
@@ -3506,6 +3737,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_lists_fit_the_window() {
+        let app = app(open_registration());
+        let alice = app.register("alice").await;
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        // Both lists name their columns for the stylesheet; the project column only exists for all projects
+        for (scope, project) in [("/product", "<col class=\"project\">"), ("/product/acme/infra", "")] {
+            let review = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
+            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
+            let decided = app.get(&format!("{scope}?view=vulnerabilities&show=handled"), Some(&alice)).await.body;
+            assert!(decided.contains(&format!("<table class=\"list fit decided\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"decision\"><col class=\"actions\"></colgroup>")), "{scope}");
+            let columns = if project.is_empty() { 5 } else { 6 };
+            assert!(decided.contains(&format!("colspan=\"{columns}\"")) && decided.contains("No decision yet."), "{scope}");
+        }
+        let css = app.get("/static/app.css", None).await.body;
+        assert!(css.contains("table.list.fit { table-layout: fixed; }"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_list_fits_the_window() {
+        let app = app(with_inventory());
+        let root = app.register("root").await;
+        app.post("/orgs", Some(&root), "name=acme").await;
+        app.post("/projects", Some(&root), "org=acme&name=infra").await;
+        let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
+        let user = format!("/admin/users/{id}");
+        // The widths the stylesheet knows; a column without a name takes what is left
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
+        let table = regex::Regex::new(r#"(?s)<table class="([^"]*)">(.*?)</table>"#).unwrap();
+        let column = regex::Regex::new(r#"<col(?: class="([a-z]+)")?>"#).unwrap();
+        let pages = [
+            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=applications",
+            "/product?view=subscriptions", "/product?view=history", "/product?view=audit",
+            "/product/acme/infra", "/product/acme/infra?view=vulnerabilities", "/product/acme/infra?view=applications",
+            "/product/acme/infra?view=subscriptions", "/product/acme/infra?view=history", "/product/acme/infra?view=audit",
+            "/product/acme/infra?view=settings", "/projects", "/orgs", "/orgs/acme", "/cve", "/cve/CVE-2024-4242", "/vendors", "/weaknesses",
+            "/settings", "/settings/mfa", "/admin", "/admin/users", user.as_str(), "/admin/sources", "/admin/notifications",
+            "/admin/notifications?tab=destinations", "/admin/security", "/admin/mcp", "/admin/sso", "/admin/sso?tab=scim",
+        ];
+        let (mut lists, mut dense) = (0, 0);
+        for path in pages {
+            let page = app.get(path, Some(&root)).await;
+            assert_eq!(page.status, StatusCode::OK, "{path}");
+            for found in table.captures_iter(&page.body) {
+                let (classes, inside) = (&found[1], &found[2]);
+                lists += 1;
+                // Sized by the stylesheet, not by its content: no name or text can make it wider than the page
+                assert!(classes.starts_with("list ") && classes.split(' ').any(|c| c == "fit"), "{path}: {classes}");
+                let head = inside.split("</thead>").next().unwrap();
+                let columns: Vec<&str> = column.captures_iter(head).map(|c| c.get(1).map_or("", |m| m.as_str())).collect();
+                assert!(inside.starts_with("<colgroup>") && !columns.is_empty(), "{path}: no column group");
+                // One column named per header cell, each name known to the stylesheet, and room left for a text
+                assert_eq!(columns.len(), head.matches("<th").count() - 1, "{path}: {columns:?}");
+                assert!(columns.iter().all(|c| c.is_empty() || sized.contains(c)), "{path}: {columns:?}");
+                assert!(columns.iter().any(|c| c.is_empty() || ["desc", "app"].contains(c)), "{path}: {columns:?}");
+                // A cell kept on one line must be one whose column is wide enough: an identifier, a score, a date
+                assert!(!inside.contains("class=\"right nowrap\""), "{path}");
+                // The widest lists scroll inside their own box, which is all that surrounds them
+                if classes.split(' ').any(|c| c == "dense") {
+                    dense += 1;
+                    let before = &page.body[..found.get(0).unwrap().start()];
+                    assert!(before.ends_with("<div class=\"scroll\">"), "{path}");
+                }
+            }
+        }
+        assert!(lists >= 34 && dense >= 6, "{lists} lists, {dense} dense");
+        // No list of the interface is left to the width of its content
+        for source in [
+            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
+            include_str!("pages.rs"), include_str!("product.rs"), include_str!("projects.rs"), include_str!("views.rs"),
+        ] {
+            let plain = regex::Regex::new(r"(?m)^\s*table\.list \{").unwrap();
+            assert_eq!(plain.find_iter(source).count(), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_vulnerabilities_view_keeps_its_old_address() {
         let app = app(open_registration());
         let alice = app.register("alice").await;
@@ -3700,13 +4008,24 @@ mod tests {
             // The policy is the one of before the themes, word for word
             assert_eq!(
                 page.csp.as_deref(),
-                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+                Some("default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
             );
         }
         // The script is served like the others, and holds what the page relies on
         let script = app.get("/static/theme.js", None).await;
         assert_eq!(script.status, StatusCode::OK);
-        assert!(script.cache.unwrap().contains("max-age"));
+        assert_eq!(script.cache.as_deref(), Some("no-cache"));
+        // Kept by the browser, which asks each time whether it is still the one of this release
+        for path in ["/static/theme.js", "/static/filter.js", "/static/mfa.js", "/static/app.css"] {
+            let first = app.router.clone().oneshot(HttpRequest::get(path).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(first.status(), StatusCode::OK, "{path}");
+            let etag = first.headers().get(header::ETAG).expect("an ETag").clone();
+            assert!(etag.to_str().unwrap().contains(env!("CARGO_PKG_VERSION")), "{path}");
+            let again = app.router.clone().oneshot(HttpRequest::get(path).header(header::IF_NONE_MATCH, etag).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(again.status(), StatusCode::NOT_MODIFIED, "{path}");
+            let other = app.router.clone().oneshot(HttpRequest::get(path).header(header::IF_NONE_MATCH, "\"0.0.0-1\"").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(other.status(), StatusCode::OK, "{path}");
+        }
         assert!(script.body.contains("prefers-color-scheme: dark") && script.body.contains("localStorage"));
         assert!(script.body.contains("data-theme-choice") && script.body.contains("data-mode-toggle"));
         // Without the script the controls are hidden, and the system setting still picks day or night
@@ -3754,5 +4073,237 @@ mod tests {
         let applied = app.post("/admin/users/bulk", Some(&admin), &format!("action=disable&ids={dev}")).await;
         assert_eq!(applied.status, StatusCode::SEE_OTHER, "{}", applied.body);
         assert!(db.list_accounts().unwrap().into_iter().find(|a| a.id == dev).unwrap().disabled);
+    }
+
+    /// Two organizations, each with a project tracking an application a CVE affects
+    async fn two_organizations(app: &TestApp) -> (String, String, String) {
+        let root = overseer(app).await;
+        let alice = app.register("alice").await;
+        let bob = app.register("bob").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, vendor, product, score) in [("CVE-2024-4343", "acme", "widget", 9.1), ("CVE-2024-4444", "globex", "gadget", 5.0)] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.cvss_v3_score = Some(score);
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some(vendor.into()),
+                product: Some(product.into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let added = app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0&vendor=acme").await;
+        assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+        (root, alice, bob)
+    }
+
+    /// The administrator, with a role on the whole instance: administering
+    /// gives no project by itself, that role gives those of every organization
+    async fn overseer(app: &TestApp) -> String {
+        let root = app.register("root").await;
+        let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
+        let given = app.post(&format!("/admin/users/{id}/assign"), Some(&root), "scope=instance&role=viewer").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        root
+    }
+
+    async fn second_organization(app: &TestApp, bob: &str) {
+        app.post("/orgs", Some(bob), "name=globex").await;
+        app.post("/projects", Some(bob), "org=globex&name=shop").await;
+        let added = app.post("/orgs/globex/projects/shop/applications", Some(bob), "name=gadget&version=2.0&vendor=globex").await;
+        assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+    }
+
+    fn org_entry(org: &str, label: &str, active: bool) -> String {
+        let class = if active { " class=\"active\"" } else { "" };
+        format!("<button type=\"submit\" name=\"org\" value=\"{org}\"{class}>{label}</button>")
+    }
+
+    fn to_review(count: i64) -> String {
+        format!("<div class=\"value\">{count}</div><div class=\"label\">CVEs to review</div>")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_administrator_narrows_all_projects_to_one_organization() {
+        {
+            // With a single organization (the one every instance starts with) there is nothing to choose
+            let app = app(open_registration());
+            let root = overseer(&app).await;
+            let single = app.get("/product", Some(&root)).await.body;
+            assert!(single.contains("<a href=\"/product/default/default\"") && !single.contains("/org-filter"));
+            assert!(!single.contains("Switch organization"));
+        }
+        let app = app(open_registration());
+        let (root, _alice, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+
+        // The administrator belongs to neither and sees both: the menu is a plain form, next to the project menu
+        let all = app.get("/product?view=applications", Some(&root)).await.body;
+        let menu = all.split("<details class=\"menu org\">").nth(1).expect("the organization menu");
+        let (menu, after) = menu.split_once("</details>").unwrap();
+        assert!(after.starts_with("<details class=\"menu\"><summary title=\"Switch project\">All projects<span class=\"muted\"> (*)</span>"));
+        assert!(menu.starts_with("<summary title=\"Switch organization\">All organizations</summary><form method=\"post\" action=\"/org-filter\">"));
+        assert!(menu.contains("<input type=\"hidden\" name=\"back\" value=\"/product?view=applications\">"));
+        for entry in [org_entry("", "All organizations", true), org_entry("acme", "acme", false), org_entry("default", "default", false), org_entry("globex", "globex", false)] {
+            assert!(menu.contains(&entry), "{entry}");
+        }
+        // Nothing in it needs a script
+        assert!(!menu.contains("<script") && !menu.contains("onclick") && !menu.contains("onchange"));
+        assert!(app.get("/static/app.css", None).await.body.contains("details.menu li button {"));
+        // From another page the choice comes back to that page
+        assert!(app.get("/cve", Some(&root)).await.body.contains("<input type=\"hidden\" name=\"back\" value=\"/cve\">"));
+        assert!(app.get("/product/acme/infra?view=audit", Some(&root)).await.body.contains("name=\"back\" value=\"/product?view=audit\">"));
+
+        // Everything is listed before a choice
+        let project_link = |org: &str, project: &str, view: &str| format!("<a href=\"/product/{org}/{project}?view={view}\"");
+        assert!(all.contains("widget") && all.contains("gadget"));
+        assert!(all.contains(&project_link("acme", "infra", "applications")) && all.contains(&project_link("globex", "shop", "applications")));
+        let vulnerabilities = app.get("/product?view=vulnerabilities", Some(&root)).await.body;
+        assert!(vulnerabilities.contains("CVE-2024-4343") && vulnerabilities.contains("CVE-2024-4444"));
+        assert!(app.get("/product", Some(&root)).await.body.contains(&to_review(2)));
+
+        // Choosing one sets a cookie the scripts cannot read, and comes back to the page
+        let chosen = app.post("/org-filter", Some(&root), "org=acme&back=%2Fproduct%3Fview%3Dapplications").await;
+        assert_eq!(chosen.status, StatusCode::SEE_OTHER, "{}", chosen.body);
+        assert_eq!(chosen.location.as_deref(), Some("/product?view=applications"));
+        assert_eq!(chosen.cookie.as_deref(), Some("vz_org=acme"));
+        let acme = format!("{root}; vz_org=acme");
+
+        // The project menu and every list of "all projects" keep that organization only
+        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+            let page = app.get(&format!("/product?view={view}"), Some(&acme)).await;
+            assert_eq!(page.status, StatusCode::OK, "{view}");
+            let body = page.body;
+            assert!(body.contains("<summary title=\"Switch organization\">acme</summary>"), "{view}");
+            assert!(body.contains(&org_entry("acme", "acme", true)) && body.contains(&org_entry("globex", "globex", false)), "{view}");
+            assert!(body.contains("<summary title=\"Switch project\">All projects<span class=\"muted\"> of acme</span>"), "{view}");
+            assert!(body.contains("All projects of acme (*)</a>") && body.contains("<h1>All projects of acme "), "{view}");
+            assert!(body.contains(&project_link("acme", "infra", view).replace("?view=overview", "")), "{view}");
+            // The other organization is only named as an entry of the menu
+            let rest = body.replace(&org_entry("globex", "globex", false), "");
+            assert!(!rest.contains("globex") && !rest.contains("shop") && !rest.contains("gadget") && !rest.contains("CVE-2024-4444"), "{view}");
+        }
+        let vulnerabilities = app.get("/product?view=vulnerabilities", Some(&acme)).await.body;
+        assert!(vulnerabilities.contains("CVE-2024-4343"));
+        let applications = app.get("/product?view=applications", Some(&acme)).await.body;
+        assert!(applications.contains("widget"));
+        let overview = app.get("/product", Some(&acme)).await.body;
+        assert!(overview.contains(&to_review(1)) && overview.contains("CVE-2024-4343"));
+        assert!(app.get("/product?view=history", Some(&acme)).await.body.contains("<div class=\"value\">1</div><div class=\"label\">to review</div>"));
+        let globex = format!("{root}; vz_org=globex");
+        let other = app.get("/product", Some(&globex)).await.body;
+        assert!(other.contains(&to_review(1)) && other.contains("CVE-2024-4444") && !other.contains("CVE-2024-4343"));
+
+        // It narrows lists and is no access rule: a project of the other organization still opens
+        let direct = app.get("/product/globex/shop?view=applications", Some(&acme)).await;
+        assert_eq!(direct.status, StatusCode::OK);
+        assert!(direct.body.contains("gadget") && direct.body.contains("<summary title=\"Switch project\">shop</summary>"));
+
+        // "All organizations" forgets the choice, and everything is back
+        let cleared = app.post("/org-filter", Some(&acme), "org=&back=%2Fproduct").await;
+        assert_eq!((cleared.status, cleared.location.as_deref(), cleared.cookie.as_deref()), (StatusCode::SEE_OTHER, Some("/product"), Some("vz_org=")));
+        for cookie in [root.clone(), format!("{root}; vz_org=")] {
+            let body = app.get("/product?view=vulnerabilities", Some(&cookie)).await.body;
+            assert!(body.contains("CVE-2024-4343") && body.contains("CVE-2024-4444") && !body.contains("All projects of"));
+            assert!(app.get("/product", Some(&cookie)).await.body.contains(&to_review(2)));
+        }
+
+        // A forged value is no filter, and is never written back in the page
+        for forged in ["nowhere", "%3Cb%3E", "ACME", "acme%00", "%FF", "acme; vz_org=nowhere"] {
+            let cookie = format!("{root}; vz_org={forged}");
+            let body = app.get("/product?view=applications", Some(&cookie)).await.body;
+            if forged.starts_with("acme;") {
+                // The first value sent is the one read
+                assert!(body.contains("All projects of acme") && !body.contains("nowhere"));
+            } else {
+                assert_eq!(body, all, "{forged}");
+            }
+        }
+
+        // The cookie is the session's kind: kept from scripts, sent on navigation, Secure over https
+        assert_eq!(org_cookie(open_registration()).await, format!("vz_org=globex; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}"));
+        let mut https = open_registration();
+        https.web.base_url = "https://vulnizard.example".into();
+        assert_eq!(org_cookie(https).await, format!("vz_org=globex; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}; Secure"));
+    }
+
+    /// The cookie as the server writes it when an organization is chosen
+    async fn org_cookie(config: Config) -> String {
+        let app = app(config);
+        let (root, _, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+        let request = HttpRequest::post("/org-filter")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, root)
+            .body(Body::from("org=globex&back=%2F%2Fevil.example%2F"))
+            .unwrap();
+        let response = app.router.clone().oneshot(request).await.unwrap();
+        // Only a page of this site is come back to
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/product");
+        response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_organization_filter_shows_nothing_more_than_one_already_sees() {
+        let app = app(open_registration());
+        let (_root, alice, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+
+        // A member of one organization has no menu, and learns nothing by asking for another:
+        // an organization that exists and one that does not get the very same pages
+        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+            let path = format!("/product?view={view}");
+            let plain = app.get(&path, Some(&alice)).await.body;
+            assert!(!plain.contains("Switch organization") && !plain.contains("/org-filter") && !plain.contains("globex"), "{view}");
+            assert!(!plain.contains("gadget") && !plain.contains("CVE-2024-4444"), "{view}");
+            for asked in ["globex", "nowhere", "acme"] {
+                let body = app.get(&path, Some(&format!("{alice}; vz_org={asked}"))).await.body;
+                assert_eq!(body, plain, "{view} {asked}");
+            }
+        }
+        let existing = app.post("/org-filter", Some(&alice), "org=globex&back=%2Fproduct").await;
+        let unknown = app.post("/org-filter", Some(&alice), "org=nowhere&back=%2Fproduct").await;
+        for reply in [&existing, &unknown] {
+            assert_eq!((reply.status, reply.location.as_deref()), (StatusCode::SEE_OTHER, Some("/product")));
+            assert_eq!(reply.cookies, vec!["vz_org=".to_string()]);
+            assert_eq!(reply.body, "");
+        }
+        // Nor does a project of the other organization open
+        assert_eq!(app.get("/product/globex/shop", Some(&format!("{alice}; vz_org=globex"))).await.status, StatusCode::NOT_FOUND);
+
+        // Who is given a project elsewhere sees two organizations, and gets the menu without being an administrator
+        let given = app.post("/orgs/globex/projects/shop/members", Some(&bob), "username=alice&role=viewer").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        let both = app.get("/product?view=applications", Some(&alice)).await.body;
+        assert!(both.contains(&org_entry("acme", "acme", false)) && both.contains(&org_entry("globex", "globex", false)));
+        assert!(both.contains("widget") && both.contains("gadget"));
+        let narrowed = app.get("/product?view=applications", Some(&format!("{alice}; vz_org=globex"))).await.body;
+        assert!(narrowed.contains("gadget") && !narrowed.contains("widget") && narrowed.contains("All projects of globex"));
+        // The right is lost: the choice kept by the browser stops counting at once
+        let project = Database::connect(&app.db_path).unwrap().find_project("globex", "shop").unwrap().unwrap();
+        let alice_id = Database::connect(&app.db_path).unwrap().get_credentials("alice").unwrap().unwrap().0.id;
+        let removed = app.post(&format!("/orgs/globex/projects/shop/members/{alice_id}/delete"), Some(&bob), "").await;
+        assert_eq!(removed.status, StatusCode::SEE_OTHER, "{} {project}", removed.body);
+        let after = app.get("/product?view=applications", Some(&format!("{alice}; vz_org=globex"))).await.body;
+        assert!(after.contains("widget") && !after.contains("gadget") && !after.contains("globex"));
+
+        // The choice is a form sent from our own pages by a signed-in user: nothing else changes it
+        assert_eq!(app.post("/org-filter", None, "org=acme").await.location.as_deref(), Some("/login"));
+        assert_eq!(app.get("/org-filter?org=acme", Some(&alice)).await.status, StatusCode::METHOD_NOT_ALLOWED);
+        let foreign = HttpRequest::post("/org-filter")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://evil.example")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, alice.as_str())
+            .body(Body::from("org=acme"))
+            .unwrap();
+        let foreign = app.send(foreign).await;
+        assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+        assert!(foreign.cookies.is_empty());
     }
 }

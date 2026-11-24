@@ -128,6 +128,56 @@
   --accent: #e8a15c; --on-accent: #1f1204; --product-wash: #3a2a18; --tag-bg: #453c2e;
   --info-bg: #1b1812; --info-wash: #2f2a20; --track: #2c271e;
 }
+/* Three palettes known from code editors. Each keeps the colors of its
+   original; where one of them is too faint to be read as text on this
+   interface (the comment gray of Dracula, the red of Nord), a lighter or
+   darker step of the same hue is used. Day palettes: Alucard for Dracula,
+   Snow Storm for Nord, Lux for Noctis. */
+:root[data-theme="dracula"][data-mode="light"] {
+  --bg: #fffbeb; --surface: #fffdf6; --text: #1f1f1f; --muted: #635d44; --border: #e3ddc4;
+  --accent: #644ac9; --danger: #b8301f; --warn: #8f4410; --ok: #14710a; --busy: #846e15;
+  --product-wash: #ebe6fb; --tag-bg: #e6e1cc;
+  --info-bg: #f7f2dd; --info-wash: #e9e3c9; --info-ink: #4a4633; --added: #e3f3dd; --removed: #fbe4df;
+  --grid: #e3ddc4; --track: #efe9d3;
+}
+:root[data-theme="dracula"][data-mode="dark"] {
+  --bg: #21222c; --surface: #282a36; --text: #f8f8f2; --muted: #a9b1d1; --border: #44475a;
+  --accent: #bd93f9; --on-accent: #1b1c25; --danger: #ff7b7b; --on-danger: #2a0a0a;
+  --warn: #ffb86c; --ok: #50fa7b; --busy: #f1fa8c;
+  --product-wash: #3a3152; --tag-bg: #44475a;
+  --info-bg: #1d1e27; --info-wash: #343746; --info-ink: #e2e2dc; --added: #1f3a2a; --removed: #4a2530;
+  --grid: #3a3d4e; --track: #343746;
+}
+:root[data-theme="nord"][data-mode="light"] {
+  --bg: #eceff4; --surface: #f9fafc; --text: #2e3440; --muted: #4c566a; --border: #d3dae6;
+  --accent: #3d6495; --danger: #a3323d; --warn: #855800; --ok: #3d6a2b; --busy: #8a6700;
+  --product-wash: #dce6f2; --tag-bg: #d8dee9;
+  --info-bg: #e5e9f0; --info-wash: #d8dee9; --info-ink: #434c5e; --added: #e0eedb; --removed: #f6e1e3;
+  --grid: #d3dae6; --track: #e0e5ee;
+}
+:root[data-theme="nord"][data-mode="dark"] {
+  --bg: #2e3440; --surface: #3b4252; --text: #eceff4; --muted: #c0c9d9; --border: #56617a;
+  --accent: #8fd0e2; --on-accent: #20252e; --danger: #f2a7ae; --on-danger: #3a1218;
+  --warn: #ebcb8b; --ok: #b4d39b; --busy: #ebcb8b;
+  --product-wash: #40506a; --tag-bg: #4c566a;
+  --info-bg: #2a303b; --info-wash: #434c5e; --info-ink: #e5e9f0; --added: #36473b; --removed: #4d383e;
+  --grid: #4c566a; --track: #434c5e; --neutral: #b3bac7;
+}
+:root[data-theme="noctis"][data-mode="light"] {
+  --bg: #fef8ec; --surface: #fffdf7; --text: #004d57; --muted: #4a6a70; --border: #e7dcc6;
+  --accent: #00707f; --danger: #b23312; --warn: #855700; --ok: #00715f; --busy: #8a6200;
+  --product-wash: #dcf0ef; --tag-bg: #eadfc9;
+  --info-bg: #f6eedb; --info-wash: #e7dcc6; --info-ink: #3d5a5f; --added: #dff1e3; --removed: #fbe3dc;
+  --grid: #e7dcc6; --track: #f0e7d3;
+}
+:root[data-theme="noctis"][data-mode="dark"] {
+  --bg: #041d20; --surface: #052529; --text: #c5d8db; --muted: #8fb0b5; --border: #1d5057;
+  --accent: #40d4e7; --on-accent: #03191b; --danger: #ff8a5c; --on-danger: #2a0d02;
+  --warn: #e4b781; --ok: #49e9a6; --busy: #ffc180;
+  --product-wash: #0e3f45; --tag-bg: #164a50;
+  --info-bg: #03181a; --info-wash: #0f3a3f; --info-ink: #b2cacd; --added: #0b3a2c; --removed: #3e231c;
+  --grid: #164a50; --track: #0c3438;
+}
 /* Strongest contrast between text and page, and visible borders */
 :root[data-theme="contrast"][data-mode="light"] {
   --bg: #ffffff; --surface: #ffffff; --text: #000000; --muted: #3a3a3a; --border: #767676;
@@ -237,10 +287,27 @@ details.menu ul {
 }
 details.menu li a { display: block; padding: 6px 10px; }
 details.menu li.sep { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+/* Organization menu: its entries are the buttons of a form, drawn like the links of the project menu */
+details.menu li button {
+  display: block;
+  width: 100%;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+}
+details.menu li button:hover { background: var(--zone-hover); }
+details.menu li button.active { font-weight: 600; background: var(--zone-active); color: var(--zone-ink); }
 
 main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; }
 
-h1 { font-size: 24px; margin: 8px 0 16px; }
+/* A title is a name someone typed: a very long one breaks rather than widening the page */
+h1 { font-size: 24px; margin: 8px 0 16px; overflow-wrap: break-word; }
 h2 { font-size: 18px; margin: 28px 0 10px; }
 
 .muted { color: var(--muted); }
@@ -271,6 +338,112 @@ table.list th, table.list td {
 }
 table.list th { font-size: 13px; color: var(--muted); font-weight: 600; }
 table.list tr:last-child td { border-bottom: none; }
+/* Cells asking for it (the actions of a row) are aligned on the right */
+table.list td.right { text-align: right; }
+table.list td.right form.row { justify-content: flex-end; }
+
+/* A list whose columns are sized here (its colgroup names them) rather than
+   by their content: the table is exactly as wide as its box at any window
+   width, and long names and texts wrap inside their column. The page never
+   scrolls sideways because of it. Every list of the interface is one.
+
+   A column is named after what it holds, and the name gives its width: a
+   fixed one for what has a known size (an identifier, a date, a count, a
+   button), a share of the table for names, and nothing for the one or two
+   columns of free text, which take what is left. */
+table.list.fit { table-layout: fixed; }
+table.fit td { overflow-wrap: anywhere; }
+table.fit th { overflow-wrap: break-word; }
+table.fit td.cve a { white-space: nowrap; }
+table.fit td .tag, table.fit td .status { white-space: normal; }
+table.fit td input[type="text"], table.fit td select { max-width: 100%; }
+table.fit col.check { width: 44px; }
+table.fit col.cve { width: 162px; }
+table.fit col.cvss { width: 122px; }
+table.fit col.when { width: 186px; }
+table.fit col.day { width: 124px; }
+table.fit col.num { width: 116px; }
+table.fit col.flag { width: 96px; }
+table.fit col.kind { width: 132px; }
+table.fit col.decision { width: 150px; }
+table.fit col.name { width: 20%; }
+table.fit col.app { width: 16%; }
+table.fit col.who { width: 13%; }
+table.fit col.project { width: 11%; }
+table.fit col.wide { width: 30%; }
+/* A version in its field, with the button updating it */
+table.fit col.version { width: 248px; }
+/* One button; two, or the decisions on two lines */
+table.fit col.act { width: 124px; }
+table.fit col.actions { width: 190px; }
+table.fit td.actions button, table.fit td.actions .btn { margin-bottom: 4px; white-space: nowrap; }
+table.fit td.actions input[type="text"] { width: 100%; }
+/* Decided: no description, the application takes what is left */
+table.decided col.app { width: auto; }
+table.decided col.actions { width: 110px; }
+/* A list of seven or eight columns: the date over its time and narrower
+   names at any width, which leaves room to its text. The last resort is for
+   it too: under the width it needs to stay readable (see below), it scrolls
+   sideways inside its own box, not the page. */
+table.dense td.nowrap { white-space: normal; }
+table.dense col.when { width: 112px; }
+table.dense col.who { width: 11%; }
+table.dense col.app { width: 14%; }
+table.dense col.project { width: 10%; }
+.scroll { overflow-x: auto; }
+
+/* A small "i" that shows a note in a bubble under the pointer, on keyboard focus and on touch */
+.info { position: relative; display: inline-block; margin-left: 6px; vertical-align: middle; }
+.info .i {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid var(--muted); color: var(--muted);
+  font-size: 12px; font-weight: 700; font-style: normal; line-height: 1; cursor: help;
+}
+.info:hover .i, .info:focus .i { border-color: var(--accent); color: var(--accent); }
+.info:focus { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
+.info .bubble {
+  display: none; position: absolute; z-index: 30; top: 24px; left: -8px;
+  width: max-content; max-width: min(300px, 70vw);
+  padding: 8px 10px; border-radius: 8px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  font-size: 13px; font-weight: 400; line-height: 1.4; white-space: normal; text-align: left; overflow-wrap: break-word;
+}
+.info:hover .bubble, .info:focus .bubble, .info:focus-within .bubble { display: block; }
+/* Between the phone layout and a wide window: tighter cells, a date over its
+   time, the buttons one under the other, a project name kept on one line and
+   a description cut after four lines (their title attribute holds the whole
+   text) */
+@media (min-width: 761px) and (max-width: 1199px) {
+  table.fit th, table.fit td { padding: 8px; }
+  table.fit td.nowrap { white-space: normal; }
+  table.fit col.check { width: 36px; }
+  table.fit col.cve { width: 154px; }
+  table.fit col.cvss { width: 114px; }
+  table.fit col.when { width: 104px; }
+  table.fit col.day { width: 104px; }
+  table.fit col.num { width: 104px; }
+  table.fit col.flag { width: 84px; }
+  table.fit col.kind { width: 120px; }
+  table.fit col.decision { width: 138px; }
+  table.fit col.name { width: 19%; }
+  table.fit col.app { width: 15%; }
+  table.fit col.who { width: 12%; }
+  table.fit col.project { width: 10%; }
+  table.fit col.wide { width: 28%; }
+  table.fit col.version { width: 136px; }
+  table.fit col.actions { width: 134px; }
+  table.decided col.app { width: auto; }
+  table.decided col.actions { width: 90px; }
+  table.fit.dense { min-width: 960px; }
+  table.dense col.who { width: 12%; }
+  table.dense col.app { width: 13%; }
+  table.dense col.project { width: 9%; }
+  table.fit td.actions form.inline, table.fit td.actions details.inline { display: block; }
+  table.fit td.project a, table.fit .cut { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.fit .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; line-clamp: 4; overflow: hidden; }
+}
 
 dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: 6px 20px; margin: 0; }
 dl.meta dt { color: var(--muted); }
@@ -538,6 +711,10 @@ footer.bottom a:hover { color: var(--accent); }
    The layout is the desktop one made to fit: navigation on single scrolling
    lines, forms in one column, and tables shown as one card per row. */
 @media (max-width: 760px) {
+  /* On a phone the bubble takes the width of its cell instead of sticking out of the page */
+  .info { position: static; }
+  td:has(> .info) { position: relative; }
+  .info .bubble { left: 0; right: 0; top: auto; width: auto; max-width: none; margin-top: 4px; }
   main { padding: 14px 12px 48px; }
   footer.bottom { padding: 14px 12px 24px; }
   h1 { font-size: 21px; margin: 4px 0 12px; }
@@ -559,7 +736,8 @@ footer.bottom a:hover { color: var(--accent); }
   .zone.info { border-left: none; border-top: 1px solid var(--border); }
   .zone-label { flex: none; }
   details.menu { flex: none; }
-  details.menu summary { min-width: 0; }
+  /* Two menus side by side: a long name is cut so that the second one stays in sight */
+  details.menu summary { min-width: 0; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   details.menu ul { position: fixed; left: 12px; right: 12px; top: auto; min-width: 0; }
 
   nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
@@ -578,6 +756,7 @@ footer.bottom a:hover { color: var(--accent); }
      line, each one named after its column (data-label, set by filter.js);
      the header only keeps its sort links. */
   table.list, table.list tbody { display: block; }
+  table.list colgroup { display: none; }
   table.list thead { display: none; }
   table.list thead:has(a.sort) { display: block; border-bottom: 1px solid var(--border); }
   table.list thead tr { display: flex; flex-wrap: wrap; gap: 0 14px; padding: 4px 10px; }
@@ -622,6 +801,7 @@ footer.bottom a:hover { color: var(--accent); }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
   table.triage td.actions { margin-top: 4px; }
   table.list.triage td[data-label]::before { content: none; }
+  table.fit td.actions button, table.fit td.actions .btn { margin-bottom: 0; }
 
   form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
   form.filters > *, form.row > * { width: 100%; }
@@ -639,3 +819,17 @@ footer.bottom a:hover { color: var(--accent); }
   .head { align-items: flex-start; }
   code.token { overflow-wrap: anywhere; }
 }
+
+/* Notifications of a project: one narrow column per event type, its name
+   written upwards in the header, a checkbox in each cell. On a phone each
+   cell carries its name (data-label), like any list. */
+@media (min-width: 761px) {
+  table.events th.up { vertical-align: bottom; text-align: center; padding-left: 0; padding-right: 0; }
+  table.events th.up span { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
+  table.events td.tick { text-align: center; padding-left: 0; padding-right: 0; }
+}
+table.events td input[type="number"] { width: 100%; }
+table.events td.tick input { margin: 0; vertical-align: middle; }
+/* The gear opening the configuration of a destination */
+a.gear { font-size: 15px; line-height: 1.2; padding: 1px 7px; }
+a.gear:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
