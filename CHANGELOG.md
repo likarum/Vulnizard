@@ -3,6 +3,20 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.3.1
+
+### Fixed
+
+- **"database is locked" and an error 500 once per sync cycle** (#99). At the end of a cycle
+  the catalog of vendors and products was counted again inside one writing transaction,
+  which held the database for as long as the count lasted (30 seconds and more on a modest
+  machine): a request that had to write during it gave up. The count is now done aside and
+  only the differences are written, which takes a fraction of a second.
+- MCP `get_state_at` stopped at 500 entries without saying so (#104). It answers one page
+  (`entries`, 100 by default) with `total`, `offset` and `limit`.
+- **The address of a webhook or of an ntfy topic was shown in the lists of destinations**
+  (#105), although it is a secret. Pages now show the service only (`https://host/…`).
+
 ## 0.3.0
 
 ### Added

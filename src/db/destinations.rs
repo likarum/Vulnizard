@@ -91,9 +91,22 @@ pub struct Destination {
 }
 
 impl Destination {
-    /// What is shown for the destination (never a secret)
+    /// Where the destination sends, in full: the address of a webhook or of
+    /// a topic is a secret (whoever has it can post there)
     pub fn target(&self) -> String {
         target_of(&self.kind, &self.config)
+    }
+
+    /// What a page shows of it: the recipient of an e-mail, and of an
+    /// address only the service it belongs to, never its secret part
+    pub fn shown(&self) -> String {
+        match self.kind.as_str() {
+            "email" => self.target(),
+            _ => match url::Url::parse(&self.target()) {
+                Ok(address) => format!("{}://{}/…", address.scheme(), address.host_str().unwrap_or("")),
+                Err(_) => "…".to_string(),
+            },
+        }
     }
 
     /// The destination as the delivery pipeline takes it

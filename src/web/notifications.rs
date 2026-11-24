@@ -315,7 +315,7 @@ pub fn project_section(
                                 div.muted {
                                     (kind_label(&d.kind))
                                     // A webhook URL or a topic is a secret of whoever manages the destination
-                                    @if manage { " · " (views::truncate(&d.target(), 60)) }
+                                    @if manage { " · " (views::truncate(&d.shown(), 60)) }
                                 }
                                 @if manage { input type="hidden" name="id" value=(d.id); }
                             }
@@ -616,7 +616,7 @@ fn admin_destinations(
     let listing = views::Listing::from_page("owner", false);
     listing.apply(
         &mut all,
-        |d| format!("{} {} {} {} {}", d.name, d.kind, d.target(), d.scope, d.scope_label),
+        |d| format!("{} {} {} {} {}", d.name, d.kind, d.shown(), d.scope, d.scope_label),
         |d, column| match column {
             "name" => Some(views::SortKey::text(&d.name)),
             "type" => Some(views::SortKey::text(&d.kind)),
@@ -647,7 +647,7 @@ fn admin_destinations(
                         tr {
                             td { (d.name) }
                             td { (kind_label(&d.kind)) }
-                            td { (views::truncate(&d.target(), 50)) }
+                            td { (views::truncate(&d.shown(), 50)) }
                             td { (covers(d)) }
                             td { (sends(d)) }
                             td.right.actions {
@@ -733,7 +733,7 @@ pub async fn admin_destination(
                 p { a href=(back) { "← Destinations" } }
                 h2 { "Destination “" (d.name) "”" }
                 p.muted {
-                    (kind_label(&d.kind)) " · " (views::truncate(&d.target(), 80)) " · receives the notifications of "
+                    (kind_label(&d.kind)) " · " (views::truncate(&d.shown(), 80)) " · receives the notifications of "
                     (covers(&d)) "."
                 }
                 form.stack.card method="post" action={ "/admin/notifications/destinations/" (d.id) } {

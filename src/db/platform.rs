@@ -396,18 +396,33 @@ impl Database {
 
     /// Rebuilds the vendor/product catalog from the normalized products table
     pub fn rebuild_catalog(&self) -> Result<()> {
-        let tx = self.write_tx()?;
-        tx.execute_batch(
+        // Counting reads millions of rows and takes many seconds: it is done aside, without
+        // the write lock, so that nobody waits for it. Only what differs is then written.
+        self.conn().execute_batch(
             r#"
-            DELETE FROM products;
-            INSERT INTO products (vendor, product, cve_count)
+            DROP TABLE IF EXISTS temp.catalog;
+            CREATE TEMP TABLE catalog (vendor TEXT NOT NULL, product TEXT NOT NULL, cve_count INTEGER NOT NULL,
+                                       PRIMARY KEY (vendor, product)) WITHOUT ROWID;
+            INSERT INTO temp.catalog (vendor, product, cve_count)
             SELECT vendor, product, COUNT(DISTINCT cve_id)
             FROM affected_products_normalized
             WHERE vendor IS NOT NULL AND vendor != '' AND product IS NOT NULL AND product != ''
             GROUP BY vendor, product;
             "#,
         )?;
+        let tx = self.write_tx()?;
+        tx.execute_batch(
+            r#"
+            DELETE FROM products WHERE NOT EXISTS
+                (SELECT 1 FROM temp.catalog c WHERE c.vendor = products.vendor AND c.product = products.product);
+            INSERT INTO products (vendor, product, cve_count)
+            SELECT vendor, product, cve_count FROM temp.catalog WHERE true
+            ON CONFLICT (vendor, product) DO UPDATE SET cve_count = excluded.cve_count
+            WHERE products.cve_count IS NOT excluded.cve_count;
+            "#,
+        )?;
         tx.commit()?;
+        self.conn().execute_batch("DROP TABLE IF EXISTS temp.catalog;")?;
         Ok(())
     }
 }
@@ -1667,6 +1682,44 @@ mod tests {
     }
 
     #[test]
+    fn the_catalog_is_brought_up_to_date_by_its_differences() {
+        let db = Database::open_in_memory().unwrap();
+        let mut first = cve("CVE-2024-0300", Some(5.0));
+        first.affected_products = vec![product("nginx", "nginx", true), product("acme", "widget", true)];
+        db.upsert_cve(&first).unwrap();
+        db.rebuild_catalog().unwrap();
+        let catalog = || -> Vec<(String, String, i64)> {
+            let mut stmt = db.conn().prepare("SELECT vendor, product, cve_count FROM products ORDER BY vendor, product").unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+            rows
+        };
+        assert_eq!(catalog(), [("acme".to_string(), "widget".to_string(), 1), ("nginx".to_string(), "nginx".to_string(), 1)]);
+
+        // Built again as it is: the catalog itself is not written (its rows keep their place)
+        let rowids = || -> Vec<i64> {
+            let mut stmt = db.conn().prepare("SELECT rowid FROM products ORDER BY vendor").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+            rows
+        };
+        let places = rowids();
+        db.rebuild_catalog().unwrap();
+        assert_eq!(rowids(), places);
+
+        // A product whose count changes, one that appears, one that leaves
+        let mut second = cve("CVE-2024-0301", Some(5.0));
+        second.affected_products = vec![product("nginx", "nginx", true), product("new", "thing", true)];
+        db.upsert_cve(&second).unwrap();
+        let mut moved = cve("CVE-2024-0300", Some(5.0));
+        moved.affected_products = vec![product("nginx", "nginx", true)];
+        db.upsert_cve(&moved).unwrap();
+        db.rebuild_catalog().unwrap();
+        assert_eq!(catalog(), [("new".to_string(), "thing".to_string(), 1), ("nginx".to_string(), "nginx".to_string(), 2)]);
+        // Nothing is left behind of the table built aside
+        let left: i64 = db.conn().query_row("SELECT COUNT(*) FROM temp.sqlite_master WHERE name = 'catalog'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
     fn list_cves_filters() {
         let db = Database::open_in_memory().unwrap();
         let alice = db.create_account("alice", None, "hash", false).unwrap();
@@ -1680,6 +1733,7 @@ mod tests {
         db.upsert_cve(&stub).unwrap();
         db.add_tag(alice, "CVE-2023-0201", "todo").unwrap();
         db.rebuild_catalog().unwrap();
+
 
         let ids = |f: CveFilter| -> Vec<String> {
             let mut ids: Vec<String> =
