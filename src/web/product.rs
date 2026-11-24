@@ -1,18 +1,21 @@
 //! "My products" side: what the user runs and follows, for one project or
 //! for all of them (`*`). Every view exists at both scopes.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Form, Path, Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
 use chrono::{Duration, NaiveDate, Utc};
 use maud::{html, Markup};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 
 use super::charts::{self, Segment};
-use super::pages::{load_project, nonempty, HtmlResult};
+use super::pages::{load_project, nonempty, redirect, HtmlResult};
 use super::views::{self, enc, layout, product_url, Listing, Nav, SortKey, PAGE};
-use super::{blocking, AppError, St, User};
+use super::{blocking, AppError, St, User, SESSION_TTL_SECS};
 use crate::db::{
-    state_at, timeline, Account, Breakdown, Database, LifecycleEvent, Org, OrgProject, ProjectSummary, TriageItem,
+    state_at, timeline, Account, Breakdown, Database, LifecycleEvent, Org, OrgProject, ProjectChange, ProjectSummary,
+    ScopedApplication, ScopedSubscription, TriageItem,
 };
 use crate::rbac::{Permission, Role};
 
@@ -31,13 +34,81 @@ pub struct ProductQuery {
     new: Option<String>,
 }
 
-/// Selected project, or all the user's projects
+/// Selected project, or all the user's projects, or those of them that
+/// belong to the organization chosen in the menu
 struct Scope {
     project: Option<(Org, OrgProject)>,
+    /// Organization "all projects" is narrowed to; never set with a project.
+    /// It hides rows the user's rights give: no right ever comes from it.
+    org: Option<String>,
+    /// The user's projects, of that organization only when one is chosen
     summaries: Vec<ProjectSummary>,
+    /// Color slot of each of the user's projects, whatever the organization chosen
+    slots: HashMap<i64, usize>,
 }
 
 impl Scope {
+    /// What the page shows: the project selected in the address, or all the
+    /// user's projects narrowed to the organization chosen in the menu. That
+    /// choice was checked against the user's projects when the request came in.
+    fn load(db: &Database, user: &Account, project: Option<(Org, OrgProject)>) -> Result<Self, AppError> {
+        let mut summaries = db.project_summaries(user.id)?;
+        // By creation order, so a project keeps its color whatever the filter or the ranking
+        let mut ids: Vec<i64> = summaries.iter().map(|p| p.id).collect();
+        ids.sort_unstable();
+        let slots = ids.into_iter().enumerate().map(|(slot, id)| (id, slot)).collect();
+        let org = match project {
+            Some(_) => None,
+            None => PAGE.try_with(|c| c.org.clone()).ok().flatten(),
+        };
+        if let Some(org) = &org {
+            summaries.retain(|p| p.org == *org);
+        }
+        Ok(Scope {
+            project,
+            org,
+            summaries,
+            slots,
+        })
+    }
+
+    // Everything a view lists or counts is read through the methods below, so
+    // that the chosen organization narrows all of it and no view forgets to.
+
+    fn breakdown(&self, db: &Database, user: &Account) -> Result<Vec<Breakdown>, AppError> {
+        let mut rows = db.watch_breakdown(user.id, self.project_id())?;
+        if self.org.is_some() {
+            rows.retain(|b| self.summaries.iter().any(|p| p.id == b.project_id));
+        }
+        Ok(rows)
+    }
+
+    fn applications(&self, db: &Database, user: &Account) -> Result<Vec<ScopedApplication>, AppError> {
+        let mut rows = db.scoped_applications(user.id, self.project_id())?;
+        rows.retain(|a| self.org.as_ref().is_none_or(|org| a.org == *org));
+        Ok(rows)
+    }
+
+    fn subscriptions(&self, db: &Database, user: &Account) -> Result<Vec<ScopedSubscription>, AppError> {
+        let mut rows = db.scoped_subscriptions(user.id, self.project_id())?;
+        rows.retain(|s| self.org.as_ref().is_none_or(|org| s.org == *org));
+        Ok(rows)
+    }
+
+    fn triage(&self, db: &Database, user: &Account, handled: bool, limit: i64) -> Result<Vec<TriageItem>, AppError> {
+        Ok(db.scoped_triage(user.id, self.project_id(), self.org.as_deref(), handled, limit)?)
+    }
+
+    fn changes(&self, db: &Database, user: &Account, limit: i64) -> Result<Vec<ProjectChange>, AppError> {
+        Ok(db.recent_project_changes(user.id, self.project_id(), self.org.as_deref(), limit)?)
+    }
+
+    fn events(&self, db: &Database, user: &Account) -> Result<Vec<LifecycleEvent>, AppError> {
+        let mut rows = db.lifecycle_events(user.id, self.project_id())?;
+        rows.retain(|e| self.org.as_ref().is_none_or(|org| e.org == *org));
+        Ok(rows)
+    }
+
     fn project_id(&self) -> Option<i64> {
         self.project.as_ref().map(|(_, p)| p.id)
     }
@@ -77,14 +148,39 @@ impl Scope {
             .filter(|p| Role::parse(&p.role).is_some_and(|r| r.allows(Permission::ManageProjects)))
             .collect()
     }
+}
 
-    /// Color slot of each project: by creation order, so a project keeps its
-    /// color whatever the filter or the ranking.
-    fn slots(&self) -> HashMap<i64, usize> {
-        let mut ids: Vec<i64> = self.summaries.iter().map(|p| p.id).collect();
-        ids.sort_unstable();
-        ids.into_iter().enumerate().map(|(slot, id)| (id, slot)).collect()
-    }
+#[derive(Deserialize)]
+pub struct OrgFilterForm {
+    /// Name of the organization; empty: all of them
+    #[serde(default)]
+    org: String,
+    #[serde(default)]
+    back: String,
+}
+
+/// Records the organization chosen in the menu of the products bar. The
+/// answer is the same whatever is asked: an organization the account sees no
+/// project of is forgotten like one that does not exist, and the choice is
+/// checked again on every page (`chosen_org`).
+pub async fn org_filter(State(st): St, User(user): User, Form(form): Form<OrgFilterForm>) -> Result<Response, AppError> {
+    blocking(|| {
+        let visible = st.db()?.list_user_projects(user.id)?.iter().any(|p| p.org == form.org);
+        let (value, max_age) = if visible { (enc(&form.org), SESSION_TTL_SECS) } else { (String::new(), 0) };
+        let cookie = format!(
+            "{}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{}",
+            views::ORG_COOKIE,
+            if st.secure_cookies() { "; Secure" } else { "" }
+        );
+        // Only a page of this site is come back to
+        let back = form.back.as_str();
+        let local = back.starts_with('/')
+            && !back.starts_with("//")
+            && !back.contains('\\')
+            && !back.chars().any(|c| c.is_control());
+        let to = if local { back.to_string() } else { "/product".to_string() };
+        Ok(([(header::SET_COOKIE, cookie)], redirect(to)).into_response())
+    })
 }
 
 pub async fn product_all(State(st): St, User(user): User, Query(q): Query<ProductQuery>) -> HtmlResult {
@@ -115,10 +211,7 @@ fn render(
     project: Option<(Org, OrgProject)>,
     q: &ProductQuery,
 ) -> HtmlResult {
-    let scope = Scope {
-        project,
-        summaries: db.project_summaries(user.id)?,
-    };
+    let scope = Scope::load(db, user, project)?;
     let view = nonempty(&q.view).unwrap_or_else(|| "overview".into());
     let view = views::canonical_view(&view);
     let (title, body) = match view {
@@ -130,9 +223,10 @@ fn render(
         "settings" if !scope.all() => ("Settings", settings(db, config, &scope, q.new.as_deref())?),
         _ => ("Overview", overview(db, user, &scope)?),
     };
-    let heading = match scope.names() {
-        Some((org, project)) => html! { (project) " " span.muted { "· " (org) } },
-        None => html! { "All projects" },
+    let heading = match (scope.names(), &scope.org) {
+        (Some((org, project)), _) => html! { (project) " " span.muted { "· " (org) } },
+        (None, Some(org)) => html! { "All projects of " (org) },
+        (None, None) => html! { "All projects" },
     };
     Ok(layout(
         Nav::Product {
@@ -250,21 +344,21 @@ fn count(breakdown: &[Breakdown], filter: impl Fn(&Breakdown) -> bool) -> i64 {
 }
 
 fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppError> {
-    let breakdown = db.watch_breakdown(user.id, scope.project_id())?;
-    let applications = db.scoped_applications(user.id, scope.project_id())?;
-    let subscriptions = db.scoped_subscriptions(user.id, scope.project_id())?;
+    let breakdown = scope.breakdown(db, user)?;
+    let applications = scope.applications(db, user)?;
+    let subscriptions = scope.subscriptions(db, user)?;
     if applications.is_empty() && subscriptions.is_empty() {
         return Ok(onboarding(scope));
     }
-    let open = db.scoped_triage(user.id, scope.project_id(), false, 500)?;
-    let changes = db.recent_project_changes(user.id, scope.project_id(), 8)?;
+    let open = scope.triage(db, user, false, 500)?;
+    let changes = scope.changes(db, user, 8)?;
     let untreated = count(&breakdown, |b| b.status == "untreated");
     let accepted = count(&breakdown, |b| b.status == "accepted");
     let critical = count(&breakdown, |b| b.status == "untreated" && b.severity == "critical");
     let kev = open.iter().filter(|i| i.kev).count() as i64;
 
     let today = Utc::now().date_naive();
-    let events = db.lifecycle_events(user.id, scope.project_id())?;
+    let events = scope.events(db, user)?;
     let month = timeline(&events, today - Duration::days(29), today);
     let history_link = |day: &str| format!("{}&at={day}", scope.url("history"));
 
@@ -305,7 +399,7 @@ fn overview(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppE
 
 /// `*` scope: projects are told apart by color; severity levels are separate bars
 fn overview_charts_all(scope: &Scope, breakdown: &[Breakdown]) -> Markup {
-    let slots = scope.slots();
+    let slots = &scope.slots;
     let mut projects: Vec<&ProjectSummary> = scope.summaries.iter().collect();
     projects.sort_by_key(|p| p.id);
     let color = |id: i64| charts::project_color(slots.get(&id).copied().unwrap_or(usize::MAX));
@@ -392,7 +486,7 @@ fn overview_charts_project(
         .collect();
     let slot = scope
         .project_id()
-        .and_then(|id| scope.slots().get(&id).copied())
+        .and_then(|id| scope.slots.get(&id).copied())
         .unwrap_or(0);
     let mut apps: Vec<&crate::db::ScopedApplication> = applications.iter().filter(|a| a.untreated > 0).collect();
     apps.sort_by(|a, b| b.untreated.cmp(&a.untreated));
@@ -430,7 +524,7 @@ fn overview_charts_project(
 
 fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
     let handled = nonempty(&q.show).as_deref() == Some("handled");
-    let mut items = db.scoped_triage(user.id, scope.project_id(), handled, 2000)?;
+    let mut items = scope.triage(db, user, handled, 2000)?;
     let total = items.len();
     // Default order: most urgent first (known exploited, then CVSS)
     let listing = Listing::from_page("urgency", true);
@@ -543,7 +637,7 @@ fn applications(
     scope: &Scope,
     q: &ProductQuery,
 ) -> Result<Markup, AppError> {
-    let mut apps = db.scoped_applications(user.id, scope.project_id())?;
+    let mut apps = scope.applications(db, user)?;
     // A machine reports hundreds of packages: those without anything to review are hidden unless asked
     let quiet = apps.iter().filter(|a| !a.group.is_empty() && a.untreated == 0).count();
     let show_quiet = q.show.as_deref() == Some("quiet") || quiet <= 30;
@@ -669,7 +763,7 @@ fn applications(
 }
 
 fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup, AppError> {
-    let mut subs = db.scoped_subscriptions(user.id, scope.project_id())?;
+    let mut subs = scope.subscriptions(db, user)?;
     let total = subs.len();
     let listing = Listing::from_page("vendor", false);
     listing.apply(
@@ -784,7 +878,7 @@ fn history(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Re
     let to = if at < today - Duration::days(days - 1) { at + Duration::days(days / 2).min(today - at) } else { today };
     let from = to - Duration::days(days - 1);
 
-    let events = db.lifecycle_events(user.id, scope.project_id())?;
+    let events = scope.events(db, user)?;
     let stats = timeline(&events, from, to);
     let mut state = state_at(&events, at);
     let in_status = {
@@ -824,7 +918,7 @@ fn history(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Re
     let past = at < today;
     let previous = (at - Duration::days(1)).to_string();
     let next = (at + Duration::days(1)).to_string();
-    let changes = db.recent_project_changes(user.id, scope.project_id(), 30)?;
+    let changes = scope.changes(db, user, 30)?;
     let reports = match scope.project_id() {
         Some(id) => db.list_reports(id, 30)?,
         None => Vec::new(),
@@ -953,7 +1047,7 @@ fn audit(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Resu
     let filter = nonempty(&q.decision)
         .filter(|d| DECISIONS.iter().any(|(key, _)| key == d))
         .unwrap_or_else(|| "accepted".into());
-    let events = db.lifecycle_events(user.id, scope.project_id())?;
+    let events = scope.events(db, user)?;
     let matches = |e: &LifecycleEvent| match (e.kind.as_str(), filter.as_str()) {
         ("detected", _) => false,
         (_, "all") => true,
