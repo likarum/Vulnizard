@@ -438,6 +438,9 @@ pub struct AdminQuery {
     tab: Option<String>,
     /// Type of the destination being added
     new: Option<String>,
+    /// Browser destination whose test found no browser to send to: the page
+    /// offers to enable notifications on this one
+    enable: Option<i64>,
 }
 
 /// Choices of the "belongs to" selector of an instance or organization destination
@@ -479,7 +482,7 @@ pub async fn admin(
         let config = st.effective_config(&db)?;
         let tab = q.tab.as_deref().unwrap_or("projects");
         let body = match tab {
-            "destinations" => admin_destinations(&db, &config, q.new.as_deref())?,
+            "destinations" => admin_destinations(&db, &config, &user, q.new.as_deref(), q.enable)?,
             "delivery" => html! {
                 form.stack.card method="post" action="/admin/notifications/delivery" {
                     label.check {
@@ -566,10 +569,36 @@ fn admin_rules(db: &Database) -> Result<Markup, AppError> {
     })
 }
 
+/// (organization, project)
+type ProjectRef<'a> = (&'a str, &'a str);
+
+/// Projects as links to their notification settings: the first `max`, then how many are left
+fn project_links(projects: &[ProjectRef], with_org: bool, max: usize) -> Markup {
+    let more = projects.len().saturating_sub(max);
+    html! {
+        @for (i, (org, project)) in projects.iter().take(max).enumerate() {
+            @if i > 0 { ", " }
+            a href=(product_url(Some((org, project)), "settings")) { @if with_org { (org) " / " } (project) }
+        }
+        @if more > 0 { " and " (more) " more" }
+    }
+}
+
 /// Tab: every destination, whatever it belongs to
-fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) -> Result<Markup, AppError> {
+fn admin_destinations(
+    db: &Database,
+    config: &Config,
+    user: &crate::db::Account,
+    new_kind: Option<&str>,
+    enable: Option<i64>,
+) -> Result<Markup, AppError> {
     let mut all = db.list_all_destinations()?;
     let total = all.len();
+    // Only while it is still true: once a browser is registered the test is simply sent
+    let enable = match enable.and_then(|id| all.iter().find(|d| d.id == id && d.kind == "browser")) {
+        Some(destination) if db.list_push_subscriptions(user.id)?.is_empty() => Some(push_test_offer(destination)),
+        _ => None,
+    };
     let listing = views::Listing::from_page("owner", false);
     listing.apply(
         &mut all,
@@ -584,24 +613,24 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
     );
     let new_kind = new_kind.filter(|k| DESTINATION_KINDS.iter().any(|(kind, _)| kind == k));
     let base = "/admin/notifications?tab=destinations";
-    // Organization of every project, to tell how many projects a shared destination is offered to
-    let projects: Vec<Option<i64>> = {
-        let mut stmt = db.conn().prepare("SELECT organization_id FROM projects")?;
-        let rows = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
+    // Who a destination is offered to, and who really uses it, are two facts:
+    // the projects of its scope on one side, those with a rule for it on the other
+    let projects = db.list_all_projects()?;
+    let rules = db.list_all_notifications()?;
+    let several_orgs = projects.iter().any(|p| p.org != projects[0].org);
     Ok(html! {
         p.muted {
-            "Every destination. Each belongs to the instance, an organization or a single project, which decides who can use it. "
-            "A project is notified through a destination once it has a rule for it (its Settings). "
+            "Every destination. Each belongs to the instance, an organization or a single project, which decides the projects it is offered to. "
+            "Being offered is not being used: a destination sends for a project once that project picks it in its notification settings. "
             "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
         }
+        @if let Some(offer) = enable { (offer) }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
         table.list {
             thead {
                 tr {
                     (listing.th("name", "Name")) (listing.th("type", "Type")) th { "Target" }
-                    (listing.th("owner", "Belongs to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
+                    (listing.th("owner", "Offered to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
                 }
             }
             tbody {
@@ -612,20 +641,35 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
                         td { (views::truncate(&d.target(), 50)) }
                         td {
                             @match d.scope.as_str() {
-                                "instance" => { "whole instance" }
-                                "organization" => { "organization " (d.scope_label) }
-                                _ => { "project " (d.scope_label) }
+                                "instance" => { "all projects" }
+                                "organization" => { "projects of organization " (d.scope_label) }
+                                _ => { "project " (d.scope_label) " only" }
                             }
                         }
                         td {
-                            // A shared destination is offered to every project of its scope; a rule makes a project use it
-                            @match d.scope.as_str() {
-                                "instance" => { (d.rules) " of " (projects.len()) " project" @if projects.len() != 1 { "s" } div.muted { "available to all" } }
-                                "organization" => {
-                                    @let within = projects.iter().filter(|org| **org == d.scope_id).count();
-                                    (d.rules) " of " (within) " project" @if within != 1 { "s" } div.muted { "available to its organization" }
+                            @let users: Vec<ProjectRef> = rules.iter()
+                                .filter(|r| r.notification.destination_id == d.id)
+                                .map(|r| (r.org.as_str(), r.project.as_str()))
+                                .collect();
+                            @if users.is_empty() {
+                                // Offered but not picked: nothing leaves through it, and the page says where to pick it
+                                @let offered: Vec<ProjectRef> = projects.iter()
+                                    .filter(|p| match d.scope.as_str() {
+                                        "instance" => true,
+                                        "organization" => p.org == d.scope_label,
+                                        _ => Some(p.id) == d.scope_id,
+                                    })
+                                    .map(|p| (p.org.as_str(), p.name.as_str()))
+                                    .collect();
+                                "no project yet"
+                                div.muted {
+                                    @if d.system_events { "It only sends instance events" } @else { "It sends nothing" }
+                                    " until a project picks it"
+                                    @if !offered.is_empty() { ", in its notification settings: " (project_links(&offered, several_orgs, 3)) }
+                                    "."
                                 }
-                                _ => { @if d.rules > 0 { "its project" } @else { span.muted { "not used yet" } } }
+                            } @else {
+                                (project_links(&users, several_orgs, 8))
                             }
                         }
                         td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
@@ -671,6 +715,33 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
     })
 }
 
+/// Shown when a test through a browser destination found none of the
+/// administrator's browsers registered: a button enables notifications on
+/// this browser (push.js: permission, registration) and then sends the test.
+/// Without JavaScript, or where the browser cannot receive notifications, the
+/// button stays hidden and the text points to the Settings page.
+fn push_test_offer(destination: &Destination) -> Markup {
+    html! {
+        div.card.notice id="push-test" {
+            p {
+                strong { "Test through “" (destination.name) "”: none of your browsers is registered." }
+                " Browser notifications reach each person on the browsers they enabled, and a test goes to yours."
+            }
+            p data-fallback {
+                "Enable notifications for this browser first, in "
+                a href="/settings" { "Settings → Browser notifications" }
+                ", then send the test again."
+            }
+            p data-status hidden {}
+            form method="post" action={ "/admin/notifications/destinations/" (destination.id) } {
+                input type="hidden" name="action" value="test";
+                button type="button" data-enable hidden { "Enable notifications on this browser and send the test" }
+            }
+        }
+        script src="/static/push.js" defer {}
+    }
+}
+
 pub async fn admin_destination_create(State(st): St, User(user): User, Form(fields): Form<Fields>) -> ActionResult {
     require_admin(&user)?;
     blocking(|| {
@@ -713,19 +784,17 @@ pub async fn admin_destination_action(
                     // Browsers are addressed per person: the test goes to those of whoever asks
                     let registered = db.list_push_subscriptions(user.id)?.len();
                     if registered == 0 {
-                        Err(anyhow::anyhow!(
-                            "none of your browsers is registered. Enable notifications for this browser first, in Settings → Browser notifications"
-                        ))
-                    } else {
-                        crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
-                            |reached| match reached {
-                                0 => Err(anyhow::anyhow!(
-                                    "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
-                                )),
-                                n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
-                            },
-                        )
+                        // Nowhere to send it yet: not a failure, the page offers to enable this browser
+                        return Ok(redirect(format!("{back}&enable={id}")));
                     }
+                    crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
+                        |reached| match reached {
+                            0 => Err(anyhow::anyhow!(
+                                "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
+                            )),
+                            n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
+                        },
+                    )
                 } else {
                     notify::send_system(&config, &destination, "Test", "Test message sent from the Vulnizard administration.")
                         .map(|()| "sent".to_string())
