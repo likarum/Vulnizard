@@ -71,13 +71,29 @@ pub struct PageContext {
     pub sync_running: bool,
     /// (organization, project) the user can access
     pub projects: Vec<(String, String)>,
+    /// Organization the lists of "all projects" are narrowed to. Always one
+    /// of those of `projects`: it is checked on every request, and it only
+    /// hides rows; it never gives access to anything.
+    pub org: Option<String>,
     /// Path and query of the current page (to come back after an action)
     pub path: String,
+}
+
+impl PageContext {
+    /// Organizations the user sees a project of, in the order of the menu
+    pub fn orgs(&self) -> Vec<&str> {
+        let mut orgs: Vec<&str> = self.projects.iter().map(|(org, _)| org.as_str()).collect();
+        orgs.dedup();
+        orgs
+    }
 }
 
 tokio::task_local! {
     pub static PAGE: PageContext;
 }
+
+/// Cookie holding the organization chosen in the menu (its name, percent-encoded)
+pub const ORG_COOKIE: &str = "vz_org";
 
 /// Key of a product view as written in an address. Views were renamed: the
 /// addresses people bookmarked, and those in notifications already sent,
@@ -169,20 +185,54 @@ fn sync_status(ctx: &PageContext, user: Option<&Account>) -> Markup {
     }
 }
 
+/// Organization selector, for who sees the projects of several: a no-script
+/// dropdown whose entries are the buttons of one form. Choosing one narrows
+/// the project menu and the lists of "all projects"; nothing else.
+fn org_menu(ctx: &PageContext, back: &str) -> Markup {
+    let orgs = ctx.orgs();
+    html! {
+        @if orgs.len() > 1 {
+            details.menu.org {
+                summary title="Switch organization" {
+                    @match &ctx.org {
+                        Some(org) => { (org) }
+                        None => { "All organizations" }
+                    }
+                }
+                form method="post" action="/org-filter" {
+                    input type="hidden" name="back" value=(back);
+                    ul {
+                        li { button type="submit" name="org" value="" class=[ctx.org.is_none().then_some("active")] { "All organizations" } }
+                        @for org in orgs {
+                            li { button type="submit" name="org" value=(org) class=[(ctx.org.as_deref() == Some(org)).then_some("active")] { (org) } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Project selector: a no-script dropdown keeping the current view
 fn project_menu(ctx: &PageContext, scope: Option<(&str, &str)>, view: &str) -> Markup {
-    let several_orgs = ctx.projects.iter().any(|(org, _)| Some(org) != ctx.projects.first().map(|(o, _)| o));
+    let listed = || ctx.projects.iter().filter(|(org, _)| ctx.org.as_ref().is_none_or(|chosen| chosen == org));
+    let several_orgs = listed().any(|(org, _)| Some(org) != listed().next().map(|(o, _)| o));
     html! {
         details.menu {
             summary title="Switch project" {
-                @match scope {
-                    Some((_, project)) => { (project) }
-                    None => { "All projects" span.muted { " (*)" } }
+                @match (scope, &ctx.org) {
+                    (Some((_, project)), _) => { (project) }
+                    (None, Some(org)) => { "All projects" span.muted { " of " (org) } }
+                    (None, None) => { "All projects" span.muted { " (*)" } }
                 }
             }
             ul {
-                li { a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] { "All projects (*)" } }
-                @for (org, project) in &ctx.projects {
+                li {
+                    a href=(product_url(None, view)) class=[scope.is_none().then_some("active")] {
+                        "All projects" @if let Some(org) = &ctx.org { " of " (org) } " (*)"
+                    }
+                }
+                @for (org, project) in listed() {
                     @let current = scope == Some((org.as_str(), project.as_str()));
                     li {
                         a href=(product_url(Some((org, project)), view)) class=[current.then_some("active")] {
@@ -266,6 +316,9 @@ pub fn layout_refreshing(nav: Nav, title: &str, user: Option<&Account>, refresh:
                         div.zones {
                             nav.zone.product {
                                 span.zone-label { "My products" }
+                                // From a products page the choice leads to all the projects of the view
+                                // shown; from any other page, back to that page
+                                (org_menu(&ctx, &if on_products && !view.is_empty() { product_url(None, view) } else { ctx.path.clone() }))
                                 (project_menu(&ctx, scope, if view.is_empty() { "overview" } else { view }))
                                 @for (key, label) in PRODUCT_VIEWS {
                                     a href=(product_url(scope, key)) class=[(on_products && view == key).then_some("active")] { (label) }

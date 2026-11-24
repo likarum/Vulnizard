@@ -223,7 +223,7 @@ impl IntoResponse for ApiError {
 // Authentication extractors
 // ==========================================
 
-pub fn session_token(parts: &Parts) -> Option<String> {
+fn cookie_value(parts: &Parts, name: &str) -> Option<String> {
     parts
         .headers
         .get_all(header::COOKIE)
@@ -231,8 +231,23 @@ pub fn session_token(parts: &Parts) -> Option<String> {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|kv| kv.trim().split_once('='))
-        .find(|(k, _)| *k == SESSION_COOKIE)
+        .find(|(k, _)| *k == name)
         .map(|(_, v)| v.to_string())
+}
+
+pub fn session_token(parts: &Parts) -> Option<String> {
+    cookie_value(parts, SESSION_COOKIE)
+}
+
+/// Organization asked for by the menu of the products bar. What the browser
+/// sends is only a wish: it is kept when it names an organization the account
+/// sees a project of, and several are seen; anything else, unknown or not
+/// visible alike, is no filter at all.
+fn chosen_org(parts: &Parts, projects: &[(String, String)]) -> Option<String> {
+    let asked = cookie_value(parts, views::ORG_COOKIE)?;
+    let asked = percent_encoding::percent_decode_str(&asked).decode_utf8().ok()?;
+    let several = projects.iter().any(|(org, _)| Some(org) != projects.first().map(|(first, _)| first));
+    (several && projects.iter().any(|(org, _)| *org == asked)).then(|| asked.into_owned())
 }
 
 /// Account resolved once per request by the `page_context` middleware
@@ -421,16 +436,18 @@ async fn page_context(State(state): St, req: Request, next: Next) -> Response {
         let account = lookup_session(&parts, &state)?;
         let db = state.db()?;
         let (last_sync, sync_running) = db.sync_status()?;
-        let projects = match &account {
+        let projects: Vec<(String, String)> = match &account {
             Some(a) => db.list_user_projects(a.id)?.into_iter().map(|p| (p.org, p.name)).collect(),
             None => Vec::new(),
         };
+        let org = chosen_org(&parts, &projects);
         Ok((
             account,
             views::PageContext {
                 last_sync,
                 sync_running,
                 projects,
+                org,
                 path,
             },
         ))
@@ -549,6 +566,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(|| async { Redirect::to("/product") }))
         .route("/product", get(product::product_all))
         .route("/product/{org}/{project}", get(product::product_project))
+        .route("/org-filter", post(product::org_filter))
         .route("/projects", get(projects::projects).post(projects::project_create_any))
         .route("/orgs", get(pages::orgs).post(pages::org_create))
         .route("/orgs/{org}", get(pages::org_detail))
@@ -3963,5 +3981,237 @@ mod tests {
         let applied = app.post("/admin/users/bulk", Some(&admin), &format!("action=disable&ids={dev}")).await;
         assert_eq!(applied.status, StatusCode::SEE_OTHER, "{}", applied.body);
         assert!(db.list_accounts().unwrap().into_iter().find(|a| a.id == dev).unwrap().disabled);
+    }
+
+    /// Two organizations, each with a project tracking an application a CVE affects
+    async fn two_organizations(app: &TestApp) -> (String, String, String) {
+        let root = overseer(app).await;
+        let alice = app.register("alice").await;
+        let bob = app.register("bob").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, vendor, product, score) in [("CVE-2024-4343", "acme", "widget", 9.1), ("CVE-2024-4444", "globex", "gadget", 5.0)] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.cvss_v3_score = Some(score);
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some(vendor.into()),
+                product: Some(product.into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        app.post("/orgs", Some(&alice), "name=acme").await;
+        app.post("/projects", Some(&alice), "org=acme&name=infra").await;
+        let added = app.post("/orgs/acme/projects/infra/applications", Some(&alice), "name=widget&version=1.0&vendor=acme").await;
+        assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+        (root, alice, bob)
+    }
+
+    /// The administrator, with a role on the whole instance: administering
+    /// gives no project by itself, that role gives those of every organization
+    async fn overseer(app: &TestApp) -> String {
+        let root = app.register("root").await;
+        let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
+        let given = app.post(&format!("/admin/users/{id}/assign"), Some(&root), "scope=instance&role=viewer").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        root
+    }
+
+    async fn second_organization(app: &TestApp, bob: &str) {
+        app.post("/orgs", Some(bob), "name=globex").await;
+        app.post("/projects", Some(bob), "org=globex&name=shop").await;
+        let added = app.post("/orgs/globex/projects/shop/applications", Some(bob), "name=gadget&version=2.0&vendor=globex").await;
+        assert_eq!(added.status, StatusCode::SEE_OTHER, "{}", added.body);
+    }
+
+    fn org_entry(org: &str, label: &str, active: bool) -> String {
+        let class = if active { " class=\"active\"" } else { "" };
+        format!("<button type=\"submit\" name=\"org\" value=\"{org}\"{class}>{label}</button>")
+    }
+
+    fn to_review(count: i64) -> String {
+        format!("<div class=\"value\">{count}</div><div class=\"label\">CVEs to review</div>")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_administrator_narrows_all_projects_to_one_organization() {
+        {
+            // With a single organization (the one every instance starts with) there is nothing to choose
+            let app = app(open_registration());
+            let root = overseer(&app).await;
+            let single = app.get("/product", Some(&root)).await.body;
+            assert!(single.contains("<a href=\"/product/default/default\"") && !single.contains("/org-filter"));
+            assert!(!single.contains("Switch organization"));
+        }
+        let app = app(open_registration());
+        let (root, _alice, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+
+        // The administrator belongs to neither and sees both: the menu is a plain form, next to the project menu
+        let all = app.get("/product?view=applications", Some(&root)).await.body;
+        let menu = all.split("<details class=\"menu org\">").nth(1).expect("the organization menu");
+        let (menu, after) = menu.split_once("</details>").unwrap();
+        assert!(after.starts_with("<details class=\"menu\"><summary title=\"Switch project\">All projects<span class=\"muted\"> (*)</span>"));
+        assert!(menu.starts_with("<summary title=\"Switch organization\">All organizations</summary><form method=\"post\" action=\"/org-filter\">"));
+        assert!(menu.contains("<input type=\"hidden\" name=\"back\" value=\"/product?view=applications\">"));
+        for entry in [org_entry("", "All organizations", true), org_entry("acme", "acme", false), org_entry("default", "default", false), org_entry("globex", "globex", false)] {
+            assert!(menu.contains(&entry), "{entry}");
+        }
+        // Nothing in it needs a script
+        assert!(!menu.contains("<script") && !menu.contains("onclick") && !menu.contains("onchange"));
+        assert!(app.get("/static/app.css", None).await.body.contains("details.menu li button {"));
+        // From another page the choice comes back to that page
+        assert!(app.get("/cve", Some(&root)).await.body.contains("<input type=\"hidden\" name=\"back\" value=\"/cve\">"));
+        assert!(app.get("/product/acme/infra?view=audit", Some(&root)).await.body.contains("name=\"back\" value=\"/product?view=audit\">"));
+
+        // Everything is listed before a choice
+        let project_link = |org: &str, project: &str, view: &str| format!("<a href=\"/product/{org}/{project}?view={view}\"");
+        assert!(all.contains("widget") && all.contains("gadget"));
+        assert!(all.contains(&project_link("acme", "infra", "applications")) && all.contains(&project_link("globex", "shop", "applications")));
+        let vulnerabilities = app.get("/product?view=vulnerabilities", Some(&root)).await.body;
+        assert!(vulnerabilities.contains("CVE-2024-4343") && vulnerabilities.contains("CVE-2024-4444"));
+        assert!(app.get("/product", Some(&root)).await.body.contains(&to_review(2)));
+
+        // Choosing one sets a cookie the scripts cannot read, and comes back to the page
+        let chosen = app.post("/org-filter", Some(&root), "org=acme&back=%2Fproduct%3Fview%3Dapplications").await;
+        assert_eq!(chosen.status, StatusCode::SEE_OTHER, "{}", chosen.body);
+        assert_eq!(chosen.location.as_deref(), Some("/product?view=applications"));
+        assert_eq!(chosen.cookie.as_deref(), Some("vz_org=acme"));
+        let acme = format!("{root}; vz_org=acme");
+
+        // The project menu and every list of "all projects" keep that organization only
+        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+            let page = app.get(&format!("/product?view={view}"), Some(&acme)).await;
+            assert_eq!(page.status, StatusCode::OK, "{view}");
+            let body = page.body;
+            assert!(body.contains("<summary title=\"Switch organization\">acme</summary>"), "{view}");
+            assert!(body.contains(&org_entry("acme", "acme", true)) && body.contains(&org_entry("globex", "globex", false)), "{view}");
+            assert!(body.contains("<summary title=\"Switch project\">All projects<span class=\"muted\"> of acme</span>"), "{view}");
+            assert!(body.contains("All projects of acme (*)</a>") && body.contains("<h1>All projects of acme "), "{view}");
+            assert!(body.contains(&project_link("acme", "infra", view).replace("?view=overview", "")), "{view}");
+            // The other organization is only named as an entry of the menu
+            let rest = body.replace(&org_entry("globex", "globex", false), "");
+            assert!(!rest.contains("globex") && !rest.contains("shop") && !rest.contains("gadget") && !rest.contains("CVE-2024-4444"), "{view}");
+        }
+        let vulnerabilities = app.get("/product?view=vulnerabilities", Some(&acme)).await.body;
+        assert!(vulnerabilities.contains("CVE-2024-4343"));
+        let applications = app.get("/product?view=applications", Some(&acme)).await.body;
+        assert!(applications.contains("widget"));
+        let overview = app.get("/product", Some(&acme)).await.body;
+        assert!(overview.contains(&to_review(1)) && overview.contains("CVE-2024-4343"));
+        assert!(app.get("/product?view=history", Some(&acme)).await.body.contains("<div class=\"value\">1</div><div class=\"label\">to review</div>"));
+        let globex = format!("{root}; vz_org=globex");
+        let other = app.get("/product", Some(&globex)).await.body;
+        assert!(other.contains(&to_review(1)) && other.contains("CVE-2024-4444") && !other.contains("CVE-2024-4343"));
+
+        // It narrows lists and is no access rule: a project of the other organization still opens
+        let direct = app.get("/product/globex/shop?view=applications", Some(&acme)).await;
+        assert_eq!(direct.status, StatusCode::OK);
+        assert!(direct.body.contains("gadget") && direct.body.contains("<summary title=\"Switch project\">shop</summary>"));
+
+        // "All organizations" forgets the choice, and everything is back
+        let cleared = app.post("/org-filter", Some(&acme), "org=&back=%2Fproduct").await;
+        assert_eq!((cleared.status, cleared.location.as_deref(), cleared.cookie.as_deref()), (StatusCode::SEE_OTHER, Some("/product"), Some("vz_org=")));
+        for cookie in [root.clone(), format!("{root}; vz_org=")] {
+            let body = app.get("/product?view=vulnerabilities", Some(&cookie)).await.body;
+            assert!(body.contains("CVE-2024-4343") && body.contains("CVE-2024-4444") && !body.contains("All projects of"));
+            assert!(app.get("/product", Some(&cookie)).await.body.contains(&to_review(2)));
+        }
+
+        // A forged value is no filter, and is never written back in the page
+        for forged in ["nowhere", "%3Cb%3E", "ACME", "acme%00", "%FF", "acme; vz_org=nowhere"] {
+            let cookie = format!("{root}; vz_org={forged}");
+            let body = app.get("/product?view=applications", Some(&cookie)).await.body;
+            if forged.starts_with("acme;") {
+                // The first value sent is the one read
+                assert!(body.contains("All projects of acme") && !body.contains("nowhere"));
+            } else {
+                assert_eq!(body, all, "{forged}");
+            }
+        }
+
+        // The cookie is the session's kind: kept from scripts, sent on navigation, Secure over https
+        assert_eq!(org_cookie(open_registration()).await, format!("vz_org=globex; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}"));
+        let mut https = open_registration();
+        https.web.base_url = "https://vulnizard.example".into();
+        assert_eq!(org_cookie(https).await, format!("vz_org=globex; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}; Secure"));
+    }
+
+    /// The cookie as the server writes it when an organization is chosen
+    async fn org_cookie(config: Config) -> String {
+        let app = app(config);
+        let (root, _, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+        let request = HttpRequest::post("/org-filter")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, root)
+            .body(Body::from("org=globex&back=%2F%2Fevil.example%2F"))
+            .unwrap();
+        let response = app.router.clone().oneshot(request).await.unwrap();
+        // Only a page of this site is come back to
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/product");
+        response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_organization_filter_shows_nothing_more_than_one_already_sees() {
+        let app = app(open_registration());
+        let (_root, alice, bob) = two_organizations(&app).await;
+        second_organization(&app, &bob).await;
+
+        // A member of one organization has no menu, and learns nothing by asking for another:
+        // an organization that exists and one that does not get the very same pages
+        for view in ["overview", "vulnerabilities", "applications", "subscriptions", "history", "audit"] {
+            let path = format!("/product?view={view}");
+            let plain = app.get(&path, Some(&alice)).await.body;
+            assert!(!plain.contains("Switch organization") && !plain.contains("/org-filter") && !plain.contains("globex"), "{view}");
+            assert!(!plain.contains("gadget") && !plain.contains("CVE-2024-4444"), "{view}");
+            for asked in ["globex", "nowhere", "acme"] {
+                let body = app.get(&path, Some(&format!("{alice}; vz_org={asked}"))).await.body;
+                assert_eq!(body, plain, "{view} {asked}");
+            }
+        }
+        let existing = app.post("/org-filter", Some(&alice), "org=globex&back=%2Fproduct").await;
+        let unknown = app.post("/org-filter", Some(&alice), "org=nowhere&back=%2Fproduct").await;
+        for reply in [&existing, &unknown] {
+            assert_eq!((reply.status, reply.location.as_deref()), (StatusCode::SEE_OTHER, Some("/product")));
+            assert_eq!(reply.cookies, vec!["vz_org=".to_string()]);
+            assert_eq!(reply.body, "");
+        }
+        // Nor does a project of the other organization open
+        assert_eq!(app.get("/product/globex/shop", Some(&format!("{alice}; vz_org=globex"))).await.status, StatusCode::NOT_FOUND);
+
+        // Who is given a project elsewhere sees two organizations, and gets the menu without being an administrator
+        let given = app.post("/orgs/globex/projects/shop/members", Some(&bob), "username=alice&role=viewer").await;
+        assert_eq!(given.status, StatusCode::SEE_OTHER, "{}", given.body);
+        let both = app.get("/product?view=applications", Some(&alice)).await.body;
+        assert!(both.contains(&org_entry("acme", "acme", false)) && both.contains(&org_entry("globex", "globex", false)));
+        assert!(both.contains("widget") && both.contains("gadget"));
+        let narrowed = app.get("/product?view=applications", Some(&format!("{alice}; vz_org=globex"))).await.body;
+        assert!(narrowed.contains("gadget") && !narrowed.contains("widget") && narrowed.contains("All projects of globex"));
+        // The right is lost: the choice kept by the browser stops counting at once
+        let project = Database::connect(&app.db_path).unwrap().find_project("globex", "shop").unwrap().unwrap();
+        let alice_id = Database::connect(&app.db_path).unwrap().get_credentials("alice").unwrap().unwrap().0.id;
+        let removed = app.post(&format!("/orgs/globex/projects/shop/members/{alice_id}/delete"), Some(&bob), "").await;
+        assert_eq!(removed.status, StatusCode::SEE_OTHER, "{} {project}", removed.body);
+        let after = app.get("/product?view=applications", Some(&format!("{alice}; vz_org=globex"))).await.body;
+        assert!(after.contains("widget") && !after.contains("gadget") && !after.contains("globex"));
+
+        // The choice is a form sent from our own pages by a signed-in user: nothing else changes it
+        assert_eq!(app.post("/org-filter", None, "org=acme").await.location.as_deref(), Some("/login"));
+        assert_eq!(app.get("/org-filter?org=acme", Some(&alice)).await.status, StatusCode::METHOD_NOT_ALLOWED);
+        let foreign = HttpRequest::post("/org-filter")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://evil.example")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(header::COOKIE, alice.as_str())
+            .body(Body::from("org=acme"))
+            .unwrap();
+        let foreign = app.send(foreign).await;
+        assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+        assert!(foreign.cookies.is_empty());
     }
 }

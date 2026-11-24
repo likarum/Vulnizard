@@ -287,6 +287,22 @@ details.menu ul {
 }
 details.menu li a { display: block; padding: 6px 10px; }
 details.menu li.sep { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+/* Organization menu: its entries are the buttons of a form, drawn like the links of the project menu */
+details.menu li button {
+  display: block;
+  width: 100%;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+}
+details.menu li button:hover { background: var(--zone-hover); }
+details.menu li button.active { font-weight: 600; background: var(--zone-active); color: var(--zone-ink); }
 
 main { max-width: 1200px; margin: 0 auto; padding: 20px 24px 60px; }
 
@@ -720,7 +736,8 @@ footer.bottom a:hover { color: var(--accent); }
   .zone.info { border-left: none; border-top: 1px solid var(--border); }
   .zone-label { flex: none; }
   details.menu { flex: none; }
-  details.menu summary { min-width: 0; }
+  /* Two menus side by side: a long name is cut so that the second one stays in sight */
+  details.menu summary { min-width: 0; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   details.menu ul { position: fixed; left: 12px; right: 12px; top: auto; min-width: 0; }
 
   nav.tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
