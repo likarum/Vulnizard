@@ -17,6 +17,15 @@ configuration file and apply without restart.
   a destination opens what it sends: the event types (all checked on a new destination), a minimum
   CVSS (none by default), enabled or not, and for a destination of the instance the instance
   events (a manual synchronization finished)
+- **Deadlines**: the remediation delays, in days from the detection of an entry: one per severity
+  (critical 7, high 30, medium 90, low 180 by default) and one for the CVEs known to be exploited
+  (CISA KEV, 14), which applies when it is shorter than the delay of the severity. A CVE without a
+  score follows the medium delay. Each is a whole number of days from 1 to 3650. The **owners of an
+  organization** may replace any of them for its projects, on the page of the organization
+  (*Remediation deadlines*): a field left empty follows the instance, and keeps following it when
+  the instance changes. Deadlines are computed when they are read, from the severity the CVE has
+  then: changing a delay applies at once to every entry still to review. Every change, of the
+  instance or of an organization, is written to the security log with its author
 - **MCP**: turn on the MCP endpoint of the server, choose whether assistants may modify data, and see
   the list of tools
 - **Users** and **Single sign-on**: see below

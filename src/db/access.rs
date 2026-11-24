@@ -74,6 +74,13 @@ pub struct TriageItem {
     pub group: String,
     /// Kept without any source giving the affected versions
     pub version_unknown: bool,
+    /// When the entry was detected: the start of its remediation delay
+    pub detected_at: String,
+    /// When the decision in force was taken (`None` while to review)
+    pub decided_at: Option<String>,
+    /// Where the entry stands against its remediation deadline today, with
+    /// the delays of its organization (see `crate::deadlines`)
+    pub deadline: Option<crate::deadlines::Deadline>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -447,7 +454,8 @@ impl Database {
 
 const TRIAGE_SELECT: &str = "
     SELECT w.id, w.cve_id, w.status, w.priority, a.name, a.version, o.name, p.name,
-           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown
+           c.cvss_v3_score, COALESCE(c.kev_known_exploited, 0), c.description, a.grp, w.version_unknown,
+           w.created_at, CASE WHEN w.status != 'untreated' THEN COALESCE(w.treated_at, w.updated_at) END
     FROM watchlist_entries w
     JOIN applications a ON a.id = w.app_id
     JOIN projects p ON p.id = a.project_id
@@ -472,6 +480,9 @@ fn triage_row(r: &rusqlite::Row) -> rusqlite::Result<TriageItem> {
         description: r.get(10)?,
         group: r.get(11)?,
         version_unknown: r.get(12)?,
+        detected_at: r.get(13)?,
+        decided_at: r.get(14)?,
+        deadline: None,
     })
 }
 
@@ -485,7 +496,7 @@ impl Database {
         let rows = stmt
             .query_map(params![project_id], triage_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_deadlines(rows)
     }
 
     /// Watchlist counts per (project id, status, severity level) for the
@@ -522,7 +533,9 @@ impl Database {
 
     /// Untreated entries of the user's projects, optionally for one project
     /// or for the projects of one organization. The organization only narrows
-    /// what the user's rights give: it is never what gives access.
+    /// what the user's rights give: it is never what gives access. Each entry
+    /// carries its remediation deadline (`TriageItem::deadline`); a negative
+    /// `limit` lists them all.
     pub fn scoped_triage(
         &self,
         user_id: i64,
@@ -541,7 +554,7 @@ impl Database {
         let rows = stmt
             .query_map(params![user_id, project_id, limit, org], triage_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.with_deadlines(rows)
     }
 
     /// Applications of the user's projects (or one project): (org, project, application)

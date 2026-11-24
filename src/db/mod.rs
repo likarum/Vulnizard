@@ -6,6 +6,7 @@ use std::path::Path;
 
 mod access;
 mod admin_ops;
+mod deadlines;
 mod destinations;
 mod distro;
 mod inventory;
@@ -655,6 +656,12 @@ impl Database {
             self.migrate_remove_browser_notifications()?;
         }
 
+        // Migration v28 -> v29: remediation delays an organization replaces
+        if schema_version < 29 {
+            tracing::info!("Upgrading database schema to v29 (remediation deadlines)");
+            self.migrate_deadlines()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -804,6 +811,7 @@ impl Database {
         self.migrate_sync_unchanged()?;
         self.migrate_destination_settings()?;
         self.migrate_remove_browser_notifications()?;
+        self.migrate_deadlines()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1732,14 +1740,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 28
+        // Check schema version is 29
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "28");
+        assert_eq!(version, "29");
     }
 
     #[test]

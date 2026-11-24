@@ -3,6 +3,7 @@ mod changes;
 mod completions;
 mod config;
 mod db;
+mod deadlines;
 mod extraction;
 mod inventory;
 mod mfa;

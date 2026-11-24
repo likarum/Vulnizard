@@ -22,7 +22,8 @@ use crate::rbac::{Permission, Role};
 #[derive(Deserialize, Default)]
 pub struct ProductQuery {
     view: Option<String>,
-    /// Vulnerabilities: "handled" lists the decided entries
+    /// Vulnerabilities: "handled" lists the decided entries, "overdue" those
+    /// to review that are past their remediation deadline
     show: Option<String>,
     /// History: day whose state is shown (YYYY-MM-DD)
     at: Option<String>,
@@ -97,6 +98,11 @@ impl Scope {
 
     fn triage(&self, db: &Database, user: &Account, handled: bool, limit: i64) -> Result<Vec<TriageItem>, AppError> {
         Ok(db.scoped_triage(user.id, self.project_id(), self.org.as_deref(), handled, limit)?)
+    }
+
+    /// The entries to review that are past their remediation deadline, most overdue first
+    fn overdue(&self, db: &Database, user: &Account) -> Result<Vec<TriageItem>, AppError> {
+        Ok(db.scoped_overdue(user.id, self.project_id(), self.org.as_deref())?)
     }
 
     fn changes(&self, db: &Database, user: &Account, limit: i64) -> Result<Vec<ProjectChange>, AppError> {
@@ -523,16 +529,25 @@ fn overview_charts_project(
 // ==========================================
 
 fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Result<Markup, AppError> {
-    let handled = nonempty(&q.show).as_deref() == Some("handled");
-    let mut items = scope.triage(db, user, handled, 2000)?;
+    let show = nonempty(&q.show);
+    let handled = show.as_deref() == Some("handled");
+    let overdue = show.as_deref() == Some("overdue");
+    let mut items = if overdue { scope.overdue(db, user)? } else { scope.triage(db, user, handled, 2000)? };
+    items.truncate(2000);
     let total = items.len();
-    // Default order: most urgent first (known exploited, then CVSS)
-    let listing = Listing::from_page("urgency", true);
+    // Default order: most urgent first (known exploited, then CVSS); the most overdue first among the overdue
+    let listing = if overdue { Listing::from_page("due", false) } else { Listing::from_page("urgency", true) };
     listing.apply(&mut items, views::triage_text, views::triage_key);
     let base = scope.url("vulnerabilities");
+    // One project follows the delays of its organization; "all projects" may mix several
+    let delays = match &scope.project {
+        Some((org, _)) => db.org_delays(org.id)?,
+        None => db.instance_delays()?,
+    };
     Ok(html! {
         div.chips {
-            a href=(base) class=[(!handled).then_some("active")] { "To review" }
+            a href=(base) class=[(!handled && !overdue).then_some("active")] { "To review" }
+            a href={ (base) "&show=overdue" } class=[overdue.then_some("active")] { "Overdue" }
             a href={ (base) "&show=handled" } class=[handled.then_some("active")] { "Decided (accepted, closed, not applicable)" }
         }
         (listing.filter_box("Filter: CVE, application, project, text…", items.len(), total))
@@ -568,12 +583,24 @@ fn vulnerabilities(db: &Database, user: &Account, scope: &Scope, q: &ProductQuer
             }
             p.muted { "Who decided what, and why: see " a href=(scope.url("audit")) { "Audit" } "." }
         } @else {
+            @if overdue && total == 0 { p.muted { "No entry to review is past its deadline." } }
             (views::triage_table(&items, scope.all(), Some(&listing), |item| {
                 if scope.can_in(&item.org, &item.project, Permission::Triage) { triage_actions(item) } else { html! {} }
             }))
             p.muted {
                 strong { "Close" } " once fixed · " strong { "Accept risk" } " to keep it knowingly, with a justification · "
                 strong { "Not applicable" } " if it does not concern your deployment."
+            }
+            p.muted {
+                strong { "Due" } ": time left to decide, counted from the detection of the entry"
+                @if scope.all() { " with the delays of the organization of each project" }
+                ". Any decision stops it."
+                (views::info(html! {
+                    @if scope.all() { "Delays of the instance, which an organization may replace for its projects: " }
+                    (delays.critical) " days for a critical CVE, " (delays.high) " for high, " (delays.medium) " for medium, "
+                    (delays.low) " for low. A CVE without a score follows the medium delay. A CVE known to be exploited (KEV) is due in "
+                    (delays.kev) " days when that is shorter. Reopening an entry or changing the version of the application does not move its deadline."
+                }))
             }
         }
     })

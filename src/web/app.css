@@ -366,6 +366,7 @@ table.fit col.num { width: 116px; }
 table.fit col.flag { width: 96px; }
 table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
+table.fit col.due { width: 108px; }
 table.fit col.name { width: 20%; }
 table.fit col.app { width: 16%; }
 table.fit col.who { width: 13%; }
@@ -427,6 +428,8 @@ table.dense col.project { width: 10%; }
   table.fit col.flag { width: 84px; }
   table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
+  table.fit col.due { width: 88px; }
+  table.triage col.cvss { width: 96px; }
   table.fit col.name { width: 19%; }
   table.fit col.app { width: 15%; }
   table.fit col.who { width: 12%; }
@@ -465,6 +468,7 @@ dl.meta dd { margin: 0; overflow-wrap: anywhere; }
 .tag { background: var(--tag-bg); color: var(--text); }
 .tag.kev { background: var(--badge-critical); color: var(--badge-critical-ink); }
 .tag.warn { background: var(--badge-medium); color: var(--badge-medium-ink); }
+.tag.late { background: var(--badge-critical); color: var(--badge-critical-ink); }
 
 form.filters, form.row {
   display: flex;
@@ -798,6 +802,7 @@ footer.bottom a:hover { color: var(--accent); }
   table.triage td { grid-column: 1 / -1; }
   table.triage td.cve { grid-column: 1; }
   table.triage td.cvss { grid-column: 2; text-align: right; }
+  table.triage td.due:not(.late):not(:empty)::before { content: "Due "; color: var(--muted); }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
   table.triage td.actions { margin-top: 4px; }
   table.list.triage td[data-label]::before { content: none; }

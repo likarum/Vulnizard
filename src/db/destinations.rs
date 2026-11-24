@@ -555,7 +555,7 @@ mod tests {
 
         // Opening it upgrades it
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 28);
+        assert_eq!(db.schema_version().unwrap(), 29);
         let settings = |id: i64| {
             let d = db.get_destination(id).unwrap().unwrap();
             (d.events, d.min_cvss, d.enabled)
@@ -675,7 +675,7 @@ mod tests {
 
         // Opening it upgrades it
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 28);
+        assert_eq!(db.schema_version().unwrap(), 29);
         let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
         // The browser destinations are gone, of the instance and of the project alike
         assert!(db.get_destination(instance_browsers).unwrap().is_none() && db.get_destination(project_browsers).unwrap().is_none());
@@ -710,7 +710,7 @@ mod tests {
         // And opening it again changes nothing
         drop(db);
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 28);
+        assert_eq!(db.schema_version().unwrap(), 29);
         assert_eq!(db.list_all_destinations().unwrap().len(), 2);
     }
 }

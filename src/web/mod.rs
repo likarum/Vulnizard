@@ -7,6 +7,7 @@
 mod admin;
 mod api;
 mod charts;
+mod deadlines;
 mod inventory;
 mod mfa;
 mod notifications;
@@ -665,6 +666,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/admin/notifications/{id}", post(notifications::admin_project_test))
         .route("/admin/mcp", get(admin::mcp).post(admin::mcp_save))
+        .route("/admin/deadlines", get(deadlines::admin).post(deadlines::admin_save))
+        .route("/orgs/{org}/deadlines", post(deadlines::org_save))
         .route("/admin/sso", get(admin::sso).post(admin::sso_save))
         .route("/admin/sso/scim/tokens", post(admin::scim_token_create))
         .route("/admin/sso/scim/tokens/{id}/delete", post(admin::scim_token_delete))
@@ -694,6 +697,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/organizations", get(api::organizations))
         .route("/organizations/{org}/projects", get(api::projects))
         .route("/organizations/{org}/projects/{project}", get(api::project))
+        .route("/organizations/{org}/projects/{project}/watchlist", get(api::watchlist))
         .route("/organizations/{org}/projects/{project}/reports", get(api::reports))
         .route("/organizations/{org}/projects/{project}/reports/{day}", get(api::report))
         .fallback(|| async { ApiError(AppError::NotFound) });
@@ -3730,6 +3734,193 @@ mod tests {
         assert!(!db.has_second_factor(user_id).unwrap());
     }
 
+    // ---------- remediation deadlines ----------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deadlines_are_set_by_administrators_and_replaced_by_organization_owners() {
+        let app = app(open_registration());
+        let root = app.register("root").await;
+        let owner = app.register("owner").await;
+        let editor = app.register("editor").await;
+        let viewer = app.register("viewer").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        for (name, role) in [("editor", "editor"), ("viewer", "viewer")] {
+            assert_eq!(app.post("/orgs/acme/members", Some(&owner), &format!("username={name}&role={role}")).await.status, StatusCode::SEE_OTHER);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let acme = db.get_org("acme", db.get_credentials("owner").unwrap().unwrap().0.id).unwrap().unwrap().id;
+        let all = "critical=3&high=20&medium=60&low=120&kev=10";
+
+        // The instance: administrators only, and nobody without a session
+        for (who, session) in [("owner", &owner), ("viewer", &viewer), ("stranger", &stranger)] {
+            assert_eq!(app.get("/admin/deadlines", Some(session)).await.status, StatusCode::FORBIDDEN, "{who}");
+            assert_eq!(app.post("/admin/deadlines", Some(session), all).await.status, StatusCode::FORBIDDEN, "{who}");
+        }
+        for anonymous in [app.get("/admin/deadlines", None).await, app.post("/admin/deadlines", None, all).await, app.post("/orgs/acme/deadlines", None, "critical=1").await] {
+            assert_eq!(anonymous.status, StatusCode::SEE_OTHER);
+            assert!(anonymous.location.as_deref().is_some_and(|to| to.starts_with("/login")), "{:?}", anonymous.location);
+        }
+        assert_eq!(db.instance_delays().unwrap(), crate::deadlines::Delays::default());
+        let page = app.get("/admin/deadlines", Some(&root)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        for (field, days) in [("critical", 7), ("high", 30), ("medium", 90), ("low", 180), ("kev", 14)] {
+            assert!(page.body.contains(&format!("<input type=\"number\" name=\"{field}\" value=\"{days}\" min=\"1\" max=\"3650\" step=\"1\" required>")), "{field}");
+        }
+        assert!(page.body.contains("<a href=\"/admin/deadlines\" class=\"active\">Deadlines</a>"), "{}", page.body);
+        // Whole numbers of days from 1 to 3650, all five of them
+        for bad in ["critical=0&high=20&medium=60&low=120&kev=10", "critical=3&high=3651&medium=60&low=120&kev=10", "critical=3&high=20&medium=soon&low=120&kev=10",
+                    "critical=3&high=20&medium=60&low=-5&kev=10", "critical=3&high=20&medium=60&low=120", "critical=3&high=20&medium=60&low=120&kev=1.5"] {
+            assert_eq!(app.post("/admin/deadlines", Some(&root), bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        assert_eq!(db.instance_delays().unwrap(), crate::deadlines::Delays::default());
+        let saved = app.post("/admin/deadlines", Some(&root), all).await;
+        assert_eq!((saved.status, saved.location.as_deref()), (StatusCode::SEE_OTHER, Some("/admin/deadlines")));
+        let instance = crate::deadlines::Delays { critical: 3, high: 20, medium: 60, low: 120, kev: 10 };
+        assert_eq!(db.instance_delays().unwrap(), instance);
+        assert!(app.get("/admin/deadlines", Some(&root)).await.body.contains("name=\"kev\" value=\"10\""));
+
+        // The organization: its owners. A viewer or an editor is refused, and who has no role in it does not
+        // even learn it exists, an administrator of the instance included
+        let replace = "critical=1&high=&medium=&low=&kev=40";
+        for (who, session, expected) in [
+            ("viewer", &viewer, StatusCode::FORBIDDEN), ("editor", &editor, StatusCode::FORBIDDEN),
+            ("stranger", &stranger, StatusCode::NOT_FOUND), ("root", &root, StatusCode::NOT_FOUND),
+        ] {
+            assert_eq!(app.post("/orgs/acme/deadlines", Some(session), replace).await.status, expected, "{who}");
+        }
+        assert!(db.org_delay_override(acme).unwrap().is_empty());
+        for bad in ["critical=0", "kev=3651", "high=many"] {
+            assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), bad).await.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        let saved = app.post("/orgs/acme/deadlines", Some(&owner), replace).await;
+        assert_eq!((saved.status, saved.location.as_deref()), (StatusCode::SEE_OTHER, Some("/orgs/acme#deadlines")));
+        assert_eq!(db.org_delays(acme).unwrap(), crate::deadlines::Delays { critical: 1, kev: 40, ..instance });
+        // The page says what applies and who set it; the form is for the owners only
+        let page = app.get("/orgs/acme", Some(&owner)).await.body;
+        assert!(page.contains("<tr><td>Critical</td><td>1</td><td>this organization</td></tr>"), "{page}");
+        assert!(page.contains("<tr><td>High</td><td>20</td><td><span class=\"muted\">the instance</span></td></tr>"));
+        assert!(page.contains("<input type=\"number\" name=\"critical\" value=\"1\" placeholder=\"inherited: 3\" min=\"1\" max=\"3650\" step=\"1\">"));
+        assert!(page.contains("<input type=\"number\" name=\"high\" placeholder=\"inherited: 20\" min=\"1\" max=\"3650\" step=\"1\">"));
+        let read_only = app.get("/orgs/acme", Some(&viewer)).await.body;
+        assert!(read_only.contains("<td>Exploited (CISA KEV)</td><td>40</td>") && !read_only.contains("/orgs/acme/deadlines"));
+        // Emptied: the organization follows the instance again
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "critical=&high=&medium=&low=&kev=").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(db.org_delays(acme).unwrap(), instance);
+
+        // Every change is in the security log, with its author
+        let logged: Vec<(String, String)> = db.list_security_events(None, 100).unwrap().into_iter()
+            .filter(|e| e.event == "remediation_delays").map(|e| (e.actor, e.detail.unwrap_or_default())).collect();
+        assert_eq!(logged, [
+            ("owner".to_string(), "organization acme: inherited from the instance".to_string()),
+            ("owner".to_string(), "organization acme: critical 1, kev 40".to_string()),
+            ("root".to_string(), "instance: critical 3, high 20, medium 60, low 120, kev 10".to_string()),
+        ]);
+        let log = app.get("/admin/security", Some(&root)).await.body;
+        assert!(log.contains("Remediation deadlines changed") && log.contains("organization acme: critical 1, kev 40"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_vulnerabilities_view_and_the_api_tell_what_is_due() {
+        let app = app(open_registration());
+        let owner = app.register("owner").await;
+        let stranger = app.register("stranger").await;
+        app.post("/orgs", Some(&owner), "name=acme").await;
+        app.post("/projects", Some(&owner), "org=acme&name=infra").await;
+        let db = Database::connect(&app.db_path).unwrap();
+        for (id, cvss) in [("CVE-2024-4343", 9.1), ("CVE-2024-4344", 5.0)] {
+            let mut cve = crate::models::Cve::new(id.into());
+            cve.description = Some("Widget flaw".into());
+            cve.cvss_v3_score = Some(cvss);
+            cve.affected_products.push(crate::models::AffectedProduct {
+                vendor: Some("acme".into()),
+                product: Some("widget".into()),
+                version: Some("*".into()),
+                cpe: Some("cpe".into()),
+                ..Default::default()
+            });
+            db.upsert_cve(&cve).unwrap();
+        }
+        assert_eq!(app.post("/orgs/acme/projects/infra/applications", Some(&owner), "name=widget&version=1.0&vendor=acme").await.status, StatusCode::SEE_OTHER);
+        // Detected ten days ago: the critical one was due after 7 days, the medium one has 80 left
+        db.conn().execute("UPDATE watchlist_entries SET created_at = datetime('now', '-10 days')", []).unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let day = |from_detection: i64| (today + chrono::Duration::days(from_detection - 10)).to_string();
+        let late = format!("<td class=\"due late\"><span class=\"tag late\" title=\"Due {}: 7 days after its detection on {}\">overdue by 3 days</span></td>", day(7), day(0));
+        let in_time = format!("<td class=\"due\" title=\"Due {}: 90 days after its detection on {}\">in 80 days</td>", day(90), day(0));
+
+        for scope in ["/product", "/product/acme/infra"] {
+            let view = format!("{scope}?view=vulnerabilities");
+            let page = app.get(&view, Some(&owner)).await.body;
+            assert!(page.contains(&late) && page.contains(&in_time), "{scope}: {page}");
+            assert!(page.contains(&format!("<a href=\"{view}&amp;show=overdue\">Overdue</a>")), "{scope}");
+            // The column sorts: the nearest deadline first, or last
+            assert!(page.contains("sort=due&amp;dir=asc"), "{scope}");
+            let order = |body: &str| body.find("CVE-2024-4343</a>").unwrap() < body.find("CVE-2024-4344</a>").unwrap();
+            assert!(order(&app.get(&format!("{view}&sort=due&dir=asc"), Some(&owner)).await.body), "{scope}");
+            assert!(!order(&app.get(&format!("{view}&sort=due&dir=desc"), Some(&owner)).await.body), "{scope}");
+            // Only what is overdue
+            let overdue = app.get(&format!("{view}&show=overdue"), Some(&owner)).await.body;
+            assert!(overdue.contains(&late) && !overdue.contains("CVE-2024-4344"), "{scope}");
+            assert!(overdue.contains(&format!("<a href=\"{view}&amp;show=overdue\" class=\"active\">Overdue</a>")), "{scope}");
+            // The rule is said under the list, with the delays that apply
+            assert!(page.contains("7 days for a critical CVE, 30 for high, 90 for medium, 180 for low") && page.contains("without a score follows the medium delay"), "{scope}");
+        }
+        // The overview lists what is most urgent with its deadline too
+        assert!(app.get("/product/acme/infra", Some(&owner)).await.body.contains(&late));
+        // Somebody else's projects are not theirs to list
+        assert!(!app.get("/product?view=vulnerabilities&show=overdue", Some(&stranger)).await.body.contains("CVE-2024-4343"));
+        assert_eq!(app.get("/product/acme/infra?view=vulnerabilities&show=overdue", Some(&stranger)).await.status, StatusCode::NOT_FOUND);
+
+        // REST API: the same answer, for who can read the project
+        let token = |session: &str| {
+            let (app, session) = (&app, session.to_string());
+            async move { format!("Bearer {}", tokens_of(&app.post("/settings/tokens", Some(&session), "name=ci&password=a-long-password").await.body).remove(0)) }
+        };
+        let (bearer, other) = (token(&owner).await, token(&stranger).await);
+        let path = "/api/organizations/acme/projects/infra/watchlist";
+        assert_eq!(app.api(path, None).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.get(path, Some(&owner)).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(app.api(path, Some(&other)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.api(&format!("{path}?status=bogus"), Some(&bearer)).await.status, StatusCode::BAD_REQUEST);
+        let read = |query: &'static str| {
+            let (app, bearer) = (&app, bearer.clone());
+            async move {
+                let reply = app.api(&format!("{path}{query}"), Some(&bearer)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{query}: {}", reply.body);
+                serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()
+            }
+        };
+        let entry = |list: &serde_json::Value, cve: &str| list["entries"].as_array().unwrap().iter().find(|e| e["entry"]["cve_id"] == cve).cloned().unwrap();
+        let list = read("").await;
+        assert_eq!(list["total"], 2);
+        let critical = entry(&list, "CVE-2024-4343");
+        assert_eq!((critical["due_at"].as_str(), critical["days_left"].as_i64(), critical["overdue_days"].as_i64()), (Some(day(7).as_str()), Some(-3), Some(3)));
+        let medium = entry(&list, "CVE-2024-4344");
+        assert_eq!((medium["due_at"].as_str(), medium["days_left"].as_i64(), medium["overdue_days"].as_i64()), (Some(day(90).as_str()), Some(80), Some(0)));
+        let overdue = read("?overdue=1").await;
+        assert_eq!((overdue["total"].as_i64(), overdue["entries"][0]["entry"]["cve_id"].as_str()), (Some(1), Some("CVE-2024-4343")));
+        assert_eq!(read("?status=untreated&overdue=true").await["total"], 1);
+
+        // The organization gives itself more time: nothing is overdue any more, in the list as in the API
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "critical=30").await.status, StatusCode::SEE_OTHER);
+        let page = app.get("/product?view=vulnerabilities", Some(&owner)).await.body;
+        assert!(page.contains("in 20 days") && !page.contains("tag late"), "{page}");
+        assert!(app.get("/product/acme/infra?view=vulnerabilities", Some(&owner)).await.body.contains("30 days for a critical CVE"));
+        assert_eq!(read("?overdue=1").await["total"], 0);
+        assert_eq!(app.post("/orgs/acme/deadlines", Some(&owner), "").await.status, StatusCode::SEE_OTHER);
+
+        // Decided: no longer due, never overdue; the API says how long it took
+        let project = db.find_project("acme", "infra").unwrap().unwrap();
+        let id = db.project_entries_for_cve(project, "CVE-2024-4343").unwrap()[0].0;
+        assert_eq!(app.post(&format!("/orgs/acme/projects/infra/watchlist/{id}"), Some(&owner), "status=treated").await.status, StatusCode::SEE_OTHER);
+        assert!(!app.get("/product?view=vulnerabilities&show=overdue", Some(&owner)).await.body.contains("CVE-2024-4343"));
+        let closed = entry(&read("?status=treated").await, "CVE-2024-4343");
+        assert_eq!(closed["resolved_in_days"], 10);
+        assert!(closed.get("due_at").is_none() && closed.get("overdue_days").is_none());
+        assert_eq!(read("?overdue=1").await["total"], 0);
+    }
+
     /// The entry of a view in the products menu, as the page writes it
     fn menu_entry(scope: &str, key: &str, label: &str, active: bool) -> String {
         let class = if active { " class=\"active\"" } else { "" };
@@ -3745,7 +3936,7 @@ mod tests {
         // Both lists name their columns for the stylesheet; the project column only exists for all projects
         for (scope, project) in [("/product", "<col class=\"project\">"), ("/product/acme/infra", "")] {
             let review = app.get(&format!("{scope}?view=vulnerabilities"), Some(&alice)).await.body;
-            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
+            assert!(review.contains(&format!("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"due\"><col class=\"desc\"><col class=\"actions\"></colgroup>")), "{scope}");
             let decided = app.get(&format!("{scope}?view=vulnerabilities&show=handled"), Some(&alice)).await.body;
             assert!(decided.contains(&format!("<table class=\"list fit decided\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\">{project}<col class=\"decision\"><col class=\"actions\"></colgroup>")), "{scope}");
             let columns = if project.is_empty() { 5 } else { 6 };
@@ -3764,11 +3955,12 @@ mod tests {
         let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
         let user = format!("/admin/users/{id}");
         // The widths the stylesheet knows; a column without a name takes what is left
-        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "due", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
         let table = regex::Regex::new(r#"(?s)<table class="([^"]*)">(.*?)</table>"#).unwrap();
         let column = regex::Regex::new(r#"<col(?: class="([a-z]+)")?>"#).unwrap();
         let pages = [
-            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=applications",
+            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=vulnerabilities&show=overdue",
+            "/product/acme/infra?view=vulnerabilities&show=overdue", "/admin/deadlines", "/product?view=applications",
             "/product?view=subscriptions", "/product?view=history", "/product?view=audit",
             "/product/acme/infra", "/product/acme/infra?view=vulnerabilities", "/product/acme/infra?view=applications",
             "/product/acme/infra?view=subscriptions", "/product/acme/infra?view=history", "/product/acme/infra?view=audit",
