@@ -864,3 +864,8 @@ table.events td.tick input { margin: 0; vertical-align: middle; }
 /* The gear opening the configuration of a destination */
 a.gear { font-size: 15px; line-height: 1.2; padding: 1px 7px; }
 a.gear:hover { text-decoration: none; border-color: var(--accent); color: var(--accent); }
+
+/* Steps shown above a field that needs something from another service */
+.guide { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; background: var(--info-bg); color: var(--text); }
+.guide ol { margin: 6px 0 0; padding-left: 20px; }
+.guide li { margin: 4px 0; overflow-wrap: anywhere; }

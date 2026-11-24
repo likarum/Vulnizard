@@ -441,6 +441,7 @@ pub(crate) const CONFINED_ROUTES: &[(&str, &str)] = &[
     // Files of the page itself
     ("GET", "/static/app.css"),
     ("GET", "/static/logo.svg"),
+    ("GET", "/static/logo.png"),
     ("GET", "/static/mfa.js"),
     ("GET", "/static/filter.js"),
     ("GET", "/static/theme.js"),
@@ -803,6 +804,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/sso/{slug}", post(admin::sso_action))
         .route("/static/app.css", get(pages::stylesheet))
         .route("/static/logo.svg", get(pages::logo))
+        .route("/static/logo.png", get(pages::logo_png))
         .route("/favicon.ico", get(pages::logo))
         .fallback(|| async { AppError::NotFound })
         .layer(middleware::from_fn_with_state(state.clone(), confined_gate))
@@ -3486,7 +3488,7 @@ mod tests {
     }
 
     /// What answers without signing in: signing in itself, and static files
-    const PUBLIC_ROUTES: [&str; 17] = [
+    const PUBLIC_ROUTES: [&str; 18] = [
         "/login",
         "/register",
         "/setup",
@@ -3500,6 +3502,7 @@ mod tests {
         "/auth/oidc/{provider}/callback",
         "/static/app.css",
         "/static/logo.svg",
+        "/static/logo.png",
         "/static/mfa.js",
         "/static/filter.js",
         "/static/theme.js",
@@ -3942,6 +3945,10 @@ mod tests {
         // Live filters: the script is on every page and the forms carry what it refreshes
         assert!(app.get("/static/filter.js", None).await.body.contains("form.filters"));
         assert!(app.get("/static/logo.svg", None).await.body.starts_with("<svg"));
+        let png = app.router.clone().oneshot(HttpRequest::get("/static/logo.png").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(png.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
+        let png = axum::body::to_bytes(png.into_body(), 1 << 20).await.unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 5_000);
         // The stylesheet has a layout for narrow screens, and pages tell phones not to zoom out
         assert!(app.get("/static/app.css", None).await.body.contains("@media (max-width: 760px)"));
         assert!(app.get("/login", None).await.body.contains("name=\"viewport\" content=\"width=device-width"));
@@ -5348,7 +5355,7 @@ mod tests {
     /// Routes and MCP tools that were classified for an account confined to the
     /// Overview: allowed (`CONFINED_ROUTES`, `CONFINED_API`, `mcp::CONFINED_TOOLS`)
     /// or refused, which is what happens to anything not listed there
-    const CLASSIFIED_ROUTES: usize = 125;
+    const CLASSIFIED_ROUTES: usize = 126;
     const CLASSIFIED_TOOLS: usize = 26;
 
     /// A route with its parameters filled: the project the executive holds, and 1 for the rest
@@ -5784,5 +5791,31 @@ mod tests {
         assert_eq!(app.post("/orgs/acme/members", Some(&world.owner), "username=board&role=viewer").await.status, StatusCode::SEE_OTHER);
         // (a member already there is not invited again: the change waits for nothing)
         let _ = world.chair;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slack_destination_comes_with_the_way_to_get_its_address() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        let page = app.get("/admin/notifications?tab=destinations&new=slack", Some(&admin)).await;
+        assert_eq!(page.status, StatusCode::OK);
+        // The steps, the logo to upload, and a link that opens Slack with the app described
+        for shown in ["Getting the webhook address from Slack", "Install to Workspace", "href=\"/static/logo.png\"", "Incoming Webhooks"] {
+            assert!(page.body.contains(shown), "{shown}");
+        }
+        let link = page.body.split("href=\"https://api.slack.com/apps?new_app=1&amp;manifest_json=").nth(1).expect("the link to Slack").split('"').next().unwrap().to_string();
+        assert!(page.body.contains("target=\"_blank\" rel=\"noopener noreferrer\""));
+        // What Slack is given: valid JSON, wholly encoded, that switches incoming webhooks on
+        assert!(link.chars().all(|c| c.is_ascii_alphanumeric() || c == '%'), "{link}");
+        let manifest: serde_json::Value = serde_json::from_str(&percent_encoding::percent_decode_str(&link).decode_utf8().unwrap()).unwrap();
+        assert_eq!(manifest["settings"]["incoming_webhooks"]["incoming_webhooks_enabled"], true);
+        assert_eq!(manifest["oauth_config"]["scopes"]["bot"], serde_json::json!(["incoming-webhook"]));
+        let name = manifest["display_information"]["name"].as_str().unwrap();
+        let description = manifest["display_information"]["description"].as_str().unwrap();
+        assert!(name.len() <= 35 && description.len() <= 140);
+        // The other kinds have no such guide, and the project form has the same one
+        assert!(!app.get("/admin/notifications?tab=destinations&new=ntfy", Some(&admin)).await.body.contains("api.slack.com"));
+        let project = app.get("/product/default/default?view=settings&new=slack", Some(&admin)).await;
+        assert!(project.status == StatusCode::OK && project.body.contains("api.slack.com/apps?new_app=1"));
     }
 }

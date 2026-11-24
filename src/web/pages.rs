@@ -1432,6 +1432,14 @@ pub async fn logo() -> impl IntoResponse {
     )
 }
 
+/// The logo as an image file, for the services that take no SVG (the icon of a Slack app)
+pub async fn logo_png() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "public, max-age=86400")],
+        include_bytes!("logo.png").as_slice(),
+    )
+}
+
 pub async fn stylesheet(headers: axum::http::HeaderMap) -> impl IntoResponse {
     asset(&headers, "text/css; charset=utf-8", views::STYLESHEET)
 }

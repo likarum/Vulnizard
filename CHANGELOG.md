@@ -31,6 +31,16 @@ before 1.0, a minor version may change behaviour.
 - **History: open vulnerabilities by severity, day by day** (#69), stacked, with the accepted
   risks as a separate line; the severity is the one each CVE has today. MCP `get_evolution`
   gives the same breakdown per day.
+- **An "executive" role** (#79), below viewer: it reads the Overview of what it holds (an
+  organization, a project or the whole instance) and nothing else. Vulnerabilities,
+  applications, history, audit, settings, the CVE database, every other page, API endpoint
+  and MCP tool refuse it; `get_summary` and the summary endpoints are what it may call. It is
+  given where the other roles are. An account that also holds viewer or more somewhere
+  keeps, there, what that role gives. Schema v31, automatic.
+- **Slack: the form gives the way to the webhook address** (#102): a link that opens Slack
+  with the app already described (name, incoming webhooks on), the steps that follow, and
+  the logo as a PNG to upload as the app's icon. Slack takes the name and the icon of a
+  webhook from the app, not from the messages.
 - MCP `get_summary` and REST `GET /api/summary` (and `…/projects/{project}/summary`): the
   figures of the Overview, without any CVE or application name.
 

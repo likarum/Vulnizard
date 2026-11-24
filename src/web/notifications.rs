@@ -74,8 +74,43 @@ fn destination_fields(kind: &str, default_smtp: bool) -> Markup {
                 }
             }
             "ntfy" => { label { "Topic URL" input type="url" name="url" maxlength="500" required placeholder="https://ntfy.example.org/vulnizard"; } }
-            "slack" => { label { "Incoming webhook URL" input type="url" name="url" maxlength="500" required; } }
+            "slack" => {
+                (slack_guide())
+                label { "Incoming webhook URL" input type="url" name="url" maxlength="500" required placeholder="https://hooks.slack.com/services/…"; }
+            }
             _ => { label { "URL (receives a JSON POST)" input type="url" name="url" maxlength="500" required; } }
+        }
+    }
+}
+
+/// What Slack needs to create the application that receives the messages:
+/// its name, and incoming webhooks switched on. Slack reads it from the link
+/// of the guide, so that nothing has to be set by hand.
+const SLACK_MANIFEST: &str = r##"{"display_information":{"name":"Vulnizard","description":"Vulnerability notifications from Vulnizard","background_color":"#2a1a4a"},"features":{"bot_user":{"display_name":"Vulnizard","always_online":false}},"oauth_config":{"scopes":{"bot":["incoming-webhook"]}},"settings":{"incoming_webhooks":{"incoming_webhooks_enabled":true}}}"##;
+
+/// Address that opens Slack on the creation of the application, filled in
+fn slack_app_link() -> String {
+    format!("https://api.slack.com/apps?new_app=1&manifest_json={}", enc(SLACK_MANIFEST))
+}
+
+/// The steps that lead to the webhook address asked just below
+fn slack_guide() -> Markup {
+    html! {
+        div.guide {
+            strong { "Getting the webhook address from Slack" }
+            ol {
+                li {
+                    a href=(slack_app_link()) target="_blank" rel="noopener noreferrer" { "Create the Slack app" }
+                    ": the link opens Slack with the app already described. Pick your workspace and confirm."
+                }
+                li { "In the app, choose " em { "Install to Workspace" } ", pick the channel that receives the messages, and allow." }
+                li {
+                    "Optional, for the icon: in " em { "Basic Information → Display Information" } ", upload "
+                    a href="/static/logo.png" download="vulnizard.png" { "the Vulnizard logo" }
+                    ". Slack takes the name and the icon from the app, not from the messages."
+                }
+                li { "Open " em { "Incoming Webhooks" } ", copy the " em { "Webhook URL" } " and paste it below." }
+            }
         }
     }
 }
