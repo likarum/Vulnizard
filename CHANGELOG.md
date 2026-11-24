@@ -23,8 +23,26 @@ before 1.0, a minor version may change behaviour.
   it. Changing the role of someone already in the list still applies at once, and so do the
   rights given from Administration → Users. Schema v30, automatic.
 
+- **An "Overdue" view** (#77): the vulnerabilities past their deadline by application
+  (number, average and worst lateness, each row opening the list narrowed to it), by week of
+  detection and of deadline, and their number day by day, to tell a batch that arrived at
+  once from a period without triage. The Vulnerabilities list can be narrowed by application
+  and by severity.
+- **History: open vulnerabilities by severity, day by day** (#69), stacked, with the accepted
+  risks as a separate line; the severity is the one each CVE has today. MCP `get_evolution`
+  gives the same breakdown per day.
+- MCP `get_summary` and REST `GET /api/summary` (and `…/projects/{project}/summary`): the
+  figures of the Overview, without any CVE or application name.
+
 ### Changed
 
+- **The Overview shows figures only** (#75): open vulnerabilities and overdue ones, by
+  severity; average and worst lateness of the overdue ones; average time to resolve, by
+  severity, over the last 30, 90 or 365 days. "Resolved" is any decision (closed, not
+  applicable, accepted risk), counted from the detection. Each count opens the list behind
+  it. The charts moved to History, which now follows the day shown; "To review first" and
+  "Latest changes" are gone from the Overview (they are the Vulnerabilities list in its
+  default order, and "Changes on subscribed products" in History).
 - A KEV or NVD answer that lacks a field Vulnizard does not use is no longer refused (#11).
 
 ## 0.2.6
