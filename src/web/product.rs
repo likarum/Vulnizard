@@ -1203,8 +1203,9 @@ fn settings(db: &Database, config: &crate::config::Config, scope: &Scope, new_ki
                 select name="role" {
                     @for role in Role::ALL.iter().rev() { option value=(role.as_str()) { (role.as_str()) } }
                 }
-                button type="submit" { "Give access to this project" }
+                button type="submit" { "Invite to this project" }
             }
+            (super::invitations::pending_section(db, crate::db::Scope::Project(project.id), &base)?)
         }
 
         @if org.can(Permission::DeleteProject) {

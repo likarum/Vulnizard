@@ -93,6 +93,10 @@ pub const SECURITY_EVENTS: &[(&str, &str)] = &[
     ("second_step_locked", "Second step locked after too many wrong answers"),
     ("mfa_reset", "Two-step sign-in reset"),
     ("mfa_requirement", "Two-step sign-in requirement changed"),
+    ("invitation_sent", "Invitation sent"),
+    ("invitation_accepted", "Invitation accepted"),
+    ("invitation_declined", "Invitation declined"),
+    ("invitation_cancelled", "Invitation cancelled"),
 ];
 
 #[derive(Debug, Clone)]

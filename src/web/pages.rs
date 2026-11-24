@@ -995,6 +995,7 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
         html! {
             h1 { "Settings" }
             @if let Some(m) = message { p { strong { (m) } } }
+            (super::invitations::received_section(db, user)?)
 
             h2 { "API tokens" }
             @if let Some(token) = new_token {
@@ -1313,8 +1314,9 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                                 option value=(role.as_str()) { (role.as_str()) }
                             }
                         }
-                        button type="submit" { "Add member" }
+                        button type="submit" { "Invite" }
                     }
+                    (super::invitations::pending_section(&db, crate::db::Scope::Organization(org.id), &base)?)
                 }
                 @if org.can(Permission::DeleteOrganization) {
                     h2 { "Danger zone" }
@@ -1353,6 +1355,9 @@ pub struct MemberForm {
     role: String,
 }
 
+/// A name with a role, from the members of an organization. The name of a
+/// member — the list shows it — changes its role, as before. Any other name
+/// is invited: the same answer whether an account bears it or not.
 pub async fn member_add(
     State(st): St,
     User(user): User,
@@ -1363,14 +1368,17 @@ pub async fn member_add(
         let db = st.db()?;
         let org = load_org(&db, &user, &org)?;
         require(&org, Permission::ManageMembers)?;
-        if let Some(account) = db.get_credentials_or_sso(form.username.trim())? {
-            if !db.may_hold_right(account.id, crate::db::Scope::Organization(org.id))? {
-                return Err(AppError::Bad("This account belongs to another project or organization.".into()));
-            }
+        let role = Role::parse(&form.role).ok_or_else(|| AppError::Bad("Unknown role".into()))?;
+        let name = super::invitations::typed_name(&form.username)?;
+        let page = format!("/orgs/{}", enc(&org.name));
+        let Some(member) = db.list_members(org.id)?.into_iter().find(|m| m.username.eq_ignore_ascii_case(name)) else {
+            return super::invitations::invite(&db, &user, crate::db::Scope::Organization(org.id), name, role, page);
+        };
+        if !db.may_hold_right(member.user_id, crate::db::Scope::Organization(org.id))? {
+            return Err(AppError::Bad("This account belongs to another project or organization.".into()));
         }
-        db.add_member(org.id, form.username.trim(), &form.role)
-            .map_err(AppError::bad)?;
-        Ok(redirect(format!("/orgs/{}", enc(&org.name))))
+        db.add_member(org.id, &member.username, role.as_str()).map_err(AppError::bad)?;
+        Ok(redirect(page))
     })
 }
 
