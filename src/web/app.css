@@ -128,6 +128,56 @@
   --accent: #e8a15c; --on-accent: #1f1204; --product-wash: #3a2a18; --tag-bg: #453c2e;
   --info-bg: #1b1812; --info-wash: #2f2a20; --track: #2c271e;
 }
+/* Three palettes known from code editors. Each keeps the colors of its
+   original; where one of them is too faint to be read as text on this
+   interface (the comment gray of Dracula, the red of Nord), a lighter or
+   darker step of the same hue is used. Day palettes: Alucard for Dracula,
+   Snow Storm for Nord, Lux for Noctis. */
+:root[data-theme="dracula"][data-mode="light"] {
+  --bg: #fffbeb; --surface: #fffdf6; --text: #1f1f1f; --muted: #635d44; --border: #e3ddc4;
+  --accent: #644ac9; --danger: #b8301f; --warn: #8f4410; --ok: #14710a; --busy: #846e15;
+  --product-wash: #ebe6fb; --tag-bg: #e6e1cc;
+  --info-bg: #f7f2dd; --info-wash: #e9e3c9; --info-ink: #4a4633; --added: #e3f3dd; --removed: #fbe4df;
+  --grid: #e3ddc4; --track: #efe9d3;
+}
+:root[data-theme="dracula"][data-mode="dark"] {
+  --bg: #21222c; --surface: #282a36; --text: #f8f8f2; --muted: #a9b1d1; --border: #44475a;
+  --accent: #bd93f9; --on-accent: #1b1c25; --danger: #ff7b7b; --on-danger: #2a0a0a;
+  --warn: #ffb86c; --ok: #50fa7b; --busy: #f1fa8c;
+  --product-wash: #3a3152; --tag-bg: #44475a;
+  --info-bg: #1d1e27; --info-wash: #343746; --info-ink: #e2e2dc; --added: #1f3a2a; --removed: #4a2530;
+  --grid: #3a3d4e; --track: #343746;
+}
+:root[data-theme="nord"][data-mode="light"] {
+  --bg: #eceff4; --surface: #f9fafc; --text: #2e3440; --muted: #4c566a; --border: #d3dae6;
+  --accent: #3d6495; --danger: #a3323d; --warn: #855800; --ok: #3d6a2b; --busy: #8a6700;
+  --product-wash: #dce6f2; --tag-bg: #d8dee9;
+  --info-bg: #e5e9f0; --info-wash: #d8dee9; --info-ink: #434c5e; --added: #e0eedb; --removed: #f6e1e3;
+  --grid: #d3dae6; --track: #e0e5ee;
+}
+:root[data-theme="nord"][data-mode="dark"] {
+  --bg: #2e3440; --surface: #3b4252; --text: #eceff4; --muted: #c0c9d9; --border: #56617a;
+  --accent: #8fd0e2; --on-accent: #20252e; --danger: #f2a7ae; --on-danger: #3a1218;
+  --warn: #ebcb8b; --ok: #b4d39b; --busy: #ebcb8b;
+  --product-wash: #40506a; --tag-bg: #4c566a;
+  --info-bg: #2a303b; --info-wash: #434c5e; --info-ink: #e5e9f0; --added: #36473b; --removed: #4d383e;
+  --grid: #4c566a; --track: #434c5e; --neutral: #b3bac7;
+}
+:root[data-theme="noctis"][data-mode="light"] {
+  --bg: #fef8ec; --surface: #fffdf7; --text: #004d57; --muted: #4a6a70; --border: #e7dcc6;
+  --accent: #00707f; --danger: #b23312; --warn: #855700; --ok: #00715f; --busy: #8a6200;
+  --product-wash: #dcf0ef; --tag-bg: #eadfc9;
+  --info-bg: #f6eedb; --info-wash: #e7dcc6; --info-ink: #3d5a5f; --added: #dff1e3; --removed: #fbe3dc;
+  --grid: #e7dcc6; --track: #f0e7d3;
+}
+:root[data-theme="noctis"][data-mode="dark"] {
+  --bg: #041d20; --surface: #052529; --text: #c5d8db; --muted: #8fb0b5; --border: #1d5057;
+  --accent: #40d4e7; --on-accent: #03191b; --danger: #ff8a5c; --on-danger: #2a0d02;
+  --warn: #e4b781; --ok: #49e9a6; --busy: #ffc180;
+  --product-wash: #0e3f45; --tag-bg: #164a50;
+  --info-bg: #03181a; --info-wash: #0f3a3f; --info-ink: #b2cacd; --added: #0b3a2c; --removed: #3e231c;
+  --grid: #164a50; --track: #0c3438;
+}
 /* Strongest contrast between text and page, and visible borders */
 :root[data-theme="contrast"][data-mode="light"] {
   --bg: #ffffff; --surface: #ffffff; --text: #000000; --muted: #3a3a3a; --border: #767676;

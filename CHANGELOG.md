@@ -49,7 +49,7 @@ The sources are asked for much less. With the default settings an instance downl
   subscriptions now says what a subscription is and how it differs from a tracked
   application.
 - **Colour themes and a day/night button**, in the header of every page: Classic, Forest,
-  Plum, Sand and High contrast. The choice is kept by the browser; without one, day or night
+  Plum, Sand, Dracula, Nord, Noctis and High contrast. The choice is kept by the browser; without one, day or night
   follows the system. Without JavaScript the page is Classic and follows the system.
 
 ### Fixed

@@ -69,7 +69,7 @@ color theme. Every list can be sorted (click a column header, click again to rev
 filtered with its search box; everything works without JavaScript except notifications, passkeys
 and the choice of a theme.
 
-The header has a menu of **color themes** (Classic, Forest, Plum, Sand, High contrast) and a
+The header has a menu of **color themes** (Classic, Forest, Plum, Sand, Dracula, Nord, Noctis, High contrast) and a
 **day / night** button. The choice is kept in the browser, not in the account: another browser
 starts from the default. Until the button is used, day or night follows the system setting, and
 keeps following it; without JavaScript the page is Classic and follows the system setting too.

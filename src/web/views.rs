@@ -23,11 +23,14 @@ pub const PRODUCT_VIEWS: [(&str, &str); 6] = [
 
 /// Color themes, in the order of the menu: (key, label). The first one is the
 /// default. Each has a day and a night palette in `app.css`.
-pub const THEMES: [(&str, &str); 5] = [
+pub const THEMES: [(&str, &str); 8] = [
     ("classic", "Classic"),
     ("forest", "Forest"),
     ("plum", "Plum"),
     ("sand", "Sand"),
+    ("dracula", "Dracula"),
+    ("nord", "Nord"),
+    ("noctis", "Noctis"),
     ("contrast", "High contrast"),
 ];
 
