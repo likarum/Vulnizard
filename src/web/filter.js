@@ -91,10 +91,36 @@
     });
   }
 
+  // A toolbar acting on the checked rows of its form (data-selection names the
+  // checkboxes) is greyed out while none is checked. The page is served with
+  // the toolbar usable: without this script the server refuses an empty selection.
+  function selection(toolbar) {
+    var form = toolbar.closest("form");
+    if (!form) return;
+    var boxes = form.querySelectorAll('input[type="checkbox"][name="' + toolbar.getAttribute("data-selection") + '"]');
+    var checked = Array.prototype.filter.call(boxes, function (box) { return box.checked; }).length;
+    Array.prototype.forEach.call(toolbar.querySelectorAll("select, button, input"), function (control) {
+      control.disabled = checked === 0;
+    });
+    var count = toolbar.querySelector(".selection-count");
+    if (count) count.textContent = checked === 0 ? "Check users in the list first" : checked + " selected";
+  }
+
+  function selections() {
+    Array.prototype.forEach.call(document.querySelectorAll("main [data-selection]"), selection);
+  }
+
   function bind() {
     Array.prototype.forEach.call(document.querySelectorAll("main form.filters"), watch);
     Array.prototype.forEach.call(document.querySelectorAll("main table.list"), label);
+    selections();
   }
+
+  document.addEventListener("change", function (event) {
+    if (event.target && event.target.type === "checkbox") selections();
+  });
+  // Coming back with the browser's Back button restores the checked boxes after the script ran
+  window.addEventListener("pageshow", selections);
 
   bind();
 })();

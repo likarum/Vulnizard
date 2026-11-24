@@ -1498,13 +1498,8 @@ mod tests {
         let mut cve = Cve::new(id.into());
         cve.description = Some("Flaw".into());
         db.upsert_cve(&cve).unwrap();
-        let known = crate::models::AffectedPackage {
-            ecosystem: ecosystem.into(),
-            name: name.into(),
-            vulnerable_range: range.map(String::from),
-            fixed_version: None,
-        };
-        db.batch_add_packages(&[(id.to_string(), vec![known])]).unwrap();
+        let known = crate::db::OsvStatement { cve_id: id.into(), name: name.into(), vulnerable_range: range.map(String::from), fixed_version: None };
+        db.osv_replace_advisories(ecosystem, &[(format!("ADV-{id}-{name}"), vec![known])]).unwrap();
     }
 
     #[test]
@@ -1703,8 +1698,8 @@ mod tests {
             db.upsert_cve(&cve).unwrap();
         };
         let add_package = |id: &str, name: &str, range: &str| {
-            let known = crate::models::AffectedPackage { ecosystem: "Go".into(), name: name.into(), vulnerable_range: Some(range.into()), fixed_version: None };
-            db.batch_add_packages(&[(id.to_string(), vec![known])]).unwrap();
+            let known = crate::db::OsvStatement { cve_id: id.into(), name: name.into(), vulnerable_range: Some(range.into()), fixed_version: None };
+            db.osv_replace_advisories("Go", &[(format!("ADV-{id}-{name}"), vec![known])]).unwrap();
         };
         // The NVD gives an end, the package advisory was left at "every version"
         product("CVE-2026-0001", "amirraminfar", "dozzle", "*", Some("10.5.2"));

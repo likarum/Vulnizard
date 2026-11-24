@@ -11,6 +11,7 @@ mod distro;
 mod inventory;
 mod lifecycle;
 mod mfa;
+mod osv;
 mod platform;
 mod provisioning;
 mod roles;
@@ -23,6 +24,7 @@ pub use distro::*;
 pub use inventory::*;
 pub use lifecycle::*;
 pub use mfa::*;
+pub use osv::*;
 pub use sso::*;
 pub use trail::*;
 pub use setup::SetupClosed;
@@ -610,6 +612,12 @@ impl Database {
             self.migrate_version_unknown()?;
         }
 
+        // Migration v24 -> v25: advisories of package ecosystems kept one by one
+        if schema_version < 25 {
+            tracing::info!("Upgrading database schema to v25 (package advisories kept one by one)");
+            self.migrate_osv_advisories()?;
+        }
+
         // Check if normalized table needs to be populated
         let normalized_count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM affected_products_normalized",
@@ -742,6 +750,7 @@ impl Database {
         self.migrate_trail()?;
         self.migrate_bounds()?;
         self.migrate_version_unknown()?;
+        self.migrate_osv_advisories()?;
 
         tracing::info!("Database initialized successfully");
         Ok(())
@@ -1287,6 +1296,13 @@ impl Database {
         Ok(())
     }
 
+    /// The source was asked and has nothing new: nothing was downloaded. It
+    /// counts as a run for the time to wait before asking again.
+    pub fn unchanged_sync(&self, sync_id: i64) -> Result<()> {
+        self.conn.execute("UPDATE sync_history SET completed_at = datetime('now'), status = 'unchanged' WHERE id = ?1", params![sync_id])?;
+        Ok(())
+    }
+
     /// Forgets a run that turned out to have nothing to do
     pub fn discard_sync(&self, sync_id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM sync_history WHERE id = ?1 AND status = 'running'", params![sync_id])?;
@@ -1297,7 +1313,7 @@ impl Database {
     /// upstream while it was running is then covered by the next one.
     pub fn get_last_sync(&self, source: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         let result: Option<String> = self.conn.query_row(
-            "SELECT started_at FROM sync_history WHERE source = ?1 AND status = 'completed' ORDER BY started_at DESC LIMIT 1",
+            "SELECT started_at FROM sync_history WHERE source = ?1 AND status IN ('completed', 'unchanged') ORDER BY started_at DESC LIMIT 1",
             params![source],
             |row| row.get(0),
         ).optional()?;
@@ -1408,54 +1424,6 @@ impl Database {
         );
 
         Ok(updated)
-    }
-
-    /// Ajoute des packages affectés pour des CVEs existantes (batch optimisé avec transaction)
-    pub fn batch_add_packages(&self, packages: &[(String, Vec<AffectedPackage>)]) -> Result<(i64, i64)> {
-        let mut added = 0i64;
-        let mut skipped = 0i64;
-
-        // Utiliser une transaction pour accélérer les inserts
-        self.conn.execute("BEGIN TRANSACTION", [])?;
-
-        for (cve_id, pkgs) in packages {
-            // Vérifier si la CVE existe (rapide car indexé)
-            let exists: bool = self.conn.query_row(
-                "SELECT 1 FROM cves WHERE cve_id = ?1",
-                params![cve_id],
-                |_| Ok(true),
-            ).unwrap_or(false);
-
-            if !exists {
-                skipped += 1;
-                continue;
-            }
-
-            // The ranges of a package already known are brought up to date:
-            // an advisory is corrected after its publication
-            for pkg in pkgs {
-                self.conn.execute(
-                    r#"
-                    INSERT INTO affected_packages (cve_id, ecosystem, name, vulnerable_range, fixed_version)
-                    VALUES (?1, ?2, ?3, ?4, ?5)
-                    ON CONFLICT(cve_id, ecosystem, name) DO UPDATE SET
-                        vulnerable_range = excluded.vulnerable_range, fixed_version = excluded.fixed_version
-                    "#,
-                    params![
-                        cve_id,
-                        pkg.ecosystem,
-                        pkg.name,
-                        pkg.vulnerable_range,
-                        pkg.fixed_version,
-                    ],
-                )?;
-            }
-            added += 1;
-        }
-
-        self.conn.execute("COMMIT", [])?;
-
-        Ok((added, skipped))
     }
 
     /// Get metadata value by key
@@ -1645,14 +1613,14 @@ mod tests {
     fn test_database_initialization() {
         let (db, _temp_dir) = create_test_db();
 
-        // Check schema version is 24
+        // Check schema version is 25
         let version: String = db.conn.query_row(
             "SELECT value FROM metadata WHERE key = 'schema_version'",
             [],
             |row| row.get(0)
         ).unwrap();
 
-        assert_eq!(version, "24");
+        assert_eq!(version, "25");
     }
 
     #[test]

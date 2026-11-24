@@ -10,41 +10,33 @@ const KEV_URL: &str = "https://www.cisa.gov/sites/default/files/feeds/known_expl
 
 pub struct CisaKevSource {
     client: reqwest::blocking::Client,
+    url: String,
 }
 
 impl CisaKevSource {
     pub fn new() -> Self {
+        Self::at(KEV_URL)
+    }
+
+    /// Reads from another address (the tests)
+    pub(super) fn at(url: &str) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self { client, url: url.to_string() }
     }
 
-    fn fetch_catalog(&self) -> Result<KevCatalog> {
+    /// The catalog, unless it is the one already read
+    fn fetch_catalog(&self, db: &Database, opts: &SyncOptions) -> Result<Option<(KevCatalog, super::Mark)>> {
         tracing::debug!("Fetching CISA KEV catalog");
-
-        let response = self
-            .client
-            .get(KEV_URL)
-            .send()
-            .with_context(|| "Failed to fetch CISA KEV catalog")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "CISA KEV API returned status {}: {}",
-                response.status(),
-                response.text().unwrap_or_default()
-            );
-        }
-
-        let catalog: KevCatalog = response
-            .json()
-            .with_context(|| "Failed to parse CISA KEV response")?;
-
-        Ok(catalog)
+        let Some(download) = super::download_if_changed(&self.client, db, "cisa_kev", &self.url, opts)? else {
+            return Ok(None);
+        };
+        let catalog: KevCatalog = download.response.json().with_context(|| "Failed to parse CISA KEV response")?;
+        Ok(Some((catalog, download.mark)))
     }
 }
 
@@ -63,7 +55,7 @@ impl CveSource for CisaKevSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
-                if hours_since < 6 {
+                if hours_since < super::min_hours("cisa_kev") {
                     println!("━━━ CISA KEV: Skipped (last sync {}h ago) ━━━", hours_since);
                     return Ok(SyncResult::skipped());
                 }
@@ -72,7 +64,10 @@ impl CveSource for CisaKevSource {
 
         println!("━━━ CISA KEV: Fetching catalog... ━━━");
 
-        let catalog = self.fetch_catalog()?;
+        let Some((catalog, mark)) = self.fetch_catalog(db, opts)? else {
+            println!("━━━ CISA KEV: unchanged since the last run ━━━");
+            return Ok(SyncResult::unchanged());
+        };
         let total = catalog.vulnerabilities.len();
 
         let pb = ProgressBar::new(total as u64);
@@ -113,6 +108,7 @@ impl CveSource for CisaKevSource {
 
         pb.finish_with_message(format!("{} KEV entries processed ✓", total));
 
+        mark.remember(db)?;
         Ok(result)
     }
 }

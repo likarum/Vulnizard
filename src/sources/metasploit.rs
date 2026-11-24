@@ -13,37 +13,35 @@ const METASPLOIT_JSON_URL: &str = "https://raw.githubusercontent.com/rapid7/meta
 
 pub struct MetasploitSource {
     client: reqwest::blocking::Client,
+    url: String,
 }
 
 impl MetasploitSource {
     pub fn new() -> Self {
+        Self::at(METASPLOIT_JSON_URL)
+    }
+
+    /// Reads from another address (the tests)
+    pub(super) fn at(url: &str) -> Self {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
-            .user_agent("vulnizard/0.1")
+            .user_agent(super::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self { client, url: url.to_string() }
     }
 
-    fn fetch_modules(&self) -> Result<HashMap<String, String>> {
+    /// The modules, unless the index is the one already read
+    fn fetch_modules(&self, db: &Database, opts: &SyncOptions) -> Result<Option<(HashMap<String, String>, super::Mark)>> {
         tracing::info!("Fetching Metasploit modules metadata...");
+        let Some(download) = super::download_if_changed(&self.client, db, "metasploit", &self.url, opts)? else {
+            return Ok(None);
+        };
+        let mark = download.mark;
 
-        let response = self
-            .client
-            .get(METASPLOIT_JSON_URL)
-            .send()
-            .with_context(|| "Failed to fetch Metasploit modules")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "Metasploit returned status {}: {}",
-                response.status(),
-                response.text().unwrap_or_default()
-            );
-        }
-
-        let modules: HashMap<String, ModuleMetadata> = response
+        let modules: HashMap<String, ModuleMetadata> = download
+            .response
             .json()
             .with_context(|| "Failed to parse Metasploit JSON")?;
 
@@ -69,7 +67,7 @@ impl MetasploitSource {
         }
 
         tracing::info!("Found {} CVEs with Metasploit modules", cve_to_module.len());
-        Ok(cve_to_module)
+        Ok(Some((cve_to_module, mark)))
     }
 }
 
@@ -88,7 +86,7 @@ impl CveSource for MetasploitSource {
         if opts.may_skip_if_fresh() {
             if let Some(last) = opts.last_sync {
                 let hours_since = (Utc::now() - last).num_hours();
-                if hours_since < 24 {
+                if hours_since < super::min_hours("metasploit") {
                     println!("━━━ Metasploit: Skipped (last sync {}h ago) ━━━", hours_since);
                     return Ok(SyncResult::skipped());
                 }
@@ -97,7 +95,10 @@ impl CveSource for MetasploitSource {
 
         println!("━━━ Metasploit: Fetching modules... ━━━");
 
-        let modules = self.fetch_modules()?;
+        let Some((modules, mark)) = self.fetch_modules(db, opts)? else {
+            println!("  unchanged since the last run");
+            return Ok(SyncResult::unchanged());
+        };
         let total = modules.len();
 
         let pb = ProgressBar::new(total as u64);
@@ -121,6 +122,7 @@ impl CveSource for MetasploitSource {
 
         pb.finish_with_message(format!("{} Metasploit modules processed ✓", total));
 
+        mark.remember(db)?;
         Ok(result)
     }
 }

@@ -3,6 +3,67 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## 0.2.6
+
+The sources are asked for much less. With the default settings an instance downloaded about
+800 MB a day; it now downloads a few hundred kilobytes on an ordinary day.
+
+### Changed
+
+- **OSV: only the advisories that changed are fetched.** Each of the five ecosystems was
+  downloaded whole every 12 hours (about 290 MB in all). The whole archives are now read
+  once; after that a run reads the top of the list of changed advisories that OSV publishes
+  and fetches those only (a few to a few hundred small files). The archives are read again
+  once a month, when more than 2,000 advisories changed at once, and on `sync --full`.
+  **The first run after the upgrade reads the archives once** (schema v25, automatic).
+- **A file that did not change is not downloaded again.** KEV, EPSS, Exploit-DB, Metasploit,
+  Nuclei and the Debian advisories send back the fingerprint and the date the server gave
+  last time; a server that still has the same file answers with nothing. This holds for
+  "Sync now" too. Such a run shows as "unchanged upstream, nothing downloaded". After an
+  upgrade each file is read once more, since a release may read it differently.
+- EPSS is asked once a day instead of twice: it is published once a day.
+- **The sources page says how often each source downloads, and what.** It said "enabled
+  sources are synchronized at every cycle", which is only true of the NVD. Each source now
+  shows its delay and what one download fetches, and the page warns that "Sync now" does not
+  wait for that delay.
+- The sources announce the real version (`vulnizard/0.2.6`) instead of `vulnizard/0.1`.
+- **"To review" is now "Vulnerabilities".** The view shows every tracked vulnerability, not
+  only those to review; "To review" remains its default filter. The old address
+  (`view=review`) still works.
+- **"Evolution" is now "History", and going back in time is visible.** The view says that a
+  day of a chart is a link, a day shows as one under the pointer, and a card gives the day
+  shown, with previous and next day, a date field, and, on a past day, a "Past state" mark
+  and a way back to today. The old address (`view=evolution`) still works.
+- **Administration → Users: the actions on the checked users are a toolbar above the list**,
+  greyed out until a user is checked. Without JavaScript they stay usable and the server
+  refuses an action without a selection, as before.
+- Colours of the severity badges and tags were adjusted for contrast (the "medium" badge was
+  white on amber, 2.8:1; it is now 8.3:1), in every theme, by day and by night.
+
+### Added
+
+- **A "+" button adds an application or a subscription from the page.** It sits at the top
+  of the Applications and Subscriptions views and opens the form in place, without
+  JavaScript too. On "All projects" the form asks for the project, among those the user may
+  manage; the right is checked on the server for the project received. An empty list of
+  subscriptions now says what a subscription is and how it differs from a tracked
+  application.
+- **Colour themes and a day/night button**, in the header of every page: Classic, Forest,
+  Plum, Sand and High contrast. The choice is kept by the browser; without one, day or night
+  follows the system. Without JavaScript the page is Classic and follows the system.
+
+### Fixed
+
+- **Withdrawn advisories were still counted.** An advisory that OSV marks as withdrawn kept
+  giving its packages and versions to its CVE. On a real database this removes or corrects
+  about 300 package entries, among them packages wrongly shown as affected in every version.
+- **Packages of another ecosystem were filed under the wrong one.** An advisory that names
+  an npm package and a Maven package was read with the npm archive and both were recorded as
+  npm packages (about 1,500 entries on a real database, some from ecosystems that are not
+  followed at all). Each package is now recorded with its own ecosystem only.
+- An ecosystem of OSV that could not be read no longer passes silently: the run is recorded
+  as failed, names the ecosystem, and the next cycle reads it again from the same point.
+
 ## 0.2.5
 
 ### Changed

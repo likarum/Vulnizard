@@ -298,6 +298,22 @@ pub async fn users(
 
                 (listing.filter_box("Filter: username, email…", accounts.len(), all_accounts.len()))
                 form method="post" action="/admin/users/bulk" {
+                    // Actions on the checked users, right above the list. filter.js greys them out
+                    // while nothing is checked; without it they stay usable and the server refuses
+                    // an empty selection.
+                    div.toolbar data-selection="ids" {
+                        select name="action" aria-label="Action on the selected users" {
+                            option value="assign" { "Give or change a right" }
+                            option value="enable" { "Enable" }
+                            option value="disable" { "Disable" }
+                            option value="grant_admin" { "Make administrator" }
+                            option value="revoke_admin" { "Remove administrator" }
+                        }
+                        (scope_select(&choices, false))
+                        (role_select(true))
+                        button type="submit" { "Apply" }
+                        span.muted.selection-count {}
+                    }
                     table.list {
                         thead {
                             tr {
@@ -330,22 +346,7 @@ pub async fn users(
                             @if accounts.is_empty() { tr { td colspan="8" .muted { "No user matches." } } }
                         }
                     }
-                    div.card {
-                        strong { "For the selected users" }
-                        div.row {
-                            select name="action" {
-                                option value="assign" { "Give or change a right" }
-                                option value="enable" { "Enable" }
-                                option value="disable" { "Disable" }
-                                option value="grant_admin" { "Make administrator" }
-                                option value="revoke_admin" { "Remove administrator" }
-                            }
-                            (scope_select(&choices, false))
-                            (role_select(true))
-                            button type="submit" { "Apply" }
-                        }
-                        p.muted { "The right and the role only apply to “Give or change a right”. Your own account is skipped for status and administrator changes." }
-                    }
+                    p.muted { "The actions above apply to the checked users. The right and the role only apply to “Give or change a right”. Your own account is skipped for status and administrator changes." }
                 }
             },
         ))
@@ -803,7 +804,12 @@ pub async fn sources(
                         span.muted { "This page refreshes by itself." }
                     }
                 }
-                p.muted { "Enabled sources are synchronized at every cycle. A disabled source can still be synchronized on demand." }
+                p.muted {
+                    "A cycle starts " @if config.web.sync_interval_minutes > 0 { "every " (config.web.sync_interval_minutes) " minutes" } @else { "only on demand (no periodic sync)" }
+                    ". A source that downloads a whole file does not do so at every cycle: it waits the time shown below, whatever the interval. "
+                    strong { "Sync now downloads at once, without waiting" } ": not to be used repeatedly on the sources that fetch a whole file. "
+                    "A disabled source can still be synchronized on demand."
+                }
                 table.list {
                     thead { tr { th { "Source" } th { "Provides" } th { "Periodic sync" } th { "Last run (UTC)" } th { "State" } th {} } }
                     tbody {
@@ -823,7 +829,14 @@ pub async fn sources(
                             tr {
                                 td.nowrap { strong { (label) } div.muted { code { (key) } } }
                                 td { (description) }
-                                td { @if enabled { "enabled" } @else { span.muted { "disabled" } } }
+                                td {
+                                    @if enabled { "enabled" } @else { span.muted { "disabled" } }
+                                    @let hours = crate::sources::min_hours(key);
+                                    div.muted {
+                                        @if hours == 0 { "at every cycle" } @else { "at most every " (hours) " h" }
+                                        ": " (crate::sources::fetches(key))
+                                    }
+                                }
                                 td.nowrap { @if let Some(r) = run { (r.started_at) } @else { span.muted { "never" } } }
                                 td {
                                     @if is_running {
@@ -833,6 +846,8 @@ pub async fn sources(
                                     } @else if let Some(r) = run {
                                         @if r.status == "completed" {
                                             span.status { span.dot {} (r.added) " added, " (r.updated) " updated" }
+                                        } @else if r.status == "unchanged" {
+                                            span.status { span.dot {} "unchanged upstream, nothing downloaded" }
                                         } @else {
                                             span.status { span.dot.never {} span.error { "failed" } }
                                             @if let Some(e) = &r.error { div.muted { (views::truncate(e, 160)) } }

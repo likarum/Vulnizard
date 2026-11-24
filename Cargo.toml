@@ -1,6 +1,6 @@
 [package]
 name = "vulnizard"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 default-run = "vulnizard"
 description = "Lightweight Vulnerability Intelligence Platform"

@@ -24,7 +24,7 @@ pub fn send(config: &Config, db: &Database, d: &Dispatch) -> Result<()> {
         "email" => send_email(config, n, &format!("[Vulnizard] {}", title_of(d)), &text_summary(config, d)),
         "browser" => {
             // Every member who can read the project, on each of their subscribed browsers
-            let url = format!("/product/{}/{}?view=evolution", d.org, d.project);
+            let url = format!("/product/{}/{}?view=history", d.org, d.project);
             for user_id in db.users_with_project_access(d.project_id)? {
                 crate::push::deliver(db, config, user_id, &title_of(d), &browser_summary(d), &url)?;
             }
