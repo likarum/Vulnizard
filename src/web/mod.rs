@@ -1859,6 +1859,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_destination_tells_who_it_is_offered_to_and_who_uses_it() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        for project in ["infra", "web"] {
+            app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
+        }
+        for form in [
+            "owner=instance&kind=browser&name=Everyone",
+            "owner=organization%3Aacme&kind=browser&name=Team",
+            "owner=project%3Aacme%2Finfra&kind=browser&name=Solo",
+        ] {
+            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
+        }
+        let list = "/admin/notifications?tab=destinations";
+        let row = |page: &str, name: &str| page.split("<tr>").find(|r| r.contains(&format!("<td>{name}</td>"))).unwrap().to_string();
+        // A first project exists besides those of acme: with several organizations, each is named with its own
+        let link = |project: &str| format!("<a href=\"/product/acme/{project}?view=settings\">acme / {project}</a>");
+
+        // Nobody picked anything: each row says who may use the destination, that it sends nothing,
+        // and where to switch it on
+        let page = app.get(list, Some(&admin)).await.body;
+        assert!(page.contains("Offered to<span") && page.contains(">Used by</a>"));
+        let everyone = row(&page, "Everyone");
+        assert!(everyone.contains("<td>all projects</td>"), "{everyone}");
+        assert!(everyone.contains("no project yet<div class=\"muted\">It sends nothing until a project picks it, in its notification settings: "), "{everyone}");
+        assert!(everyone.contains(&format!("{}, {}", link("infra"), link("web"))), "{everyone}");
+        let team = row(&page, "Team");
+        assert!(team.contains("<td>projects of organization acme</td>") && team.contains(&link("infra")) && team.contains(&link("web")), "{team}");
+        let solo = row(&page, "Solo");
+        assert!(solo.contains("<td>project acme / infra only</td>") && solo.contains(&link("infra")) && !solo.contains(&link("web")), "{solo}");
+        // The two facts are no longer one sentence
+        assert!(!page.contains("available to all") && !page.contains(" of 2 projects") && !page.contains("of 3 projects"));
+
+        // The link leads to the settings where a project picks the destination
+        let settings = app.get("/product/acme/web?view=settings", Some(&admin)).await.body;
+        assert!(settings.contains("Notify a destination") && settings.contains("Everyone"));
+        let db = Database::connect(&app.db_path).unwrap();
+        let everyone_id = db.list_all_destinations().unwrap().into_iter().find(|d| d.name == "Everyone").unwrap().id;
+        let pick = format!("destination_id={everyone_id}");
+        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &pick).await.status, StatusCode::SEE_OTHER);
+
+        // Picked by one project: that project is named, the others it is offered to are not
+        let page = app.get(list, Some(&admin)).await.body;
+        let everyone = row(&page, "Everyone");
+        assert!(everyone.contains(&format!("<td>all projects</td><td>{}</td>", link("web"))), "{everyone}");
+        assert!(!everyone.contains("no project yet") && !everyone.contains(&link("infra")), "{everyone}");
+        assert!(row(&page, "Team").contains("no project yet"));
+
+        // A long list of projects is cut; a destination that gets instance events is not said to send nothing
+        app.post("/orgs", Some(&admin), "name=beta").await;
+        for project in ["edge", "lab"] {
+            app.post("/projects", Some(&admin), &format!("org=beta&name={project}")).await;
+        }
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Later&system_events=1").await;
+        let page = app.get(list, Some(&admin)).await.body;
+        let later = row(&page, "Later");
+        assert!(later.contains("It only sends instance events until a project picks it"), "{later}");
+        assert!(later.contains(&format!("{}, {}, ", link("infra"), link("web"))) && later.contains("</a> and 2 more."), "{later}");
+        assert_eq!(later.matches("view=settings").count(), 3, "{later}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn browser_notifications_are_per_user() {
         let app = app(open_registration());
         let alice = app.register("alice").await;
@@ -1912,9 +1975,9 @@ mod tests {
         let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
         let flash = tested.cookie.unwrap();
         assert!(flash.contains("failed") && flash.contains("none%20of%20your%20browsers"), "{flash}");
-        // The list tells how many projects a shared destination serves
+        // The list tells that a destination nobody picked sends nothing
         let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
-        assert!(listed.contains("available to all") && listed.contains("0 of 1 project"));
+        assert!(listed.contains("<td>all projects</td>") && listed.contains("It sends nothing until a project picks it"));
 
         // The inbox is read once, by its owner only; signed out, nothing answers
         db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();

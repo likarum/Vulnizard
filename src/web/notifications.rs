@@ -566,6 +566,21 @@ fn admin_rules(db: &Database) -> Result<Markup, AppError> {
     })
 }
 
+/// (organization, project)
+type ProjectRef<'a> = (&'a str, &'a str);
+
+/// Projects as links to their notification settings: the first `max`, then how many are left
+fn project_links(projects: &[ProjectRef], with_org: bool, max: usize) -> Markup {
+    let more = projects.len().saturating_sub(max);
+    html! {
+        @for (i, (org, project)) in projects.iter().take(max).enumerate() {
+            @if i > 0 { ", " }
+            a href=(product_url(Some((org, project)), "settings")) { @if with_org { (org) " / " } (project) }
+        }
+        @if more > 0 { " and " (more) " more" }
+    }
+}
+
 /// Tab: every destination, whatever it belongs to
 fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) -> Result<Markup, AppError> {
     let mut all = db.list_all_destinations()?;
@@ -584,16 +599,15 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
     );
     let new_kind = new_kind.filter(|k| DESTINATION_KINDS.iter().any(|(kind, _)| kind == k));
     let base = "/admin/notifications?tab=destinations";
-    // Organization of every project, to tell how many projects a shared destination is offered to
-    let projects: Vec<Option<i64>> = {
-        let mut stmt = db.conn().prepare("SELECT organization_id FROM projects")?;
-        let rows = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
+    // Who a destination is offered to, and who really uses it, are two facts:
+    // the projects of its scope on one side, those with a rule for it on the other
+    let projects = db.list_all_projects()?;
+    let rules = db.list_all_notifications()?;
+    let several_orgs = projects.iter().any(|p| p.org != projects[0].org);
     Ok(html! {
         p.muted {
-            "Every destination. Each belongs to the instance, an organization or a single project, which decides who can use it. "
-            "A project is notified through a destination once it has a rule for it (its Settings). "
+            "Every destination. Each belongs to the instance, an organization or a single project, which decides the projects it is offered to. "
+            "Being offered is not being used: a destination sends for a project once that project picks it in its notification settings. "
             "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
         }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
@@ -601,7 +615,7 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
             thead {
                 tr {
                     (listing.th("name", "Name")) (listing.th("type", "Type")) th { "Target" }
-                    (listing.th("owner", "Belongs to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
+                    (listing.th("owner", "Offered to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
                 }
             }
             tbody {
@@ -612,20 +626,35 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
                         td { (views::truncate(&d.target(), 50)) }
                         td {
                             @match d.scope.as_str() {
-                                "instance" => { "whole instance" }
-                                "organization" => { "organization " (d.scope_label) }
-                                _ => { "project " (d.scope_label) }
+                                "instance" => { "all projects" }
+                                "organization" => { "projects of organization " (d.scope_label) }
+                                _ => { "project " (d.scope_label) " only" }
                             }
                         }
                         td {
-                            // A shared destination is offered to every project of its scope; a rule makes a project use it
-                            @match d.scope.as_str() {
-                                "instance" => { (d.rules) " of " (projects.len()) " project" @if projects.len() != 1 { "s" } div.muted { "available to all" } }
-                                "organization" => {
-                                    @let within = projects.iter().filter(|org| **org == d.scope_id).count();
-                                    (d.rules) " of " (within) " project" @if within != 1 { "s" } div.muted { "available to its organization" }
+                            @let users: Vec<ProjectRef> = rules.iter()
+                                .filter(|r| r.notification.destination_id == d.id)
+                                .map(|r| (r.org.as_str(), r.project.as_str()))
+                                .collect();
+                            @if users.is_empty() {
+                                // Offered but not picked: nothing leaves through it, and the page says where to pick it
+                                @let offered: Vec<ProjectRef> = projects.iter()
+                                    .filter(|p| match d.scope.as_str() {
+                                        "instance" => true,
+                                        "organization" => p.org == d.scope_label,
+                                        _ => Some(p.id) == d.scope_id,
+                                    })
+                                    .map(|p| (p.org.as_str(), p.name.as_str()))
+                                    .collect();
+                                "no project yet"
+                                div.muted {
+                                    @if d.system_events { "It only sends instance events" } @else { "It sends nothing" }
+                                    " until a project picks it"
+                                    @if !offered.is_empty() { ", in its notification settings: " (project_links(&offered, several_orgs, 3)) }
+                                    "."
                                 }
-                                _ => { @if d.rules > 0 { "its project" } @else { span.muted { "not used yet" } } }
+                            } @else {
+                                (project_links(&users, several_orgs, 8))
                             }
                         }
                         td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
