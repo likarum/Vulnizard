@@ -57,6 +57,15 @@ The sources are asked for much less. With the default settings an instance downl
 - **Sources page: how often a source downloads and what** is in a bubble opened by a small
   "i" (pointer, keyboard, touch) instead of a paragraph under "enabled" (#94).
 
+### Removed
+
+- **Browser notifications (Web Push) are removed** (#101): the destination type, the
+  "Browser notifications" box of the settings, the service worker and the `web.push_contact`
+  option (ignored if still set). **At the upgrade the destinations of that type are deleted**
+  with the registered browsers (schema v28, automatic, no way back without a backup).
+  E-mail, ntfy, Slack and webhook destinations are unchanged. Whoever starts a manual sync
+  is no longer told personally when it ends; destinations that receive instance events are.
+
 ### Added
 
 - **An organization menu in the "My products" bar** (#97), for an account that sees
@@ -99,13 +108,8 @@ The sources are asked for much less. With the default settings an instance downl
 - **The vulnerabilities list was wider than the window** (#90): at 1280 px on "All projects"
   the page was 1463 px wide and the action buttons were cut. Both lists (to review, decided)
   now fit any width; long names wrap or are cut with the full text under the pointer.
-- **"Used by: 0 of 3 projects available to all"** (#87). A destination now says apart who it
-  is offered to and which projects use it, each a link to its notification settings, and
-  says plainly that it sends nothing until a project picks it.
-- **"Send test" on a browser destination failed when no browser was registered** (#86) and
-  sent the user to the settings. The page now offers to enable notifications on the spot,
-  then sends the test. The message only remains when the permission is refused or the
-  browser cannot receive notifications.
+- **"Used by: 0 of 3 projects available to all"** (#87) is gone: the list of destinations
+  says what each one covers and what it sends.
 - **Other lists were wider than the window between 760 and 1200 px** (#93): applications,
   history, audit, project settings, CVE list, and most administration pages. No page scrolls
   sideways any more. Eight lists with many columns (history, audit, recent syncs, users,
@@ -113,10 +117,14 @@ The sources are asked for much less. With the default settings an instance downl
   inside their own box below about 1000 px. Columns now have set widths, so tables look
   somewhat different on wide screens too.
 - Action buttons of a list are aligned to the right, as the pages always asked.
-- **After an upgrade a page could run with the scripts of the release before** for an hour
-  (#98). Scripts and the stylesheet are now checked at each use. A browser subscribed to
-  notifications that the server no longer knew stayed shown as enabled and never received
-  anything: it is registered again at each visit of the settings.
+- **After an upgrade a page could run with the scripts of the release before** for an hour.
+  Scripts and the stylesheet are now checked at each use.
+- **"database is locked" and an error 500 during a synchronization** (#99). An operation
+  that read and then wrote was refused at once when the synchronization had written in
+  between. Such operations now wait their turn.
+- MCP `get_audit_log` without a filter returned the accepted risks only, which looked like
+  an empty log (#100). It returns every decision; `decision: accepted` keeps the former
+  answer.
 
 ## 0.2.5
 

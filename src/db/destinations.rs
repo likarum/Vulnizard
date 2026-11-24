@@ -180,7 +180,7 @@ fn destination_row(db: &Database, r: &rusqlite::Row) -> rusqlite::Result<Destina
 
 impl Database {
     pub(super) fn migrate_destinations(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(DESTINATIONS_SCHEMA)?;
         tx.commit()?;
         Ok(())
@@ -194,7 +194,7 @@ impl Database {
     /// rule used sends nothing. The rules are gone.
     pub(super) fn migrate_destination_settings(&self) -> Result<()> {
         let all = serde_json::to_string(&all_events())?;
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(
             "ALTER TABLE destinations ADD COLUMN events TEXT NOT NULL DEFAULT '[]';
              ALTER TABLE destinations ADD COLUMN min_cvss REAL;
@@ -227,7 +227,7 @@ impl Database {
     /// waiting for them and the key that signed the requests to the push
     /// services; the table is rebuilt so that the kind can no longer be stored.
     pub(super) fn migrate_remove_browser_notifications(&self) -> Result<()> {
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         tx.execute_batch(
             "DELETE FROM destinations WHERE kind = 'browser';
              DROP TABLE IF EXISTS push_inbox;
@@ -414,7 +414,7 @@ impl Database {
             "email" => serde_json::json!({ "to": target }),
             _ => serde_json::json!({ "url": target }),
         };
-        let tx = self.conn().unchecked_transaction()?;
+        let tx = self.write_tx()?;
         let destination = self.create_destination("project", Some(project_id), name, kind, &config, false)?;
         let events = if events.is_empty() { all_events() } else { events.to_vec() };
         self.update_destination_settings(destination, &events, min_cvss, true, None)?;
