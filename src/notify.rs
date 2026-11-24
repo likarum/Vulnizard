@@ -11,7 +11,7 @@ use crate::db::{ChangeRow, Database, Dispatch, Notification};
 /// Maximum number of changes detailed in a Slack/email message
 const MAX_LISTED: usize = 30;
 
-/// Sends a batch of changes through the destination of its rule
+/// Sends a batch of changes of a project through one destination covering it
 pub fn send(config: &Config, db: &Database, d: &Dispatch) -> Result<()> {
     let n = &d.notification;
     match n.kind.as_str() {
@@ -35,7 +35,7 @@ pub fn send(config: &Config, db: &Database, d: &Dispatch) -> Result<()> {
 }
 
 /// Sends a project event that is not a CVE change (a new probable service…)
-/// through the rules of the project that want this kind of event. `view` is
+/// through the destinations covering the project that send this kind of event. `view` is
 /// the project view the message points to.
 pub fn project_event(
     config: &Config,
@@ -54,7 +54,7 @@ pub fn project_event(
     )?;
     let title = format!("{org}/{project}: {title}");
     for n in db.list_notifications(project_id)? {
-        if !n.enabled || !(n.events.is_empty() || n.events.iter().any(|e| e == kind)) {
+        if !n.enabled || !n.events.iter().any(|e| e == kind) {
             continue;
         }
         let sent = match n.kind.as_str() {
@@ -84,17 +84,7 @@ pub fn project_event(
 
 /// Sends an instance event (sync finished…) to a destination
 pub fn send_system(config: &Config, destination: &crate::db::Destination, title: &str, body: &str) -> Result<()> {
-    let n = Notification {
-        id: 0,
-        name: destination.name.clone(),
-        kind: destination.kind.clone(),
-        target: destination.target(),
-        events: Vec::new(),
-        min_cvss: None,
-        enabled: true,
-        destination_id: destination.id,
-        config: destination.config.clone(),
-    };
+    let n = destination.notification();
     match n.kind.as_str() {
         "webhook" => post_json(config, url_of(&n)?, &json!({ "event": "system", "title": title, "message": body })),
         "slack" => post_json(config, url_of(&n)?, &json!({ "text": format!("{title}\n{body}") })),

@@ -47,8 +47,11 @@ database was last synchronized (administrators can start a sync from there):
     date field. A past state is marked as such, with a link back to today
   - *Audit*: who decided what, when and why — accepted risks first
   - *Settings* (per project): the project's own notification **destinations** (email with its own
-    SMTP server, ntfy, Slack, webhook, browser) and the **rules** saying which destination is told
-    about which events, from which CVSS; members with a right on the project only
+    SMTP server, ntfy, Slack, webhook, browser) in one table: a row per destination, a checkbox
+    per event type, a minimum CVSS, saved together. A new destination starts with every event
+    checked; one with no event checked sends nothing. Destinations of the organization or of the
+    instance also receive the project's notifications: they are managed by their administrators
+    and are not shown here. Members with a right on the project only
 - **CVE database** — reference information: CVEs (keyword, CVE-ID, vendor, product, CVSS, CWE,
   KEV, personal tags) with their change history, vendors & products, weaknesses
 - **Background scheduler**: periodic incremental sync, then reports, watchlist rescan and

@@ -1,6 +1,6 @@
-//! Notifications in the UI: destinations (where messages go) and rules
-//! (which project sends what to which destination), in the project settings
-//! and in the administration; browser notifications (Web Push).
+//! Notifications in the UI: destinations (where messages go, and what each
+//! one sends), in the project settings for those of the project and in the
+//! administration for all of them; browser notifications (Web Push).
 
 use axum::extract::{Form, Path, Query, State};
 use axum::http::header;
@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 use super::admin::{admin_tabs, flash_redirect, require_admin, take_flash, with_flash_cleared};
 use super::pages::{load_project, redirect, require, ActionResult, HtmlResult};
 use super::views::{self, enc, layout, product_url, Nav};
-use super::{blocking, AppError, AppState, MaybeUser, St, User};
+use super::{blocking, AppError, MaybeUser, St, User};
 use crate::changes::EVENT_TYPES;
 use crate::config::Config;
-use crate::db::{Database, Destination, Notification, Org, OrgProject, DESTINATION_KINDS};
+use crate::db::{Database, Destination, Org, OrgProject, DESTINATION_KINDS};
 use crate::notify;
 use crate::rbac::Permission;
 
@@ -163,13 +163,30 @@ fn destination_name(fields: &Fields) -> Result<&str, AppError> {
     Ok(name)
 }
 
-fn events_and_cvss(fields: &Fields) -> Result<(Vec<String>, Option<f64>), AppError> {
-    let events: Vec<String> = fields
+/// Name of an event type in a column header or a summary
+fn event_short(kind: &str) -> &'static str {
+    match kind {
+        "created" => "New CVE",
+        "description" => "Description",
+        "metrics" => "CVSS",
+        "vendors" => "Vendors/products",
+        "references" => "References",
+        "weaknesses" => "Weaknesses",
+        "kev" => "CISA KEV",
+        "service" => "New service",
+        _ => "Other",
+    }
+}
+
+/// What a form says a destination sends: the event types checked under
+/// `events` and the minimum CVSS under `min_cvss` (the names of the fields)
+fn events_and_cvss(fields: &Fields, events: &str, min_cvss: &str) -> Result<(Vec<String>, Option<f64>), AppError> {
+    let checked: Vec<String> = EVENT_TYPES
         .iter()
-        .filter(|(k, v)| k == "events" && EVENT_TYPES.iter().any(|(kind, _)| kind == v))
-        .map(|(_, v)| v.clone())
+        .filter(|(kind, _)| fields.iter().any(|(k, v)| k == events && v == kind))
+        .map(|(kind, _)| kind.to_string())
         .collect();
-    let min_cvss = match field(fields, "min_cvss") {
+    let min_cvss = match field(fields, min_cvss) {
         "" => None,
         raw => Some(
             raw.parse::<f64>()
@@ -178,18 +195,53 @@ fn events_and_cvss(fields: &Fields) -> Result<(Vec<String>, Option<f64>), AppErr
                 .ok_or_else(|| AppError::Bad("Minimum CVSS must be between 0 and 10.".into()))?,
         ),
     };
-    Ok((events, min_cvss))
+    Ok((checked, min_cvss))
 }
 
-fn rule_filters() -> Markup {
+fn cvss_value(min_cvss: Option<f64>) -> String {
+    min_cvss.map(|m| format!("{m:.1}")).unwrap_or_default()
+}
+
+/// The event types a destination sends, in words
+fn events_summary(events: &[String]) -> String {
+    let known: Vec<&str> = EVENT_TYPES.iter().filter(|(kind, _)| events.iter().any(|e| e == kind)).map(|(kind, _)| *kind).collect();
+    if known.len() == EVENT_TYPES.len() {
+        "every event".to_string()
+    } else if known.is_empty() {
+        "no event".to_string()
+    } else {
+        known.iter().map(|kind| event_short(kind)).collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// What a destination covers: the projects whose notifications it receives
+fn covers(d: &Destination) -> Markup {
     html! {
-        fieldset {
-            legend { "Events (none checked = all)" }
-            @for (kind, label) in EVENT_TYPES {
-                label { input type="checkbox" name="events" value=(kind); " " (label) }
+        @match d.scope.as_str() {
+            "instance" => { "all projects" }
+            "organization" => { "projects of organization " (d.scope_label) }
+            _ => { "project " (d.scope_label) }
+        }
+    }
+}
+
+/// What a destination sends, as it is set on it
+fn sends(d: &Destination) -> Markup {
+    let silent = d.events.is_empty() && !d.system_events;
+    html! {
+        @if !d.enabled {
+            span.muted { "nothing: disabled" }
+        } @else if silent {
+            span.muted { "nothing: no event checked" }
+        } @else {
+            @if !d.events.is_empty() {
+                (events_summary(&d.events))
+                @if let Some(m) = d.min_cvss.filter(|m| *m > 0.0) { ", CVSS " (format!("{m:.1}")) " and above" }
+            }
+            @if d.system_events {
+                div.muted { @if d.events.is_empty() { "only instance events (sync finished)" } @else { "and instance events (sync finished)" } }
             }
         }
-        label { "Minimum CVSS (optional)" input type="number" name="min_cvss" min="0" max="10" step="0.1"; }
     }
 }
 
@@ -197,8 +249,11 @@ fn rule_filters() -> Markup {
 // Project settings
 // ==========================================
 
-/// Notification part of the project settings: its rules, the destinations it
-/// can use, and its own destinations. `new_kind` shows the creation form.
+/// Notification part of the project settings: one table of the destinations
+/// belonging to the project, with what each one sends, editable in place.
+/// Destinations of the organization and of the instance are not listed: they
+/// are not managed here, and their names and targets belong to whoever
+/// manages them. `new_kind` shows the creation form.
 pub fn project_section(
     db: &Database,
     _config: &Config,
@@ -206,102 +261,84 @@ pub fn project_section(
     project: &OrgProject,
     new_kind: Option<&str>,
 ) -> Result<Markup, AppError> {
-    let rules = db.list_notifications(project.id)?;
     let destinations = db.list_project_destinations(project.id)?;
     let manage = org.can(Permission::ManageProjects);
     let base = format!("/orgs/{}/projects/{}", enc(&org.name), enc(&project.name));
     let settings_url = product_url(Some((&org.name, &project.name)), "settings");
-    let unused: Vec<&Destination> = destinations.iter().filter(|d| !rules.iter().any(|r| r.destination_id == d.id)).collect();
     let new_kind = new_kind.filter(|k| DESTINATION_KINDS.iter().any(|(kind, _)| kind == k));
+    let columns = format!("- check{} flag act", " check".repeat(EVENT_TYPES.len()));
 
     Ok(html! {
         h2 { "Notifications" }
-        p.muted { "Sent after each sync when a CVE of a subscribed vendor or product changes." }
-        table.list.fit {
-            (views::columns("- kind - flag flag flag actions", true))
-            thead { tr { th { "Destination" } th { "Type" } th { "Target" } th { "Events" } th { "Min CVSS" } th { "Status" } th {} } }
-            tbody {
-                @for n in &rules {
+        p.muted {
+            "Sent after each sync when a CVE of a subscribed vendor or product changes. "
+            "One row per destination of this project: check the events it is told about. "
+            "A destination with no event checked sends nothing for this project."
+        }
+        form method="post" action={ (base) "/notifications" } {
+            table.list.fit.events {
+                (views::columns(&columns, true))
+                thead {
                     tr {
-                        td { (n.name) }
-                        td { (kind_label(&n.kind)) }
-                        td {
-                            // A webhook URL or a topic is a secret of whoever manages the destination
-                            @if manage && destinations.iter().any(|d| d.id == n.destination_id && d.scope == "project") {
-                                (views::truncate(&n.target, 60))
-                            } @else { span.muted { "managed elsewhere" } }
-                        }
-                        td { @if n.events.is_empty() { "all" } @else { (n.events.join(", ")) } }
-                        td { @if let Some(m) = n.min_cvss { (format!("{m:.1}")) } @else { "—" } }
-                        td { @if n.enabled { "enabled" } @else { span.muted { "disabled" } } }
-                        td.right.actions {
-                            @if manage {
-                                form.inline method="post" action={ (base) "/notifications/" (n.id) "/toggle" } {
-                                    button.small.secondary type="submit" { @if n.enabled { "Disable" } @else { "Enable" } }
+                        th { "Destination" }
+                        th.up title="Enabled: unchecked, the destination sends nothing" { span { "Enabled" } }
+                        @for (kind, label) in EVENT_TYPES { th.up title=(label) { span { (event_short(kind)) } } }
+                        th { "Min CVSS" }
+                        th {}
+                    }
+                }
+                tbody {
+                    @for d in &destinations {
+                        tr {
+                            td {
+                                (d.name)
+                                div.muted {
+                                    (kind_label(&d.kind))
+                                    // A webhook URL or a topic is a secret of whoever manages the destination
+                                    @if manage && d.kind != "browser" { " · " (views::truncate(&d.target(), 60)) }
                                 }
-                                " "
-                                form.inline method="post" action={ (base) "/notifications/" (n.id) "/delete" } {
-                                    button.small.danger type="submit" { "Stop" }
+                                @if manage { input type="hidden" name="id" value=(d.id); }
+                            }
+                            td.tick data-label="Enabled" {
+                                input type="checkbox" name={ "enabled_" (d.id) } value="1" checked[d.enabled] disabled[!manage]
+                                    aria-label={ "Enabled: " (d.name) };
+                            }
+                            @for (kind, label) in EVENT_TYPES {
+                                td.tick data-label=(event_short(kind)) {
+                                    input type="checkbox" name={ "events_" (d.id) } value=(kind)
+                                        checked[d.events.iter().any(|e| e == kind)] disabled[!manage]
+                                        aria-label={ (label) ": " (d.name) };
+                                }
+                            }
+                            td data-label="Min CVSS" {
+                                input type="number" name={ "min_cvss_" (d.id) } min="0" max="10" step="0.1"
+                                    value=(cvss_value(d.min_cvss)) disabled[!manage] aria-label={ "Minimum CVSS: " (d.name) };
+                            }
+                            td.right.actions {
+                                @if manage {
+                                    // Its form is outside the table one: Enter in a field saves, it never deletes
+                                    button.small.danger type="submit" form={ "delete-destination-" (d.id) } { "Delete" }
                                 }
                             }
                         }
                     }
+                    @if destinations.is_empty() {
+                        tr { td colspan=(EVENT_TYPES.len() + 4) .muted { "This project has no destination of its own yet." } }
+                    }
                 }
-                @if rules.is_empty() { tr { td colspan="7" .muted { "This project does not notify anyone yet." } } }
+            }
+            @if manage && !destinations.is_empty() {
+                p { button type="submit" { "Save notifications" } }
             }
         }
-        @if manage && !unused.is_empty() {
-            form.stack.card method="post" action={ (base) "/notifications" } {
-                strong { "Notify a destination" }
-                label {
-                    "Destination"
-                    select name="destination_id" {
-                        @for d in &unused {
-                            option value=(d.id) {
-                                (d.name) " — " (kind_label(&d.kind))
-                                @match d.scope.as_str() {
-                                    "project" => {}
-                                    "organization" => { " (organization)" }
-                                    _ => { " (instance)" }
-                                }
-                            }
-                        }
-                    }
-                }
-                (rule_filters())
-                button type="submit" { "Start notifying" }
+        @if manage {
+            @for d in &destinations {
+                form id={ "delete-destination-" (d.id) } method="post" action={ (base) "/destinations/" (d.id) "/delete" } {}
             }
         }
-
-        h2 { "Destinations of this project" }
-        p.muted { "Where this project's messages can go. A destination created here is only usable by this project." }
-        table.list.fit {
-            (views::columns("name kind - who act", true))
-            thead { tr { th { "Name" } th { "Type" } th { "Target" } th { "Belongs to" } th {} } }
-            tbody {
-                @for d in &destinations {
-                    tr {
-                        td { (d.name) }
-                        td { (kind_label(&d.kind)) }
-                        td { @if manage && d.scope == "project" { (views::truncate(&d.target(), 60)) } @else { span.muted { "managed elsewhere" } } }
-                        td {
-                            @match d.scope.as_str() {
-                                "project" => { "this project" }
-                                "organization" => { span.muted { "organization " (org.name) } }
-                                _ => { span.muted { "whole instance" } }
-                            }
-                        }
-                        td.right {
-                            @if manage && d.scope == "project" {
-                                form.inline method="post" action={ (base) "/destinations/" (d.id) "/delete" } {
-                                    button.small.danger type="submit" { "Delete" }
-                                }
-                            }
-                        }
-                    }
-                }
-                @if destinations.is_empty() { tr { td colspan="5" .muted { "No destination yet." } } }
-            }
+        p.muted {
+            "Destinations of the organization or of the whole instance, if there are any, also receive the notifications of this project. "
+            "They are managed by their administrators, not here."
         }
         @if manage {
             @match new_kind {
@@ -310,7 +347,7 @@ pub fn project_section(
                     (kind_chips(&settings_url, Some(kind)))
                     form.stack.card method="post" action={ (base) "/destinations" } {
                         (destination_fields(kind, false))
-                        label.check { input type="checkbox" name="notify" value="1" checked; " Start notifying this project through it" }
+                        p.muted { "It starts with every event checked: uncheck in the table what it should not send." }
                         div.row {
                             button type="submit" { "Add destination" }
                             " " a href=(settings_url) { "Cancel" }
@@ -326,7 +363,8 @@ pub fn project_section(
     })
 }
 
-/// Creates a destination belonging to the project
+/// Creates a destination belonging to the project. It sends every event
+/// until the table says otherwise.
 pub async fn project_destination_create(
     State(st): St,
     User(user): User,
@@ -341,12 +379,8 @@ pub async fn project_destination_create(
         let kind = field(&fields, "kind");
         let name = destination_name(&fields)?;
         let settings = destination_config(&config, kind, &fields, false)?;
-        let id = db
-            .create_destination("project", Some(project.id), name, kind, &settings, false)
+        db.create_destination("project", Some(project.id), name, kind, &settings, false)
             .map_err(AppError::bad)?;
-        if !field(&fields, "notify").is_empty() {
-            db.create_rule(project.id, id, &[], None).map_err(AppError::bad)?;
-        }
         Ok(redirect(product_url(Some((&org.name, &project.name)), "settings")))
     })
 }
@@ -372,9 +406,11 @@ pub async fn project_destination_delete(
     })
 }
 
-/// Starts notifying a destination: an existing one (`destination_id`), or a
-/// new destination of the project given inline (`kind` + its fields).
-pub async fn rule_create(
+/// Saves the table of the project settings: for each destination of the
+/// project named by an `id` field, the events checked (`events_<id>`), the
+/// minimum CVSS (`min_cvss_<id>`) and whether it is enabled (`enabled_<id>`).
+/// A destination that is not one of this project is refused, whatever it is.
+pub async fn project_notifications_save(
     State(st): St,
     User(user): User,
     Path((org, project)): Path<(String, String)>,
@@ -384,51 +420,22 @@ pub async fn rule_create(
         let db = st.db()?;
         let (org, project) = load_project(&db, &user, &org, &project)?;
         require(&org, Permission::ManageProjects)?;
-        let (events, min_cvss) = events_and_cvss(&fields)?;
-        let destination_id = match field(&fields, "destination_id") {
-            "" => {
-                let config = st.effective_config(&db)?;
-                let kind = field(&fields, "kind");
-                // Inline form: `target` holds the URL or the address
-                let mut inline = fields.clone();
-                let target = field(&fields, "target").to_string();
-                inline.push(("url".into(), target.clone()));
-                inline.push(("to".into(), target));
-                let settings = destination_config(&config, kind, &inline, false)?;
-                db.create_destination("project", Some(project.id), destination_name(&fields)?, kind, &settings, false)
-                    .map_err(AppError::bad)?
+        let own = db.list_project_destinations(project.id)?;
+        // Everything is checked before anything is written
+        let mut changes = Vec::new();
+        for (_, raw) in fields.iter().filter(|(k, _)| k == "id") {
+            let id: i64 = raw.trim().parse().map_err(|_| AppError::NotFound)?;
+            if !own.iter().any(|d| d.id == id) {
+                return Err(AppError::NotFound);
             }
-            raw => raw.parse().map_err(|_| AppError::Bad("Invalid destination.".into()))?,
-        };
-        db.create_rule(project.id, destination_id, &events, min_cvss)
-            .map_err(AppError::bad)?;
+            let (events, min_cvss) = events_and_cvss(&fields, &format!("events_{id}"), &format!("min_cvss_{id}"))?;
+            changes.push((id, events, min_cvss, !field(&fields, &format!("enabled_{id}")).is_empty()));
+        }
+        for (id, events, min_cvss, enabled) in changes {
+            db.update_destination_settings(id, &events, min_cvss, enabled, None)?;
+        }
         Ok(redirect(product_url(Some((&org.name, &project.name)), "settings")))
     })
-}
-
-#[derive(Clone, Copy)]
-enum RuleAction {
-    Delete,
-    Toggle,
-}
-
-fn rule_action(st: &AppState, user: &crate::db::Account, (org, project, id): (String, String, i64), action: RuleAction) -> ActionResult {
-    let db = st.db()?;
-    let (org, project) = load_project(&db, user, &org, &project)?;
-    require(&org, Permission::ManageProjects)?;
-    match action {
-        RuleAction::Delete => db.delete_notification(project.id, id)?,
-        RuleAction::Toggle => db.toggle_notification(project.id, id)?,
-    }
-    Ok(redirect(product_url(Some((&org.name, &project.name)), "settings")))
-}
-
-pub async fn rule_delete(State(st): St, User(user): User, Path(path): Path<(String, String, i64)>) -> ActionResult {
-    blocking(|| rule_action(&st, &user, path, RuleAction::Delete))
-}
-
-pub async fn rule_toggle(State(st): St, User(user): User, Path(path): Path<(String, String, i64)>) -> ActionResult {
-    blocking(|| rule_action(&st, &user, path, RuleAction::Toggle))
 }
 
 // ==========================================
@@ -447,9 +454,9 @@ pub struct AdminQuery {
 
 /// Choices of the "belongs to" selector of an instance or organization destination
 fn owner_choices(db: &Database) -> Result<Vec<(String, String)>, AppError> {
-    let mut choices = vec![("instance".to_string(), "Whole instance (usable by every project)".to_string())];
+    let mut choices = vec![("instance".to_string(), "Whole instance (receives the notifications of every project)".to_string())];
     for (_, org) in db.list_all_orgs()? {
-        choices.push((format!("organization:{org}"), format!("Organization {org} (usable by its projects)")));
+        choices.push((format!("organization:{org}"), format!("Organization {org} (receives those of its projects)")));
     }
     for p in db.list_all_projects()? {
         choices.push((format!("project:{}/{}", p.org, p.name), format!("Project {} / {} only", p.org, p.name)));
@@ -506,7 +513,7 @@ pub async fn admin(
                 (admin_tabs("notifications"))
                 @if let Some(msg) = &flash { div.card.notice { (msg) } }
                 (views::tabs(&[
-                    ("/admin/notifications", "Enabled per project", tab == "projects"),
+                    ("/admin/notifications", "Per project", tab == "projects"),
                     ("/admin/notifications?tab=destinations", "Destinations", tab == "destinations"),
                     ("/admin/notifications?tab=delivery", "Delivery", tab == "delivery"),
                 ]))
@@ -517,76 +524,68 @@ pub async fn admin(
     Ok(with_flash_cleared(&st, &flash, page))
 }
 
-/// Tab: which project notifies which destination
+/// Tab: for each project, every destination that receives its notifications
 fn admin_rules(db: &Database) -> Result<Markup, AppError> {
     let mut all = db.list_all_notifications()?;
     let total = all.len();
+    let owner = |scope: &str| match scope {
+        "project" => "the project",
+        "organization" => "its organization",
+        _ => "the instance",
+    };
     let listing = views::Listing::from_page("project", false);
     listing.apply(
         &mut all,
-        |i| format!("{} {} {} {} {}", i.org, i.project, i.notification.name, i.notification.kind, i.notification.target),
+        |i| format!("{} {} {} {} {}", i.org, i.project, i.notification.name, i.notification.kind, owner(&i.notification.scope)),
         |i, column| match column {
             "project" => Some(views::SortKey::text(format!("{} {}", i.org, i.project))),
             "name" => Some(views::SortKey::text(&i.notification.name)),
             "type" => Some(views::SortKey::text(&i.notification.kind)),
+            "owner" => Some(views::SortKey::text(owner(&i.notification.scope))),
             "status" => Some(views::SortKey::num(i.notification.enabled as u8)),
             _ => None,
         },
     );
     Ok(html! {
-        p.muted { "Which project notifies which destination. Rules are created in each project's settings." }
-        (listing.filter_box("Filter: project, destination, type, target…", all.len(), total))
+        p.muted {
+            "For each project, the destinations that receive its notifications: its own, those of its organization and those of the instance. "
+            "What a destination sends is set on the destination (the gear in the Destinations tab, or the settings of the project for its own). "
+            "The test sends a sample change of that project."
+        }
+        (listing.filter_box("Filter: project, destination, type…", all.len(), total))
         div.scroll {
             table.list.fit.dense {
-                (views::columns("project name kind - - flag flag actions", true))
+                (views::columns("project name kind who - flag flag act", true))
                 thead {
                     tr {
                         (listing.th("project", "Project")) (listing.th("name", "Destination")) (listing.th("type", "Type"))
-                        th { "Target" } th { "Events" } th { "Min CVSS" } (listing.th("status", "Status")) th {}
+                        (listing.th("owner", "Belongs to")) th { "Events" } th { "Min CVSS" } (listing.th("status", "Status")) th {}
                     }
                 }
                 tbody {
                     @for item in &all {
-                        @let n: &Notification = &item.notification;
+                        @let n = &item.notification;
                         tr {
                             td.project { a href=(product_url(Some((&item.org, &item.project)), "settings")) title=(item.project) { (item.project) } " " span.muted { (item.org) } }
-                            td { (n.name) }
+                            td { a href={ "/admin/notifications/destinations/" (n.id) } { (n.name) } }
                             td { (kind_label(&n.kind)) }
-                            td { (views::truncate(&n.target, 50)) }
-                            td { @if n.events.is_empty() { "all" } @else { (n.events.join(", ")) } }
+                            td { (owner(&n.scope)) }
+                            td { (events_summary(&n.events)) }
                             td { @if let Some(m) = n.min_cvss { (format!("{m:.1}")) } @else { "—" } }
-                            td { @if n.enabled { "enabled" } @else { span.muted { "disabled" } } }
+                            td { @if !n.enabled { span.muted { "disabled" } } @else if n.events.is_empty() { span.muted { "sends nothing" } } @else { "enabled" } }
                             td.right.actions {
                                 form.inline method="post" action={ "/admin/notifications/" (n.id) } {
+                                    input type="hidden" name="project" value=(item.project_id);
                                     button.small type="submit" name="action" value="test" { "Send test" }
-                                    " "
-                                    button.small.secondary type="submit" name="action" value="toggle" { @if n.enabled { "Disable" } @else { "Enable" } }
-                                    " "
-                                    button.small.danger type="submit" name="action" value="delete" { "Stop" }
                                 }
                             }
                         }
                     }
-                    @if all.is_empty() { tr { td colspan="8" .muted { "No project notifies anyone yet." } } }
+                    @if all.is_empty() { tr { td colspan="8" .muted { "No destination receives the notifications of a project yet." } } }
                 }
             }
         }
     })
-}
-
-/// (organization, project)
-type ProjectRef<'a> = (&'a str, &'a str);
-
-/// Projects as links to their notification settings: the first `max`, then how many are left
-fn project_links(projects: &[ProjectRef], with_org: bool, max: usize) -> Markup {
-    let more = projects.len().saturating_sub(max);
-    html! {
-        @for (i, (org, project)) in projects.iter().take(max).enumerate() {
-            @if i > 0 { ", " }
-            a href=(product_url(Some((org, project)), "settings")) { @if with_org { (org) " / " } (project) }
-        }
-        @if more > 0 { " and " (more) " more" }
-    }
 }
 
 /// Tab: every destination, whatever it belongs to
@@ -612,32 +611,27 @@ fn admin_destinations(
             "name" => Some(views::SortKey::text(&d.name)),
             "type" => Some(views::SortKey::text(&d.kind)),
             "owner" => Some(views::SortKey::text(format!("{} {}", d.scope, d.scope_label))),
-            "rules" => Some(views::SortKey::num(d.rules as f64)),
             _ => None,
         },
     );
     let new_kind = new_kind.filter(|k| DESTINATION_KINDS.iter().any(|(kind, _)| kind == k));
     let base = "/admin/notifications?tab=destinations";
-    // Who a destination is offered to, and who really uses it, are two facts:
-    // the projects of its scope on one side, those with a rule for it on the other
-    let projects = db.list_all_projects()?;
-    let rules = db.list_all_notifications()?;
-    let several_orgs = projects.iter().any(|p| p.org != projects[0].org);
     Ok(html! {
         p.muted {
-            "Every destination. Each belongs to the instance, an organization or a single project, which decides the projects it is offered to. "
-            "Being offered is not being used: a destination sends for a project once that project picks it in its notification settings. "
+            "Every destination. What it belongs to decides what it receives, by itself: a destination of the instance gets the notifications of every project, "
+            "one of an organization those of its projects, one of a project those of that project. "
+            "The gear opens what it sends: event types, minimum CVSS, enabled or not. "
             "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
         }
         @if let Some(offer) = enable { (offer) }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
         div.scroll {
             table.list.fit.dense {
-                (views::columns("- kind - - wide num actions", true))
+                (views::columns("- kind - - wide actions", true))
                 thead {
                     tr {
                         (listing.th("name", "Name")) (listing.th("type", "Type")) th { "Target" }
-                        (listing.th("owner", "Offered to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
+                        (listing.th("owner", "Covers")) th { "Sends" } th {}
                     }
                 }
                 tbody {
@@ -646,41 +640,12 @@ fn admin_destinations(
                             td { (d.name) }
                             td { (kind_label(&d.kind)) }
                             td { (views::truncate(&d.target(), 50)) }
-                            td {
-                                @match d.scope.as_str() {
-                                    "instance" => { "all projects" }
-                                    "organization" => { "projects of organization " (d.scope_label) }
-                                    _ => { "project " (d.scope_label) " only" }
-                                }
-                            }
-                            td {
-                                @let users: Vec<ProjectRef> = rules.iter()
-                                    .filter(|r| r.notification.destination_id == d.id)
-                                    .map(|r| (r.org.as_str(), r.project.as_str()))
-                                    .collect();
-                                @if users.is_empty() {
-                                    // Offered but not picked: nothing leaves through it, and the page says where to pick it
-                                    @let offered: Vec<ProjectRef> = projects.iter()
-                                        .filter(|p| match d.scope.as_str() {
-                                            "instance" => true,
-                                            "organization" => p.org == d.scope_label,
-                                            _ => Some(p.id) == d.scope_id,
-                                        })
-                                        .map(|p| (p.org.as_str(), p.name.as_str()))
-                                        .collect();
-                                    "no project yet"
-                                    div.muted {
-                                        @if d.system_events { "It only sends instance events" } @else { "It sends nothing" }
-                                        " until a project picks it"
-                                        @if !offered.is_empty() { ", in its notification settings: " (project_links(&offered, several_orgs, 3)) }
-                                        "."
-                                    }
-                                } @else {
-                                    (project_links(&users, several_orgs, 8))
-                                }
-                            }
-                            td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
+                            td { (covers(d)) }
+                            td { (sends(d)) }
                             td.right.actions {
+                                a.btn.gear href={ "/admin/notifications/destinations/" (d.id) } title="Configure what it sends"
+                                    aria-label={ "Configure " (d.name) } { span aria-hidden="true" { "\u{2699}\u{fe0e}" } }
+                                " "
                                 form.inline method="post" action={ "/admin/notifications/destinations/" (d.id) } {
                                     button.small type="submit" name="action" value="test" { "Send test" }
                                     " "
@@ -689,7 +654,7 @@ fn admin_destinations(
                             }
                         }
                     }
-                    @if all.is_empty() { tr { td colspan="7" .muted { "No destination yet." } } }
+                    @if all.is_empty() { tr { td colspan="6" .muted { "No destination yet." } } }
                 }
             }
         }
@@ -706,9 +671,10 @@ fn admin_destinations(
                     }
                     (destination_fields(kind, config.smtp.is_some()))
                     label.check {
-                        input type="checkbox" name="system_events" value="1";
+                        input type="checkbox" name="system_events" value="1" checked;
                         " Also tell it when a manual synchronization finishes (instance destinations only)"
                     }
+                    p.muted { "It starts enabled, with every event checked and no minimum CVSS: its gear in the list changes that." }
                     div.row {
                         button type="submit" { "Add destination" }
                         " " a href=(base) { "Cancel" }
@@ -765,23 +731,76 @@ pub async fn admin_destination_create(State(st): St, User(user): User, Form(fiel
     })
 }
 
-#[derive(Deserialize)]
-pub struct ActionForm {
-    action: String,
+/// Configuration of one destination (the gear of the list): what it sends
+pub async fn admin_destination(
+    State(st): St,
+    User(user): User,
+    Path(id): Path<i64>,
+) -> HtmlResult {
+    require_admin(&user)?;
+    blocking(|| {
+        let db = st.db()?;
+        let d = db.get_destination(id)?.ok_or(AppError::NotFound)?;
+        let back = "/admin/notifications?tab=destinations";
+        Ok(layout(
+            Nav::Admin,
+            "Notifications",
+            Some(&user),
+            html! {
+                h1 { "Administration" }
+                (admin_tabs("notifications"))
+                p { a href=(back) { "← Destinations" } }
+                h2 { "Destination “" (d.name) "”" }
+                p.muted {
+                    (kind_label(&d.kind)) " · " (views::truncate(&d.target(), 80)) " · receives the notifications of "
+                    (covers(&d)) "."
+                }
+                form.stack.card method="post" action={ "/admin/notifications/destinations/" (d.id) } {
+                    input type="hidden" name="action" value="save";
+                    label.check { input type="checkbox" name="enabled" value="1" checked[d.enabled]; " Enabled (unchecked, it sends nothing)" }
+                    fieldset {
+                        legend { "Events it sends (none checked = nothing about CVEs and projects)" }
+                        @for (kind, label) in EVENT_TYPES {
+                            label { input type="checkbox" name="events" value=(kind) checked[d.events.iter().any(|e| e == kind)]; " " (label) }
+                        }
+                    }
+                    label { "Minimum CVSS (empty = none)" input type="number" name="min_cvss" min="0" max="10" step="0.1" value=(cvss_value(d.min_cvss)); }
+                    @if d.scope == "instance" {
+                        fieldset {
+                            legend { "Instance events" }
+                            label { input type="checkbox" name="system_events" value="1" checked[d.system_events]; " A manual synchronization finished" }
+                        }
+                    }
+                    div.row {
+                        button type="submit" { "Save" }
+                        " " a href=(back) { "Cancel" }
+                    }
+                }
+            },
+        ))
+    })
 }
 
+/// Save what a destination sends, test it or delete it
 pub async fn admin_destination_action(
     State(st): St,
     User(user): User,
     Path(id): Path<i64>,
-    Form(form): Form<ActionForm>,
+    Form(fields): Form<Fields>,
 ) -> ActionResult {
     require_admin(&user)?;
     blocking(|| {
         let db = st.db()?;
         let destination = db.get_destination(id)?.ok_or(AppError::NotFound)?;
         let back = "/admin/notifications?tab=destinations";
-        Ok(match form.action.as_str() {
+        Ok(match field(&fields, "action") {
+            "save" => {
+                let (events, min_cvss) = events_and_cvss(&fields, "events", "min_cvss")?;
+                let enabled = !field(&fields, "enabled").is_empty();
+                let system_events = !field(&fields, "system_events").is_empty();
+                db.update_destination_settings(id, &events, min_cvss, enabled, Some(system_events))?;
+                flash_redirect(&st, back, &format!("Destination “{}” saved.", destination.name))
+            }
             "delete" => {
                 db.delete_destination(id)?;
                 flash_redirect(&st, back, &format!("Destination “{}” deleted.", destination.name))
@@ -831,38 +850,34 @@ pub async fn admin_delivery(State(st): St, User(user): User, Form(form): Form<De
     })
 }
 
-/// Test, enable/disable or stop a rule of any project
-pub async fn admin_rule_action(
+/// Sends a sample change of a project through a destination that receives
+/// its notifications (`id`: the destination, `project`: the project)
+pub async fn admin_project_test(
     State(st): St,
     User(user): User,
     Path(id): Path<i64>,
-    Form(form): Form<ActionForm>,
+    Form(fields): Form<Fields>,
 ) -> ActionResult {
     require_admin(&user)?;
     blocking(|| {
         let db = st.db()?;
-        let item = db.get_notification(id)?.ok_or(AppError::NotFound)?;
+        if field(&fields, "action") != "test" {
+            return Err(AppError::Bad("Invalid action".into()));
+        }
+        let project: i64 = field(&fields, "project").parse().map_err(|_| AppError::NotFound)?;
+        // Only a destination that covers this project
+        let item = db
+            .list_all_notifications()?
+            .into_iter()
+            .find(|n| n.project_id == project && n.notification.id == id)
+            .ok_or(AppError::NotFound)?;
         let name = item.notification.name.clone();
         let back = "/admin/notifications";
-        Ok(match form.action.as_str() {
-            "toggle" => {
-                db.admin_toggle_notification(id)?;
-                flash_redirect(&st, back, &format!("Notification to “{name}” updated."))
-            }
-            "delete" => {
-                db.admin_delete_notification(id)?;
-                flash_redirect(&st, back, &format!("Notification to “{name}” stopped."))
-            }
-            "test" => {
-                let config = st.effective_config(&db)?;
-                let project_id = db.find_project(&item.org, &item.project)?.unwrap_or_default();
-                let dispatch = notify::test_dispatch(item.notification, project_id, &item.org, &item.project);
-                match notify::send(&config, &db, &dispatch) {
-                    Ok(()) => flash_redirect(&st, back, &format!("Test sent through “{name}”.")),
-                    Err(e) => flash_redirect(&st, back, &format!("Test through “{name}” failed: {e}")),
-                }
-            }
-            _ => return Err(AppError::Bad("Invalid action".into())),
+        let config = st.effective_config(&db)?;
+        let dispatch = notify::test_dispatch(item.notification, project, &item.org, &item.project);
+        Ok(match notify::send(&config, &db, &dispatch) {
+            Ok(()) => flash_redirect(&st, back, &format!("Test sent through “{name}”.")),
+            Err(e) => flash_redirect(&st, back, &format!("Test through “{name}” failed: {e}")),
         })
     })
 }

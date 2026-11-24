@@ -34,6 +34,11 @@ whatever its case.
 scan brought in and those that left with their application. `database_status` gives the version of
 the software and of the database schema. In `list_applications`, `source` is `manual` for an
 application added by hand and `inventory` for one brought by an inventory source.
+`list_notifications` gives the destinations of the project with what each sends: `destination`,
+`kind`, `scope` (`project`), `events` (none = it sends nothing), `min_cvss`, `enabled`. Instance
+administrators and the local operator also get the destinations of the organization and of the
+instance (`scope` `organization` or `instance`), which receive the project's notifications too.
+The target of a destination (address, URL, topic) is never returned.
 
 Write tools (off by default: *Admin → MCP* for HTTP, `--allow-write` for stdio): `create_project`,
 `subscribe`, `unsubscribe`, `add_application`, `update_application_version`, `choose_components`

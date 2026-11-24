@@ -474,7 +474,7 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_notifications",
-            "Notifications of a project: which destinations it notifies, for which events and from which CVSS.",
+            "Destinations that receive the notifications of a project, with what each one sends (event types, minimum CVSS, enabled). The project's own destinations (scope `project`); for instance administrators and the local operator, also the destinations of its organization and of the instance, which receive them too. No event = the destination sends nothing. Targets are never returned.",
             json!({ "org": org, "project": project }),
             &["project"],
         ),
@@ -710,11 +710,14 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
         }
         "list_notifications" => {
             let target = self.target(args)?;
-            // Targets (webhook URLs, ntfy topics) are secrets of whoever owns the destination
+            // Targets (webhook URLs, ntfy topics) are secrets of whoever owns the destination,
+            // and so is the very existence of a destination managed outside the project
+            let internals = self.sees_internals();
             let rules: Vec<Value> = db
                 .list_notifications(target.id)?
                 .into_iter()
-                .map(|n| json!({ "destination": n.name, "kind": n.kind, "events": n.events, "min_cvss": n.min_cvss, "enabled": n.enabled }))
+                .filter(|n| n.scope == "project" || internals)
+                .map(|n| json!({ "destination": n.name, "kind": n.kind, "scope": n.scope, "events": n.events, "min_cvss": n.min_cvss, "enabled": n.enabled }))
                 .collect();
             json!(rules)
         }
@@ -1346,6 +1349,19 @@ mod tests {
         assert!(run(&carol_mcp, "get_audit_log", scope.clone()).is_err());
         assert_eq!(run(&carol_mcp, "get_audit_log", json!({ "decision": "all", "event": "all" })).unwrap()["total"], 0);
         assert!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap().as_array().unwrap().is_empty());
+        // A project lists its own destinations with what they send, never a target; those of the
+        // instance and of the organization, which receive its notifications too, only for administrators
+        let infra_id = db.find_project("acme", "infra").unwrap().unwrap();
+        let phone = db.create_notification(infra_id, "phone", "ntfy", "https://ntfy.example.org/secret-topic", &["kev".into()], Some(7.0)).unwrap();
+        db.create_destination("instance", None, "ops", "ntfy", &json!({ "url": "https://ntfy.example.org/ops-topic" }), true).unwrap();
+        let own = json!({ "destination": "phone", "kind": "ntfy", "scope": "project", "events": ["kev"], "min_cvss": 7.0, "enabled": true });
+        assert_eq!(run(&alice_mcp, "list_notifications", scope.clone()).unwrap(), json!([own]));
+        let seen_by_admin = run(&admin_mcp, "list_notifications", scope.clone()).unwrap();
+        assert_eq!(seen_by_admin[0], own);
+        assert_eq!((seen_by_admin[1]["destination"].as_str(), seen_by_admin[1]["scope"].as_str()), (Some("ops"), Some("instance")));
+        assert_eq!(seen_by_admin.as_array().unwrap().len(), 2);
+        assert!(!seen_by_admin.to_string().contains("topic"));
+        db.delete_destination(phone).unwrap();
 
         // Same length limits as the web forms
         let long = "x".repeat(300);

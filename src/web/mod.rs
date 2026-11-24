@@ -595,15 +595,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/orgs/{org}/projects/{project}/members/{user_id}/delete",
             post(projects::project_member_remove),
         )
-        .route("/orgs/{org}/projects/{project}/notifications", post(notifications::rule_create))
-        .route(
-            "/orgs/{org}/projects/{project}/notifications/{id}/delete",
-            post(notifications::rule_delete),
-        )
-        .route(
-            "/orgs/{org}/projects/{project}/notifications/{id}/toggle",
-            post(notifications::rule_toggle),
-        )
+        .route("/orgs/{org}/projects/{project}/notifications", post(notifications::project_notifications_save))
         .route("/orgs/{org}/projects/{project}/inventory/sources", post(inventory::source_create))
         .route(
             "/orgs/{org}/projects/{project}/inventory/sources/{id}/delete",
@@ -687,9 +679,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/admin/notifications/destinations", post(notifications::admin_destination_create))
         .route(
             "/admin/notifications/destinations/{id}",
-            post(notifications::admin_destination_action),
+            get(notifications::admin_destination).post(notifications::admin_destination_action),
         )
-        .route("/admin/notifications/{id}", post(notifications::admin_rule_action))
+        .route("/admin/notifications/{id}", post(notifications::admin_project_test))
         .route("/admin/mcp", get(admin::mcp).post(admin::mcp_save))
         .route("/admin/sso", get(admin::sso).post(admin::sso_save))
         .route("/admin/sso/scim/tokens", post(admin::scim_token_create))
@@ -1067,21 +1059,23 @@ mod tests {
         assert_eq!(subscribed.location.as_deref(), Some("/product/acme/infra?view=subscriptions"));
         assert_eq!(db.list_subscriptions(project_id).unwrap()[0].vendor, "apache");
 
-        // Notifications: private targets are refused, events are multi-valued
-        let base = "/orgs/acme/projects/infra/notifications";
+        // Notifications: private targets are refused; what a destination sends is saved from the table
+        let base = "/orgs/acme/projects/infra";
         let refused = app
-            .post(base, Some(&alice), "name=local&kind=webhook&target=http%3A%2F%2F127.0.0.1%2Fhook")
+            .post(&format!("{base}/destinations"), Some(&alice), "name=local&kind=webhook&url=http%3A%2F%2F127.0.0.1%2Fhook")
             .await;
         assert_eq!(refused.status, StatusCode::BAD_REQUEST);
         let ok = app
             .post(
-                base,
+                &format!("{base}/destinations"),
                 Some(&alice),
-                "name=mail&kind=email&target=sec%40example.org&smtp_host=smtp.example.org&smtp_port=587\
-                 &smtp_from=v%40example.org&events=created&events=kev&events=bogus&min_cvss=7",
+                "name=mail&kind=email&to=sec%40example.org&smtp_host=smtp.example.org&smtp_port=587&smtp_from=v%40example.org",
             )
             .await;
         assert_eq!(ok.status, StatusCode::SEE_OTHER, "{}", ok.body);
+        let mail = db.list_project_destinations(project_id).unwrap()[0].id;
+        let table = format!("id={mail}&enabled_{mail}=1&events_{mail}=created&events_{mail}=kev&events_{mail}=bogus&min_cvss_{mail}=7");
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(&alice), &table).await.status, StatusCode::SEE_OTHER);
         let notifications = db.list_notifications(project_id).unwrap();
         assert_eq!(notifications[0].events, ["created", "kev"]);
         assert_eq!(notifications[0].min_cvss, Some(7.0));
@@ -1713,7 +1707,8 @@ mod tests {
             ("/admin/notifications/delivery", "allow_private=1"),
             ("/admin/notifications/destinations", "owner=instance&kind=ntfy&name=x&url=https%3A%2F%2F8.8.8.8%2Fx"),
             ("/admin/notifications/destinations/1", "action=delete"),
-            ("/admin/notifications/1", "action=delete"),
+            ("/admin/notifications/destinations/1", "action=save&enabled=1"),
+            ("/admin/notifications/1", "action=test&project=1"),
             ("/admin/mcp", "http_enabled=1&allow_write=1"),
         ] {
             assert_eq!(app.post(path, Some(&user), form).await.status, StatusCode::FORBIDDEN, "{path}");
@@ -1784,16 +1779,18 @@ mod tests {
         let infra = db.find_project("acme", "infra").unwrap().unwrap();
         let web = db.find_project("acme", "web").unwrap().unwrap();
         let create = "/orgs/acme/projects/infra/destinations";
-        let ntfy = "kind=ntfy&name=phone&url=http%3A%2F%2F127.0.0.1%3A9%2Fvulns&notify=1";
+        let ntfy = "kind=ntfy&name=phone&url=http%3A%2F%2F127.0.0.1%3A9%2Fvulns";
         assert_eq!(app.post(create, Some(&admin), ntfy).await.status, StatusCode::BAD_REQUEST);
         assert_eq!(app.post("/admin/notifications/delivery", Some(&admin), "allow_private=1").await.status, StatusCode::SEE_OTHER);
         assert_eq!(app.post(create, Some(&admin), ntfy).await.status, StatusCode::SEE_OTHER);
-        // The destination belongs to its project: usable there, not in the other project
+        // The destination belongs to its project: it notifies that one, not the other, and starts with every event
         let phone = db.list_project_destinations(infra).unwrap()[0].id;
         assert_eq!(db.list_notifications(infra).unwrap().len(), 1);
-        assert!(db.list_project_destinations(web).unwrap().is_empty());
-        let foreign = format!("destination_id={phone}");
-        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &foreign).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(db.get_destination(phone).unwrap().unwrap().events, crate::db::all_events());
+        assert!(db.list_notifications(web).unwrap().is_empty());
+        let foreign = format!("id={phone}&events_{phone}=kev");
+        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &foreign).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.get_destination(phone).unwrap().unwrap().events, crate::db::all_events());
         assert_eq!(
             app.post(&format!("/orgs/acme/projects/web/destinations/{phone}/delete"), Some(&admin), "").await.status,
             StatusCode::NOT_FOUND
@@ -1817,12 +1814,13 @@ mod tests {
         );
         let stored = &db.list_project_destinations(web).unwrap()[0];
         assert_eq!(stored.config["smtp"]["password"], "smtp-secret");
-        for page in ["/product/acme/web?view=settings", "/admin/notifications", "/admin/notifications?tab=destinations"] {
+        let gear = format!("/admin/notifications/destinations/{}", stored.id);
+        for page in ["/product/acme/web?view=settings", "/admin/notifications", "/admin/notifications?tab=destinations", gear.as_str()] {
             let body = app.get(page, Some(&admin)).await.body;
             assert!(!body.contains("smtp-secret"), "{page}");
         }
 
-        // Administration: rules per project, every destination, instance destinations
+        // Administration: what notifies each project, every destination, instance destinations
         let rules = app.get("/admin/notifications", Some(&admin)).await.body;
         assert!(rules.contains("phone") && rules.contains("infra"));
         let destinations = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
@@ -1832,26 +1830,33 @@ mod tests {
         let ops = "owner=instance&kind=ntfy&name=ops&url=http%3A%2F%2F127.0.0.1%3A9%2Fops&system_events=1";
         assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), ops).await.status, StatusCode::SEE_OTHER);
         assert_eq!(app.post("/admin/notifications/destinations", Some(&user), ops).await.status, StatusCode::FORBIDDEN);
-        // An instance destination is usable by every project and receives instance events
+        // An instance destination receives the notifications of every project by itself, and instance events
         let ops_id = db.list_system_destinations().unwrap()[0].id;
-        assert!(db.list_project_destinations(web).unwrap().iter().any(|d| d.id == ops_id));
+        assert!(db.list_notifications(web).unwrap().iter().any(|n| n.id == ops_id));
+        assert!(db.list_notifications(infra).unwrap().iter().any(|n| n.id == ops_id));
         let org_scoped = "owner=organization%3Aacme&kind=ntfy&name=team&url=http%3A%2F%2F127.0.0.1%3A9%2Fteam&system_events=1";
         app.post("/admin/notifications/destinations", Some(&admin), org_scoped).await;
         assert_eq!(db.list_system_destinations().unwrap().len(), 1); // organization destinations never get instance events
 
-        // The target of a shared destination is its owner's secret: a project using it never sees it
-        let attach = format!("destination_id={ops_id}");
-        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &attach).await.status, StatusCode::SEE_OTHER);
+        // A destination managed elsewhere is its owner's: the project page shows neither its name nor its target,
+        // and cannot change it
         let web_settings = app.get("/product/acme/web?view=settings", Some(&admin)).await.body;
-        assert!(web_settings.contains("ops") && web_settings.contains("managed elsewhere"));
+        assert!(web_settings.contains("Destinations of the organization or of the whole instance, if there are any, also receive"));
+        assert!(!web_settings.contains("ops") && !web_settings.contains("team"), "{web_settings}");
         assert!(!web_settings.contains("127.0.0.1:9/ops") && !web_settings.contains("127.0.0.1:9/team"));
+        let not_ours = format!("id={ops_id}&events_{ops_id}=kev");
+        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &not_ours).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            app.post(&format!("/orgs/acme/projects/web/destinations/{ops_id}/delete"), Some(&admin), "").await.status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(db.get_destination(ops_id).unwrap().unwrap().events, crate::db::all_events());
         // The project's own destination shows its target to those who manage the project
         assert!(app.get("/product/acme/infra?view=settings", Some(&admin)).await.body.contains("127.0.0.1:9/vulns"));
 
         // A test send reports the failure (nothing listens on that port) instead of crashing
-        let id = db.list_notifications(infra).unwrap()[0].id;
-        let action = format!("/admin/notifications/{id}");
-        let tested = app.post(&action, Some(&admin), "action=test").await;
+        let action = format!("/admin/notifications/{phone}");
+        let tested = app.post(&action, Some(&admin), &format!("action=test&project={infra}")).await;
         assert_eq!(tested.status, StatusCode::SEE_OTHER);
         // The outcome comes back in a one-time cookie, never in the URL
         assert_eq!(tested.location.as_deref(), Some("/admin/notifications"));
@@ -1864,81 +1869,239 @@ mod tests {
         assert!(shown.body.contains("class=\"card notice\""));
         let dest_test = app.post(&format!("/admin/notifications/destinations/{ops_id}"), Some(&admin), "action=test").await;
         assert!(dest_test.cookie.unwrap().contains("failed"));
+        // The test of a project only goes through a destination that receives its notifications
+        assert_eq!(app.post(&action, Some(&admin), &format!("action=test&project={web}")).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&action, Some(&admin), "action=test&project=nope").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post(&action, Some(&admin), &format!("action=delete&project={infra}")).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            app.post(&format!("/admin/notifications/{ops_id}"), Some(&admin), &format!("action=test&project={web}")).await.status,
+            StatusCode::SEE_OTHER
+        );
 
-        assert_eq!(app.post(&action, Some(&admin), "action=toggle").await.status, StatusCode::SEE_OTHER);
-        assert!(!db.list_notifications(infra).unwrap()[0].enabled);
-        assert_eq!(app.post(&action, Some(&admin), "action=delete").await.status, StatusCode::SEE_OTHER);
-        assert_eq!(app.post(&action, Some(&admin), "action=delete").await.status, StatusCode::NOT_FOUND);
-        // Stopping a rule keeps the destination; deleting the destination removes its rules
-        assert!(db.get_destination(phone).unwrap().is_some());
-        app.post("/orgs/acme/projects/infra/notifications", Some(&admin), &format!("destination_id={phone}&events=kev")).await;
-        assert_eq!(db.list_notifications(infra).unwrap()[0].events, ["kev"]);
+        // Deleting the destination stops it
         let deleted = app.post(&format!("/orgs/acme/projects/infra/destinations/{phone}/delete"), Some(&admin), "").await;
         assert_eq!(deleted.status, StatusCode::SEE_OTHER);
-        assert!(db.list_notifications(infra).unwrap().is_empty());
+        assert!(db.list_notifications(infra).unwrap().iter().all(|n| n.scope != "project"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_destination_tells_who_it_is_offered_to_and_who_uses_it() {
+    async fn a_destination_tells_what_it_covers_and_what_it_sends() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        let user = app.register("user").await;
+        app.post("/orgs", Some(&admin), "name=acme").await;
+        for project in ["infra", "web"] {
+            app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
+        }
+        for form in [
+            "owner=instance&kind=browser&name=Everyone&system_events=1",
+            "owner=organization%3Aacme&kind=browser&name=Team",
+            "owner=project%3Aacme%2Finfra&kind=browser&name=Solo",
+        ] {
+            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let id_of = |name: &str| db.list_all_destinations().unwrap().into_iter().find(|d| d.name == name).unwrap().id;
+        let (everyone, team, solo) = (id_of("Everyone"), id_of("Team"), id_of("Solo"));
+        let list = "/admin/notifications?tab=destinations";
+        let row = |page: &str, name: &str| page.split("<tr>").find(|r| r.contains(&format!("<td>{name}</td>"))).unwrap().to_string();
+
+        // Nobody picked anything, and nobody has to: each row says what it covers and what it sends
+        let page = app.get(list, Some(&admin)).await.body;
+        assert!(page.contains("Covers<span") && page.contains("<th>Sends</th>"));
+        let row_everyone = row(&page, "Everyone");
+        assert!(row_everyone.contains("<td>all projects</td><td>every event<div class=\"muted\">and instance events (sync finished)</div></td>"), "{row_everyone}");
+        assert!(row(&page, "Team").contains("<td>projects of organization acme</td><td>every event</td>"));
+        assert!(row(&page, "Solo").contains("<td>project acme / infra</td><td>every event</td>"));
+        // What the former model said is no longer true, and no longer said
+        for gone in ["no project yet", "until a project picks it", "Offered to", "Used by", "It sends nothing"] {
+            assert!(!page.contains(gone), "{gone}");
+        }
+        // The gear of a row: a link with a name for those who do not see the glyph
+        let gear = format!("/admin/notifications/destinations/{everyone}");
+        assert!(row_everyone.contains(&format!(
+            "<a class=\"btn gear\" href=\"{gear}\" title=\"Configure what it sends\" aria-label=\"Configure Everyone\"><span aria-hidden=\"true\">\u{2699}\u{fe0e}</span></a>"
+        )), "{row_everyone}");
+
+        // Its page: everything checked on a new destination, no minimum CVSS
+        let config = app.get(&gear, Some(&admin)).await;
+        assert_eq!(config.status, StatusCode::OK);
+        assert!(config.body.contains("Destination “Everyone”") && config.body.contains("receives the notifications of all projects."));
+        assert!(config.body.contains("<input type=\"checkbox\" name=\"enabled\" value=\"1\" checked>"));
+        for (kind, _) in crate::changes::EVENT_TYPES {
+            assert!(config.body.contains(&format!("<input type=\"checkbox\" name=\"events\" value=\"{kind}\" checked>")), "{kind}");
+        }
+        assert_eq!(config.body.matches("name=\"events\"").count(), crate::changes::EVENT_TYPES.len());
+        assert!(config.body.contains("<input type=\"number\" name=\"min_cvss\" min=\"0\" max=\"10\" step=\"0.1\" value=\"\">"));
+        assert!(config.body.contains("<input type=\"checkbox\" name=\"system_events\" value=\"1\" checked>"));
+        // Instance events are only offered to a destination of the instance
+        let team_page = app.get(&format!("/admin/notifications/destinations/{team}"), Some(&admin)).await.body;
+        assert!(team_page.contains("projects of organization acme") && !team_page.contains("name=\"system_events\""));
+        // Closed to anyone but an administrator, and to nobody without a session
+        assert_eq!(app.get(&gear, Some(&user)).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(app.get(&gear, None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post(&gear, None, "action=save").await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.post(&gear, Some(&user), "action=save").await.status, StatusCode::FORBIDDEN);
+        assert_eq!(db.get_destination(everyone).unwrap().unwrap().events, crate::db::all_events());
+        assert_eq!(app.get("/admin/notifications/destinations/99999", Some(&admin)).await.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.post("/admin/notifications/destinations/99999", Some(&admin), "action=save").await.status, StatusCode::NOT_FOUND);
+
+        // Saving: what is checked is what it sends
+        let saved = app.post(&gear, Some(&admin), "action=save&enabled=1&events=kev&events=created&events=bogus&min_cvss=7.5").await;
+        assert_eq!(saved.location.as_deref(), Some(list));
+        let d = db.get_destination(everyone).unwrap().unwrap();
+        assert_eq!((d.events.clone(), d.min_cvss, d.enabled, d.system_events), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true, false));
+        let config = app.get(&gear, Some(&admin)).await.body;
+        assert!(config.contains("name=\"events\" value=\"kev\" checked>") && config.contains("name=\"events\" value=\"metrics\">"));
+        assert!(config.contains("name=\"min_cvss\" min=\"0\" max=\"10\" step=\"0.1\" value=\"7.5\">"));
+        let page = app.get(list, Some(&admin)).await.body;
+        assert!(row(&page, "Everyone").contains("<td>New CVE, CISA KEV, CVSS 7.5 and above</td>"), "{page}");
+        assert_eq!(app.post(&gear, Some(&admin), "action=save&enabled=1&min_cvss=11").await.status, StatusCode::BAD_REQUEST);
+        // Nothing checked, or disabled: it sends nothing, and the list says why
+        app.post(&gear, Some(&admin), "action=save&enabled=1").await;
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Everyone").contains("nothing: no event checked"));
+        app.post(&gear, Some(&admin), "action=save&enabled=1&system_events=1").await;
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Everyone").contains("only instance events (sync finished)"));
+        app.post(&format!("/admin/notifications/destinations/{team}"), Some(&admin), "action=save&events=kev&system_events=1").await;
+        let team_now = db.get_destination(team).unwrap().unwrap();
+        assert_eq!((team_now.enabled, team_now.system_events), (false, false));
+        assert!(row(&app.get(list, Some(&admin)).await.body, "Team").contains("nothing: disabled"));
+
+        // Per project: every destination receiving its notifications, its own or not
+        let per_project = app.get("/admin/notifications", Some(&admin)).await.body;
+        let lines = |project: &str| per_project.split("<tr>").filter(|r| r.contains(&format!("title=\"{project}\""))).count();
+        assert_eq!((lines("infra"), lines("web")), (3, 2));
+        assert!(per_project.contains(&format!("<a href=\"/admin/notifications/destinations/{solo}\">Solo</a>")));
+        assert!(per_project.contains("<td>the instance</td>") && per_project.contains("<td>its organization</td>") && per_project.contains("<td>the project</td>"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_project_sets_what_its_own_destinations_send_in_one_table() {
         let app = app(open_registration());
         let admin = app.register("root").await;
         app.post("/orgs", Some(&admin), "name=acme").await;
         for project in ["infra", "web"] {
             app.post("/projects", Some(&admin), &format!("org=acme&name={project}")).await;
         }
-        for form in [
-            "owner=instance&kind=browser&name=Everyone",
-            "owner=organization%3Aacme&kind=browser&name=Team",
-            "owner=project%3Aacme%2Finfra&kind=browser&name=Solo",
-        ] {
-            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
+        let mut cookies = std::collections::HashMap::new();
+        for (name, role) in [("editor", "editor"), ("viewer", "viewer"), ("stranger", "")] {
+            cookies.insert(name, app.register(name).await);
+            if !role.is_empty() {
+                app.post("/orgs/acme/members", Some(&admin), &format!("username={name}&role={role}")).await;
+            }
         }
-        let list = "/admin/notifications?tab=destinations";
-        let row = |page: &str, name: &str| page.split("<tr>").find(|r| r.contains(&format!("<td>{name}</td>"))).unwrap().to_string();
-        // A first project exists besides those of acme: with several organizations, each is named with its own
-        let link = |project: &str| format!("<a href=\"/product/acme/{project}?view=settings\">acme / {project}</a>");
-
-        // Nobody picked anything: each row says who may use the destination, that it sends nothing,
-        // and where to switch it on
-        let page = app.get(list, Some(&admin)).await.body;
-        assert!(page.contains("Offered to<span") && page.contains(">Used by</a>"));
-        let everyone = row(&page, "Everyone");
-        assert!(everyone.contains("<td>all projects</td>"), "{everyone}");
-        assert!(everyone.contains("no project yet<div class=\"muted\">It sends nothing until a project picks it, in its notification settings: "), "{everyone}");
-        assert!(everyone.contains(&format!("{}, {}", link("infra"), link("web"))), "{everyone}");
-        let team = row(&page, "Team");
-        assert!(team.contains("<td>projects of organization acme</td>") && team.contains(&link("infra")) && team.contains(&link("web")), "{team}");
-        let solo = row(&page, "Solo");
-        assert!(solo.contains("<td>project acme / infra only</td>") && solo.contains(&link("infra")) && !solo.contains(&link("web")), "{solo}");
-        // The two facts are no longer one sentence
-        assert!(!page.contains("available to all") && !page.contains(" of 2 projects") && !page.contains("of 3 projects"));
-
-        // The link leads to the settings where a project picks the destination
-        let settings = app.get("/product/acme/web?view=settings", Some(&admin)).await.body;
-        assert!(settings.contains("Notify a destination") && settings.contains("Everyone"));
+        let (editor, viewer, stranger) = (&cookies["editor"], &cookies["viewer"], &cookies["stranger"]);
         let db = Database::connect(&app.db_path).unwrap();
-        let everyone_id = db.list_all_destinations().unwrap().into_iter().find(|d| d.name == "Everyone").unwrap().id;
-        let pick = format!("destination_id={everyone_id}");
-        assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(&admin), &pick).await.status, StatusCode::SEE_OTHER);
+        let infra = db.find_project("acme", "infra").unwrap().unwrap();
+        let base = "/orgs/acme/projects/infra";
+        let page = "/product/acme/infra?view=settings";
 
-        // Picked by one project: that project is named, the others it is offered to are not
-        let page = app.get(list, Some(&admin)).await.body;
-        let everyone = row(&page, "Everyone");
-        assert!(everyone.contains(&format!("<td>all projects</td><td>{}</td>", link("web"))), "{everyone}");
-        assert!(!everyone.contains("no project yet") && !everyone.contains(&link("infra")), "{everyone}");
-        assert!(row(&page, "Team").contains("no project yet"));
+        // Destinations of the instance and of the organization exist: the project page never names them
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=ntfy&name=Everyone&url=https%3A%2F%2F8.8.8.8%2Fsecret-topic").await;
+        app.post("/admin/notifications/destinations", Some(&admin), "owner=organization%3Aacme&kind=ntfy&name=Teamwide&url=https%3A%2F%2F8.8.8.8%2Forg-topic").await;
+        let empty = app.get(page, Some(editor)).await.body;
+        assert!(empty.contains("This project has no destination of its own yet.") && !empty.contains("Save notifications"));
 
-        // A long list of projects is cut; a destination that gets instance events is not said to send nothing
-        app.post("/orgs", Some(&admin), "name=beta").await;
-        for project in ["edge", "lab"] {
-            app.post("/projects", Some(&admin), &format!("org=beta&name={project}")).await;
+        // Three destinations of the project, each starting with every event checked
+        for name in ["alpha", "bravo", "charlie"] {
+            let form = format!("kind=ntfy&name={name}&url=https%3A%2F%2F8.8.8.8%2F{name}");
+            assert_eq!(app.post(&format!("{base}/destinations"), Some(editor), &form).await.status, StatusCode::SEE_OTHER);
         }
-        app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Later&system_events=1").await;
-        let page = app.get(list, Some(&admin)).await.body;
-        let later = row(&page, "Later");
-        assert!(later.contains("It only sends instance events until a project picks it"), "{later}");
-        assert!(later.contains(&format!("{}, {}, ", link("infra"), link("web"))) && later.contains("</a> and 2 more."), "{later}");
-        assert_eq!(later.matches("view=settings").count(), 3, "{later}");
+        let ids: Vec<i64> = db.list_project_destinations(infra).unwrap().iter().map(|d| d.id).collect();
+        let (alpha, bravo, charlie) = (ids[0], ids[1], ids[2]);
+        let section = |body: &str| body.split("<h2>Notifications</h2>").nth(1).unwrap().split("<h2>Members</h2>").next().unwrap().to_string();
+        let shown = section(&app.get(page, Some(editor)).await.body);
+        // One table: a row per destination, a checkbox column per event type, a minimum CVSS, one Save
+        assert_eq!(shown.matches("<table").count(), 1);
+        assert_eq!(shown.split("<tbody>").nth(1).unwrap().split("</tbody>").next().unwrap().matches("<tr>").count(), 3);
+        for (kind, label) in crate::changes::EVENT_TYPES {
+            assert!(shown.contains(&format!("<th class=\"up\" title=\"{label}\">")), "{label}");
+            for id in &ids {
+                assert!(shown.contains(&format!("<input type=\"checkbox\" name=\"events_{id}\" value=\"{kind}\" checked aria-label=")), "{kind} {id}");
+            }
+        }
+        assert!(shown.contains(&format!("<input type=\"number\" name=\"min_cvss_{alpha}\" min=\"0\" max=\"10\" step=\"0.1\" value=\"\" aria-label=\"Minimum CVSS: alpha\">")));
+        assert_eq!(shown.matches("Save notifications").count(), 1);
+        assert!(shown.contains("A destination with no event checked sends nothing for this project."));
+        assert!(!shown.contains("none checked = all") && !shown.contains("Destinations of this project") && !shown.contains("Notify a destination"));
+        // Delete posts its own form: Enter in a field of the table saves, it never deletes
+        assert!(shown.contains(&format!("<button class=\"small danger\" type=\"submit\" form=\"delete-destination-{bravo}\">Delete</button>")));
+        assert!(shown.contains(&format!("<form id=\"delete-destination-{bravo}\" method=\"post\" action=\"{base}/destinations/{bravo}/delete\"></form>")));
+        // Works without JavaScript: nothing in the section but plain forms
+        assert!(!shown.contains("<script") && shown.contains(&format!("<form method=\"post\" action=\"{base}/notifications\">")));
+        // Managed elsewhere: neither a name nor a target, for anyone
+        for who in [&admin, editor, viewer] {
+            let body = app.get(page, Some(who)).await.body;
+            for secret in ["Everyone", "Teamwide", "secret-topic", "org-topic"] {
+                assert!(!body.contains(secret), "{secret}");
+            }
+            assert!(body.contains("They are managed by their administrators, not here."));
+        }
+
+        // Uncheck, check and set a minimum: the form comes back as it was sent
+        let form = format!(
+            "id={alpha}&enabled_{alpha}=1&events_{alpha}=kev&events_{alpha}=created&min_cvss_{alpha}=7.5\
+             &id={bravo}&events_{bravo}=metrics&min_cvss_{bravo}=\
+             &id={charlie}&enabled_{charlie}=1&min_cvss_{charlie}=0"
+        );
+        let saved = app.post(&format!("{base}/notifications"), Some(editor), &form).await;
+        assert_eq!(saved.location.as_deref(), Some(page));
+        let settings = |id: i64| {
+            let d = db.get_destination(id).unwrap().unwrap();
+            (d.events, d.min_cvss, d.enabled)
+        };
+        assert_eq!(settings(alpha), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true));
+        assert_eq!(settings(bravo), (vec!["metrics".to_string()], None, false));
+        assert_eq!(settings(charlie), (vec![], Some(0.0), true));
+        let shown = app.get(page, Some(editor)).await.body;
+        let checked = |id: i64, kind: &str| shown.contains(&format!("name=\"events_{id}\" value=\"{kind}\" checked"));
+        assert!(checked(alpha, "kev") && checked(alpha, "created") && !checked(alpha, "metrics") && !checked(alpha, "service"));
+        assert!(checked(bravo, "metrics") && !checked(bravo, "kev") && !checked(charlie, "kev"));
+        assert!(shown.contains(&format!("name=\"enabled_{alpha}\" value=\"1\" checked")) && !shown.contains(&format!("name=\"enabled_{bravo}\" value=\"1\" checked")));
+        assert!(shown.contains(&format!("name=\"min_cvss_{alpha}\" min=\"0\" max=\"10\" step=\"0.1\" value=\"7.5\"")));
+        // A row left out of the form is left as it is; a bad value changes nothing at all
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(editor), &format!("id={charlie}&events_{charlie}=kev")).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(settings(alpha).0, ["created", "kev"]);
+        let bad = format!("id={alpha}&events_{alpha}=metrics&id={bravo}&min_cvss_{bravo}=12");
+        assert_eq!(app.post(&format!("{base}/notifications"), Some(editor), &bad).await.status, StatusCode::BAD_REQUEST);
+        assert_eq!(settings(alpha).0, ["created", "kev"]);
+
+        // Rights: a session, the right to manage the project, and a destination of this very project
+        let change = format!("id={alpha}&events_{alpha}=service");
+        let table = format!("{base}/notifications");
+        let delete = format!("{base}/destinations/{alpha}/delete");
+        let create = format!("{base}/destinations");
+        let new = "kind=ntfy&name=delta&url=https%3A%2F%2F8.8.8.8%2Fdelta";
+        for (path, body) in [(table.as_str(), change.as_str()), (delete.as_str(), ""), (create.as_str(), new)] {
+            let anonymous = app.post(path, None, body).await;
+            assert_eq!(anonymous.status, StatusCode::SEE_OTHER, "{path}");
+            assert!(anonymous.location.as_deref().is_some_and(|l| l.starts_with("/login")), "{path}");
+            assert_eq!(app.post(path, Some(viewer), body).await.status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(app.post(path, Some(stranger), body).await.status, StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(app.get(page, None).await.status, StatusCode::SEE_OTHER);
+        assert_eq!(app.get(page, Some(stranger)).await.status, StatusCode::NOT_FOUND);
+        // A viewer sees the table, cannot change it, and does not see the targets
+        let read_only = app.get(page, Some(viewer)).await.body;
+        assert!(read_only.contains("alpha") && !read_only.contains("8.8.8.8") && !read_only.contains("Save notifications"));
+        assert!(!read_only.contains("name=\"id\"") && !read_only.contains(">Delete</button>") && !read_only.contains("new=ntfy"));
+        assert!(read_only.contains(&format!("name=\"events_{alpha}\" value=\"kev\" checked disabled")));
+        // The id of a destination of another project, of the organization or of the instance: not found, nothing changed
+        let others: Vec<i64> = db.list_all_destinations().unwrap().iter().filter(|d| d.scope != "project").map(|d| d.id).collect();
+        assert_eq!(others.len(), 2);
+        for id in others.iter().copied().chain([alpha, 99999]) {
+            let foreign = format!("id={id}&min_cvss_{id}=9");
+            assert_eq!(app.post("/orgs/acme/projects/web/notifications", Some(editor), &foreign).await.status, StatusCode::NOT_FOUND, "{id}");
+            assert_eq!(app.post(&format!("/orgs/acme/projects/web/destinations/{id}/delete"), Some(editor), "").await.status, StatusCode::NOT_FOUND, "{id}");
+        }
+        assert_eq!(app.post(&table, Some(editor), "id=abc").await.status, StatusCode::NOT_FOUND);
+        assert_eq!(db.list_all_destinations().unwrap().len(), 5);
+        assert_eq!(settings(alpha), (vec!["created".to_string(), "kev".to_string()], Some(7.5), true));
+        assert!(others.iter().all(|id| settings(*id) == (crate::db::all_events(), None, true)));
+
+        // Delete per row
+        assert_eq!(app.post(&delete, Some(editor), "").await.status, StatusCode::SEE_OTHER);
+        assert!(db.get_destination(alpha).unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2051,9 +2214,9 @@ mod tests {
         let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
         let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
         assert_eq!(tested.location, Some(format!("/admin/notifications?tab=destinations&enable={browsers}")));
-        // The list tells that a destination nobody picked sends nothing
+        // The list tells what it covers and sends, without any project picking it
         let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
-        assert!(listed.contains("<td>all projects</td>") && listed.contains("It sends nothing until a project picks it"));
+        assert!(listed.contains("<td>all projects</td><td>every event</td>") && !listed.contains("until a project picks it"));
 
         // The inbox is read once, by its owner only; signed out, nothing answers
         db.push_enqueue(alice_id, "Synchronization finished", "nvd: 3 added", "/admin/sources").unwrap();
