@@ -279,12 +279,13 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
 
                 @if !vendors.is_empty() {
                     h2 { "Affected vendors & products" }
-                    table.list {
+                    table.list.fit {
+                        (views::columns("name -", true))
                         thead { tr { th { "Vendor" } th { "Products" } } }
                         tbody {
                             @for (vendor, products) in &vendors {
                                 tr {
-                                    td.nowrap { a href={ "/vendors/" (enc(vendor)) } { (vendor) } }
+                                    td { a href={ "/vendors/" (enc(vendor)) } { (vendor) } }
                                     td {
                                         @for product in products {
                                             a href={ "/cve?vendor=" (enc(vendor)) "&product=" (enc(product)) } { (product) } " "
@@ -298,7 +299,8 @@ pub async fn cve_detail(State(st): St, User(user): User, Path(id): Path<String>)
 
                 @if !cve.affected_packages.is_empty() {
                     h2 { "Affected packages" }
-                    table.list {
+                    table.list.fit {
+                        (views::columns("kind - - -", true))
                         thead { tr { th { "Ecosystem" } th { "Package" } th { "Vulnerable range" } th { "Fixed in" } } }
                         tbody {
                             @for pkg in &cve.affected_packages {
@@ -419,7 +421,8 @@ pub async fn vendors(State(st): St, User(user): User, Query(q): Query<ListQuery>
                     input type="search" name="search" placeholder="Vendor name" value=[search.clone()];
                     button type="submit" { "Search" }
                 }
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("vendor", "Vendor")) (listing.th("products", "Products")) th {} } }
                     tbody {
                         @for v in &vendors {
@@ -530,7 +533,8 @@ pub async fn vendor_detail(
                     }
                 }
                 (listing.filter_box("Filter products…", products.len(), product_total))
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("product", "Product")) (listing.th("cves", "CVEs")) th {} } }
                     tbody {
                         @for p in &products {
@@ -627,7 +631,8 @@ pub async fn weaknesses(State(st): St, User(user): User, Query(q): Query<ListQue
                     input type="search" name="search" placeholder="CWE-79" value=[search.clone()];
                     button type="submit" { "Search" }
                 }
-                table.list {
+                table.list.fit {
+                    (views::columns("- num act", true))
                     thead { tr { (listing.th("cwe", "CWE")) (listing.th("cves", "CVEs")) th {} } }
                     tbody {
                         @for w in &items {
@@ -997,7 +1002,8 @@ fn settings_page(db: &Database, user: &Account, new_token: Option<&str>, message
                 }
             }
             p.muted { "Use with " code { "Authorization: Bearer <token>" } " on " code { "/api/…" } " (HTTP Basic with your password also works)." }
-            table.list {
+            table.list.fit {
+                (views::columns("- when when act", true))
                 thead { tr { th { "Name" } th { "Created" } th { "Last used" } th {} } }
                 tbody {
                     @for t in &tokens {
@@ -1145,7 +1151,8 @@ pub async fn orgs(State(st): St, User(user): User) -> HtmlResult {
                 p { a href="/projects" { "← Projects" } }
                 h1 { "Organizations" }
                 p.muted { "An organization groups projects and the people who can access them." }
-                table.list {
+                table.list.fit {
+                    (views::columns("- - act", true))
                     thead { tr { th { "Name" } th { "Your role" } th {} } }
                     tbody {
                         @for o in &orgs {
@@ -1229,7 +1236,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                 (super::admin::log_integrity(&audit_integrity, &fingerprint, &format!("{base}/audit/export")))
 
                 h2 { "Projects" }
-                table.list {
+                table.list.fit {
+                    (views::columns("name - kind", true))
                     thead { tr { th { "Project" } th { "Description" } th { "Subscriptions" } } }
                     tbody {
                         @for p in &projects {
@@ -1251,7 +1259,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                 }
 
                 h2 { "Members" }
-                table.list {
+                table.list.fit {
+                    (views::columns("- - act", true))
                     thead { tr { th { "User" } th { "Role" } th {} } }
                     tbody {
                         @for m in &members {

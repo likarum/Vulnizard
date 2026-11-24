@@ -29,7 +29,8 @@ fn back_or(back: &str, default: String) -> String {
 
 fn project_table(projects: &[crate::db::ProjectSummary], listing: &views::Listing) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (views::columns("- flag kind kind day flag", true))
             thead {
                 tr {
                     (listing.th("project", "Project")) (listing.th("review", "To review"))

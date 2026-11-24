@@ -105,7 +105,8 @@ pub fn project_section(
                 a href={ (view) "&show=all" } class=[(show == "all").then_some("active")] { "All (" (candidates.len()) ")" }
             }
             form method="post" action={ (base) "/inventory/choose" } {
-                table.list {
+                table.list.fit {
+                    (views::columns("check name kind - who kind", true))
                     thead { tr { th {} th { "Component" } th { "Version" } th { "Why it may matter" } th { "Source" } th { "State" } } }
                     tbody {
                         @for c in &listed {
@@ -141,47 +142,50 @@ pub fn project_section(
             "A source tells Vulnizard what is deployed, so you do not type versions by hand. "
             "Each delivery replaces the previous list of that source."
         }
-        table.list {
-            thead { tr { th { "Source" } th { "Group" } th { "How" } th { "Reads" } th { "Last delivery (UTC)" } th { "Result" } th {} } }
-            tbody {
-                @for s in &sources {
-                    tr {
-                        td { strong { (s.name) } }
-                        td { span.tag { (s.group) } }
-                        td {
-                            @if s.kind == "git" { "file in a Git repository" } @else { "pushed by a collector" }
-                            @if s.auto_monitor { div.muted { "monitors everything" } }
-                        }
-                        td {
-                            @match GitSource::from_config(&s.config).filter(|_| s.kind == "git") {
-                                Some(git) => { code { (git.file_url()) } }
-                                None => { span.muted { "what the collector sends" } }
+        div.scroll {
+            table.list.fit.dense {
+                (views::columns("name kind - - when - actions", true))
+                thead { tr { th { "Source" } th { "Group" } th { "How" } th { "Reads" } th { "Last delivery (UTC)" } th { "Result" } th {} } }
+                tbody {
+                    @for s in &sources {
+                        tr {
+                            td { strong { (s.name) } }
+                            td { span.tag { (s.group) } }
+                            td {
+                                @if s.kind == "git" { "file in a Git repository" } @else { "pushed by a collector" }
+                                @if s.auto_monitor { div.muted { "monitors everything" } }
                             }
-                        }
-                        td.nowrap { (s.last_run_at.as_deref().unwrap_or("never")) }
-                        td {
-                            @match s.last_status.as_deref() {
-                                Some("ok") => { (s.components) " components" }
-                                Some(_) => { span.error { "failed" } @if let Some(e) = &s.last_error { div.muted { (views::truncate(e, 160)) } } }
-                                None => { span.muted { "waiting for a first delivery" } }
-                            }
-                        }
-                        td.right.nowrap {
-                            @if manage {
-                                @if s.kind == "git" {
-                                    form.inline method="post" action={ (base) "/inventory/sources/" (s.id) "/run" } {
-                                        button.small.secondary type="submit" { "Read now" }
-                                    }
-                                    " "
+                            td {
+                                @match GitSource::from_config(&s.config).filter(|_| s.kind == "git") {
+                                    Some(git) => { code { (git.file_url()) } }
+                                    None => { span.muted { "what the collector sends" } }
                                 }
-                                form.inline method="post" action={ (base) "/inventory/sources/" (s.id) "/delete" } {
-                                    button.small.danger type="submit" { "Delete" }
+                            }
+                            td.nowrap { (s.last_run_at.as_deref().unwrap_or("never")) }
+                            td {
+                                @match s.last_status.as_deref() {
+                                    Some("ok") => { (s.components) " components" }
+                                    Some(_) => { span.error { "failed" } @if let Some(e) = &s.last_error { div.muted { (views::truncate(e, 160)) } } }
+                                    None => { span.muted { "waiting for a first delivery" } }
+                                }
+                            }
+                            td.right.actions {
+                                @if manage {
+                                    @if s.kind == "git" {
+                                        form.inline method="post" action={ (base) "/inventory/sources/" (s.id) "/run" } {
+                                            button.small.secondary type="submit" { "Read now" }
+                                        }
+                                        " "
+                                    }
+                                    form.inline method="post" action={ (base) "/inventory/sources/" (s.id) "/delete" } {
+                                        button.small.danger type="submit" { "Delete" }
+                                    }
                                 }
                             }
                         }
                     }
+                    @if sources.is_empty() { tr { td colspan="7" .muted { "No source yet." } } }
                 }
-                @if sources.is_empty() { tr { td colspan="7" .muted { "No source yet." } } }
             }
         }
         @if manage {

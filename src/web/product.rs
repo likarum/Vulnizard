@@ -227,7 +227,7 @@ fn actor_cell(e: &LifecycleEvent) -> Markup {
 }
 
 fn project_cell(e: &LifecycleEvent) -> Markup {
-    html! { (e.project) @if e.project_deleted { " " span.muted { "(deleted)" } } }
+    html! { span.cut title=(e.project) { (e.project) } @if e.project_deleted { " " span.muted { "(deleted)" } } }
 }
 
 fn status_badge(status: &str) -> Markup {
@@ -603,7 +603,9 @@ fn applications(
                 a href={ (current_path()) (if current_path().contains('?') { "&" } else { "?" }) "show=quiet" } { "Show them" }
             }
         }
-        table.list {
+        table.list.fit {
+            // Without the right to change them there is no version field and no button: their columns shrink
+            (views::columns(if manage { "name - version - project kind act" } else { "name - kind - project kind check" }, scope.all()))
             thead {
                 tr {
                     (listing.th("name", "Application")) (listing.th("vendor", "Vendor")) (listing.th("version", "Version"))
@@ -635,7 +637,7 @@ fn applications(
                                 }
                             }
                         }
-                        @if scope.all() { td { a href=(product_url(Some((&app.org, &app.project)), "applications")) { (app.project) } } }
+                        @if scope.all() { td.project { a href=(product_url(Some((&app.org, &app.project)), "applications")) title=(app.project) { (app.project) } } }
                         td {
                             (app.untreated)
                             @if app.known_cves == Some(0) {
@@ -720,7 +722,8 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
             }
         } @else {
         (listing.filter_box("Filter: vendor, product…", subs.len(), total))
-        table.list {
+        table.list.fit {
+            (views::columns("- - project act", scope.all()))
             thead {
                 tr {
                     (listing.th("vendor", "Vendor")) (listing.th("product", "Product"))
@@ -737,7 +740,7 @@ fn subscriptions(db: &Database, user: &Account, scope: &Scope) -> Result<Markup,
                                 a href={ "/cve?vendor=" (enc(&s.vendor)) "&product=" (enc(&s.product)) } { (s.product) }
                             }
                         }
-                        @if scope.all() { td { a href=(product_url(Some((&s.org, &s.project)), "subscriptions")) { (s.project) } } }
+                        @if scope.all() { td.project { a href=(product_url(Some((&s.org, &s.project)), "subscriptions")) title=(s.project) { (s.project) } } }
                         td.right {
                             @if manage {
                                 form.inline method="post" action="/subscriptions" {
@@ -883,33 +886,36 @@ fn history(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Re
             (views::tile(in_status("not_applicable"), "not applicable", false))
         }
         (listing.filter_box("Filter: CVE, application, status, author…", state.len(), state_total))
-        table.list {
-            thead {
-                tr {
-                    (listing.th("cve", "CVE")) (listing.th("cvss", "CVSS")) (listing.th("app", "Application"))
-                    @if scope.all() { (listing.th("project", "Project")) }
-                    (listing.th("status", "Status that day")) (listing.th("since", "Since (UTC)")) (listing.th("by", "By"))
-                    th { "Justification" }
-                }
-            }
-            tbody {
-                @for item in state.iter().take(500) {
-                    @let e = &item.event;
+        div.scroll {
+            table.list.fit.dense {
+                (views::columns("cve cvss app project decision when who -", scope.all()))
+                thead {
                     tr {
-                        td.nowrap {
-                            a href={ "/cve/" (enc(&e.cve_id)) } { (e.cve_id) }
-                            @if e.kev { " " span.tag.kev { "KEV" } }
-                        }
-                        td.nowrap { (views::cvss_badge(e.cvss)) }
-                        td.nowrap { (e.app_name) " " span.muted { (e.app_version.as_deref().unwrap_or("")) } }
-                        @if scope.all() { td.nowrap { (project_cell(e)) } }
-                        td { (status_badge(&item.status)) }
-                        td.nowrap { (e.at) }
-                        td { (actor_cell(e)) }
-                        td { (e.comment.as_deref().unwrap_or("")) }
+                        (listing.th("cve", "CVE")) (listing.th("cvss", "CVSS")) (listing.th("app", "Application"))
+                        @if scope.all() { (listing.th("project", "Project")) }
+                        (listing.th("status", "Status that day")) (listing.th("since", "Since (UTC)")) (listing.th("by", "By"))
+                        th { "Justification" }
                     }
                 }
-                @if state.is_empty() { tr { td colspan="8" .muted { "Nothing was tracked at that date." } } }
+                tbody {
+                    @for item in state.iter().take(500) {
+                        @let e = &item.event;
+                        tr {
+                            td.cve {
+                                a href={ "/cve/" (enc(&e.cve_id)) } { (e.cve_id) }
+                                @if e.kev { " " span.tag.kev { "KEV" } }
+                            }
+                            td.nowrap { (views::cvss_badge(e.cvss)) }
+                            td { (e.app_name) " " span.muted { (e.app_version.as_deref().unwrap_or("")) } }
+                            @if scope.all() { td { (project_cell(e)) } }
+                            td { (status_badge(&item.status)) }
+                            td.nowrap { (e.at) }
+                            td { (actor_cell(e)) }
+                            td { (e.comment.as_deref().unwrap_or("")) }
+                        }
+                    }
+                    @if state.is_empty() { tr { td colspan="8" .muted { "Nothing was tracked at that date." } } }
+                }
             }
         }
         @if state.len() > 500 { p.muted { "Showing 500 of " (state.len()) " entries." } }
@@ -1007,39 +1013,42 @@ fn audit(db: &Database, user: &Account, scope: &Scope, q: &ProductQuery) -> Resu
             }
         }
         (listing.filter_box("Filter: author, CVE, application, justification…", decisions.len(), total))
-        table.list {
-            thead {
-                tr {
-                    (listing.th("when", "When (UTC)")) (listing.th("who", "Who")) (listing.th("decision", "Decision"))
-                    (listing.th("cve", "CVE")) (listing.th("cvss", "CVSS")) (listing.th("app", "Application"))
-                    @if scope.all() { (listing.th("project", "Project")) }
-                    th { "Justification" }
-                }
-            }
-            tbody {
-                @for e in decisions.iter().take(500) {
+        div.scroll {
+            table.list.fit.dense {
+                (views::columns("when who decision cve cvss app project -", scope.all()))
+                thead {
                     tr {
-                        td.nowrap { (e.at) }
-                        td { (actor_cell(e)) }
-                        td.nowrap {
-                            @if e.kind == "removed" {
-                                span.muted { "removed" }
-                            } @else {
-                                span.muted { (charts::status_label(e.previous.as_deref().unwrap_or(""))) " → " }
-                                (status_badge(e.status.as_deref().unwrap_or("")))
-                            }
-                        }
-                        td.nowrap {
-                            a href={ "/cve/" (enc(&e.cve_id)) } { (e.cve_id) }
-                            @if e.kev { " " span.tag.kev { "KEV" } }
-                        }
-                        td.nowrap { (views::cvss_badge(e.cvss)) }
-                        td.nowrap { (e.app_name) " " span.muted { (e.app_version.as_deref().unwrap_or("")) } }
-                        @if scope.all() { td.nowrap { (project_cell(e)) } }
-                        td { (e.comment.as_deref().unwrap_or("")) }
+                        (listing.th("when", "When (UTC)")) (listing.th("who", "Who")) (listing.th("decision", "Decision"))
+                        (listing.th("cve", "CVE")) (listing.th("cvss", "CVSS")) (listing.th("app", "Application"))
+                        @if scope.all() { (listing.th("project", "Project")) }
+                        th { "Justification" }
                     }
                 }
-                @if decisions.is_empty() { tr { td colspan="8" .muted { "No decision of this kind yet." } } }
+                tbody {
+                    @for e in decisions.iter().take(500) {
+                        tr {
+                            td.nowrap { (e.at) }
+                            td { (actor_cell(e)) }
+                            td {
+                                @if e.kind == "removed" {
+                                    span.muted { "removed" }
+                                } @else {
+                                    span.muted { (charts::status_label(e.previous.as_deref().unwrap_or(""))) " → " }
+                                    (status_badge(e.status.as_deref().unwrap_or("")))
+                                }
+                            }
+                            td.cve {
+                                a href={ "/cve/" (enc(&e.cve_id)) } { (e.cve_id) }
+                                @if e.kev { " " span.tag.kev { "KEV" } }
+                            }
+                            td.nowrap { (views::cvss_badge(e.cvss)) }
+                            td { (e.app_name) " " span.muted { (e.app_version.as_deref().unwrap_or("")) } }
+                            @if scope.all() { td { (project_cell(e)) } }
+                            td { (e.comment.as_deref().unwrap_or("")) }
+                        }
+                    }
+                    @if decisions.is_empty() { tr { td colspan="8" .muted { "No decision of this kind yet." } } }
+                }
             }
         }
         @if decisions.len() > 500 { p.muted { "Showing the 500 most recent of " (decisions.len()) "." } }
@@ -1067,7 +1076,8 @@ fn settings(db: &Database, config: &crate::config::Config, scope: &Scope, new_ki
 
         h2 { "Members" }
         p.muted { "Who can access this project, and where the right comes from. A right given here applies to this project only." }
-        table.list {
+        table.list.fit {
+            (views::columns("- kind - act", true))
             thead { tr { th { "User" } th { "Role" } th { "Level" } th {} } }
             tbody {
                 @for m in &members {

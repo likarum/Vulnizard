@@ -217,7 +217,8 @@ pub fn project_section(
     Ok(html! {
         h2 { "Notifications" }
         p.muted { "Sent after each sync when a CVE of a subscribed vendor or product changes." }
-        table.list {
+        table.list.fit {
+            (views::columns("- kind - flag flag flag actions", true))
             thead { tr { th { "Destination" } th { "Type" } th { "Target" } th { "Events" } th { "Min CVSS" } th { "Status" } th {} } }
             tbody {
                 @for n in &rules {
@@ -233,7 +234,7 @@ pub fn project_section(
                         td { @if n.events.is_empty() { "all" } @else { (n.events.join(", ")) } }
                         td { @if let Some(m) = n.min_cvss { (format!("{m:.1}")) } @else { "—" } }
                         td { @if n.enabled { "enabled" } @else { span.muted { "disabled" } } }
-                        td.right.nowrap {
+                        td.right.actions {
                             @if manage {
                                 form.inline method="post" action={ (base) "/notifications/" (n.id) "/toggle" } {
                                     button.small.secondary type="submit" { @if n.enabled { "Disable" } @else { "Enable" } }
@@ -274,7 +275,8 @@ pub fn project_section(
 
         h2 { "Destinations of this project" }
         p.muted { "Where this project's messages can go. A destination created here is only usable by this project." }
-        table.list {
+        table.list.fit {
+            (views::columns("name kind - who act", true))
             thead { tr { th { "Name" } th { "Type" } th { "Target" } th { "Belongs to" } th {} } }
             tbody {
                 @for d in &destinations {
@@ -534,36 +536,39 @@ fn admin_rules(db: &Database) -> Result<Markup, AppError> {
     Ok(html! {
         p.muted { "Which project notifies which destination. Rules are created in each project's settings." }
         (listing.filter_box("Filter: project, destination, type, target…", all.len(), total))
-        table.list {
-            thead {
-                tr {
-                    (listing.th("project", "Project")) (listing.th("name", "Destination")) (listing.th("type", "Type"))
-                    th { "Target" } th { "Events" } th { "Min CVSS" } (listing.th("status", "Status")) th {}
-                }
-            }
-            tbody {
-                @for item in &all {
-                    @let n: &Notification = &item.notification;
+        div.scroll {
+            table.list.fit.dense {
+                (views::columns("project name kind - - flag flag actions", true))
+                thead {
                     tr {
-                        td.nowrap { a href=(product_url(Some((&item.org, &item.project)), "settings")) { (item.project) } " " span.muted { (item.org) } }
-                        td { (n.name) }
-                        td { (kind_label(&n.kind)) }
-                        td { (views::truncate(&n.target, 50)) }
-                        td { @if n.events.is_empty() { "all" } @else { (n.events.join(", ")) } }
-                        td { @if let Some(m) = n.min_cvss { (format!("{m:.1}")) } @else { "—" } }
-                        td { @if n.enabled { "enabled" } @else { span.muted { "disabled" } } }
-                        td.right.nowrap {
-                            form.inline method="post" action={ "/admin/notifications/" (n.id) } {
-                                button.small type="submit" name="action" value="test" { "Send test" }
-                                " "
-                                button.small.secondary type="submit" name="action" value="toggle" { @if n.enabled { "Disable" } @else { "Enable" } }
-                                " "
-                                button.small.danger type="submit" name="action" value="delete" { "Stop" }
+                        (listing.th("project", "Project")) (listing.th("name", "Destination")) (listing.th("type", "Type"))
+                        th { "Target" } th { "Events" } th { "Min CVSS" } (listing.th("status", "Status")) th {}
+                    }
+                }
+                tbody {
+                    @for item in &all {
+                        @let n: &Notification = &item.notification;
+                        tr {
+                            td.project { a href=(product_url(Some((&item.org, &item.project)), "settings")) title=(item.project) { (item.project) } " " span.muted { (item.org) } }
+                            td { (n.name) }
+                            td { (kind_label(&n.kind)) }
+                            td { (views::truncate(&n.target, 50)) }
+                            td { @if n.events.is_empty() { "all" } @else { (n.events.join(", ")) } }
+                            td { @if let Some(m) = n.min_cvss { (format!("{m:.1}")) } @else { "—" } }
+                            td { @if n.enabled { "enabled" } @else { span.muted { "disabled" } } }
+                            td.right.actions {
+                                form.inline method="post" action={ "/admin/notifications/" (n.id) } {
+                                    button.small type="submit" name="action" value="test" { "Send test" }
+                                    " "
+                                    button.small.secondary type="submit" name="action" value="toggle" { @if n.enabled { "Disable" } @else { "Enable" } }
+                                    " "
+                                    button.small.danger type="submit" name="action" value="delete" { "Stop" }
+                                }
                             }
                         }
                     }
+                    @if all.is_empty() { tr { td colspan="8" .muted { "No project notifies anyone yet." } } }
                 }
-                @if all.is_empty() { tr { td colspan="8" .muted { "No project notifies anyone yet." } } }
             }
         }
     })
@@ -626,63 +631,66 @@ fn admin_destinations(
         }
         @if let Some(offer) = enable { (offer) }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
-        table.list {
-            thead {
-                tr {
-                    (listing.th("name", "Name")) (listing.th("type", "Type")) th { "Target" }
-                    (listing.th("owner", "Offered to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
-                }
-            }
-            tbody {
-                @for d in &all {
+        div.scroll {
+            table.list.fit.dense {
+                (views::columns("- kind - - wide num actions", true))
+                thead {
                     tr {
-                        td { (d.name) }
-                        td { (kind_label(&d.kind)) }
-                        td { (views::truncate(&d.target(), 50)) }
-                        td {
-                            @match d.scope.as_str() {
-                                "instance" => { "all projects" }
-                                "organization" => { "projects of organization " (d.scope_label) }
-                                _ => { "project " (d.scope_label) " only" }
-                            }
-                        }
-                        td {
-                            @let users: Vec<ProjectRef> = rules.iter()
-                                .filter(|r| r.notification.destination_id == d.id)
-                                .map(|r| (r.org.as_str(), r.project.as_str()))
-                                .collect();
-                            @if users.is_empty() {
-                                // Offered but not picked: nothing leaves through it, and the page says where to pick it
-                                @let offered: Vec<ProjectRef> = projects.iter()
-                                    .filter(|p| match d.scope.as_str() {
-                                        "instance" => true,
-                                        "organization" => p.org == d.scope_label,
-                                        _ => Some(p.id) == d.scope_id,
-                                    })
-                                    .map(|p| (p.org.as_str(), p.name.as_str()))
-                                    .collect();
-                                "no project yet"
-                                div.muted {
-                                    @if d.system_events { "It only sends instance events" } @else { "It sends nothing" }
-                                    " until a project picks it"
-                                    @if !offered.is_empty() { ", in its notification settings: " (project_links(&offered, several_orgs, 3)) }
-                                    "."
+                        (listing.th("name", "Name")) (listing.th("type", "Type")) th { "Target" }
+                        (listing.th("owner", "Offered to")) (listing.th("rules", "Used by")) th { "Instance events" } th {}
+                    }
+                }
+                tbody {
+                    @for d in &all {
+                        tr {
+                            td { (d.name) }
+                            td { (kind_label(&d.kind)) }
+                            td { (views::truncate(&d.target(), 50)) }
+                            td {
+                                @match d.scope.as_str() {
+                                    "instance" => { "all projects" }
+                                    "organization" => { "projects of organization " (d.scope_label) }
+                                    _ => { "project " (d.scope_label) " only" }
                                 }
-                            } @else {
-                                (project_links(&users, several_orgs, 8))
                             }
-                        }
-                        td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
-                        td.right.nowrap {
-                            form.inline method="post" action={ "/admin/notifications/destinations/" (d.id) } {
-                                button.small type="submit" name="action" value="test" { "Send test" }
-                                " "
-                                button.small.danger type="submit" name="action" value="delete" { "Delete" }
+                            td {
+                                @let users: Vec<ProjectRef> = rules.iter()
+                                    .filter(|r| r.notification.destination_id == d.id)
+                                    .map(|r| (r.org.as_str(), r.project.as_str()))
+                                    .collect();
+                                @if users.is_empty() {
+                                    // Offered but not picked: nothing leaves through it, and the page says where to pick it
+                                    @let offered: Vec<ProjectRef> = projects.iter()
+                                        .filter(|p| match d.scope.as_str() {
+                                            "instance" => true,
+                                            "organization" => p.org == d.scope_label,
+                                            _ => Some(p.id) == d.scope_id,
+                                        })
+                                        .map(|p| (p.org.as_str(), p.name.as_str()))
+                                        .collect();
+                                    "no project yet"
+                                    div.muted {
+                                        @if d.system_events { "It only sends instance events" } @else { "It sends nothing" }
+                                        " until a project picks it"
+                                        @if !offered.is_empty() { ", in its notification settings: " (project_links(&offered, several_orgs, 3)) }
+                                        "."
+                                    }
+                                } @else {
+                                    (project_links(&users, several_orgs, 8))
+                                }
+                            }
+                            td { @if d.system_events { "sync finished" } @else { span.muted { "—" } } }
+                            td.right.actions {
+                                form.inline method="post" action={ "/admin/notifications/destinations/" (d.id) } {
+                                    button.small type="submit" name="action" value="test" { "Send test" }
+                                    " "
+                                    button.small.danger type="submit" name="action" value="delete" { "Delete" }
+                                }
                             }
                         }
                     }
+                    @if all.is_empty() { tr { td colspan="7" .muted { "No destination yet." } } }
                 }
-                @if all.is_empty() { tr { td colspan="7" .muted { "No destination yet." } } }
             }
         }
         @match new_kind {

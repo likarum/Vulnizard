@@ -194,7 +194,8 @@ fn trail_of(db: &Database, user_id: i64, event: &str) -> Result<(), AppError> {
 /// Table of security events (the account column only where several accounts show)
 pub(super) fn events_table(events: &[SecurityEvent], with_account: bool) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (super::views::columns(if with_account { "when - name name" } else { "when - name" }, true))
             thead { tr { th { "When (UTC)" } th { "Event" } @if with_account { th { "Account" } } th { "By" } } }
             tbody {
                 @for e in events {
@@ -575,7 +576,8 @@ fn manage_page(st: &AppState, db: &Database, user: &Account, message: Option<Mar
 
                 h2 { "Passkeys and security keys" }
                 @if !status.passkeys.is_empty() {
-                    table.list {
+                    table.list.fit {
+                        (super::views::columns("- when when act", true))
                         thead { tr { th { "Name" } th { "Added" } th { "Last used" } th {} } }
                         tbody {
                             @for key in &status.passkeys {

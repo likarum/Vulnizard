@@ -520,7 +520,8 @@ pub fn th(listing: Option<&Listing>, key: &str, label: &str) -> Markup {
 
 pub fn cve_table(cves: &[CveSummary], listing: Option<&Listing>) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (columns("cve cvss flag - day", true))
             thead {
                 tr {
                     (th(listing, "id", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "epss", "EPSS"))
@@ -530,7 +531,7 @@ pub fn cve_table(cves: &[CveSummary], listing: Option<&Listing>) -> Markup {
             tbody {
                 @for c in cves {
                     tr {
-                        td.nowrap {
+                        td.cve {
                             a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) }
                             @if c.kev { " " span.tag.kev title="CISA Known Exploited" { "KEV" } }
                         }
@@ -629,7 +630,8 @@ pub fn event_tags(events: &[Event]) -> Markup {
 /// Latest changes on subscribed CVEs, across projects
 pub fn project_changes(changes: &[ProjectChange], show_project: bool) -> Markup {
     html! {
-        table.list {
+        table.list.fit {
+            (columns("cve cvss - project when", show_project))
             thead {
                 tr {
                     th { "CVE" } th { "CVSS" } th { "What changed" }
@@ -640,12 +642,12 @@ pub fn project_changes(changes: &[ProjectChange], show_project: bool) -> Markup 
             tbody {
                 @for c in changes {
                     tr {
-                        td.nowrap { a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) } }
+                        td.cve { a href={ "/cve/" (enc(&c.cve_id)) } { (c.cve_id) } }
                         td.nowrap { (cvss_badge(c.cvss)) }
                         td { (event_tags(&c.events)) }
                         @if show_project {
-                            td.nowrap {
-                                a href={ "/orgs/" (enc(&c.org)) "/projects/" (enc(&c.project)) } { (c.project) }
+                            td.project {
+                                a href={ "/orgs/" (enc(&c.org)) "/projects/" (enc(&c.project)) } title=(c.project) { (c.project) }
                             }
                         }
                         td.nowrap { (c.created_at.replace('T', " ").trim_end_matches('Z')) }
@@ -690,11 +692,20 @@ pub fn triage_key(item: &TriageItem, column: &str) -> Option<SortKey> {
 /// by the stylesheet (`table.fit`): the table is as wide as its box at any
 /// window width, and it is the long texts that wrap.
 pub fn triage_columns(show_project: bool, middle: &str) -> Markup {
+    columns(&format!("cve cvss app project {middle} actions"), show_project)
+}
+
+/// Column group of a list sized by the stylesheet (`table.fit`): one word per
+/// column, separated by spaces. A name gives the column its width (`cve`,
+/// `when`, `num`, `name`, `act`…: see the stylesheet); a dash is a column of
+/// free text, which takes what is left. The `project` column is dropped when
+/// the list is the one of a single project.
+pub fn columns(names: &str, show_project: bool) -> Markup {
     html! {
         colgroup {
-            col.cve; col.cvss; col.app;
-            @if show_project { col.project; }
-            col class=(middle); col.actions;
+            @for name in names.split_whitespace().filter(|n| show_project || *n != "project") {
+                col class=[(name != "-").then_some(name)];
+            }
         }
     }
 }
@@ -817,6 +828,82 @@ mod tests {
         }
         // On a phone the rows are cards: the column group must not take part in them
         assert!(css.contains("table.list colgroup { display: none; }"));
+    }
+
+    #[test]
+    fn a_list_names_its_columns_and_the_stylesheet_sizes_them() {
+        // One name per column; the project column is dropped for a single project
+        assert_eq!(
+            columns("when who project -", true).into_string(),
+            "<colgroup><col class=\"when\"><col class=\"who\"><col class=\"project\"><col></colgroup>"
+        );
+        assert_eq!(columns("when who project -", false).into_string(), "<colgroup><col class=\"when\"><col class=\"who\"><col></colgroup>");
+
+        let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+        let css = comments.replace_all(STYLESHEET, "").into_owned();
+        // Between the phone layout and a wide window the same columns are tighter
+        let narrow = css.split("@media (min-width: 761px) and (max-width: 1199px) {").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions"];
+        for column in sized {
+            assert!(css.contains(&format!("\ntable.fit col.{column} {{ width:")), "{column}");
+            // One button keeps its width: its text has to fit
+            assert_eq!(narrow.contains(&format!("table.fit col.{column} {{ width:")), column != "act", "{column} in a narrow window");
+        }
+        // No name is also a class of the page: a column that became a flex box would shift every column after it
+        for column in sized.iter().chain(["desc"].iter()) {
+            assert!(!css.contains(&format!("\n.{column} ")) && !css.contains(&format!(", .{column} ")), "{column}");
+        }
+        // A date goes over its time, and the header never sticks out of its column
+        assert!(narrow.contains("table.fit td.nowrap { white-space: normal; }") && css.contains("table.fit th { overflow-wrap: break-word; }"));
+        // Names cut on one line where the window is narrow carry a title
+        assert!(narrow.contains("table.fit td.project a, table.fit .cut { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"));
+
+        // The lists of seven or eight columns keep a width they can be read at, and scroll in their own box below it
+        assert!(css.contains("\n.scroll { overflow-x: auto; }") && narrow.contains("table.fit.dense { min-width: 960px; }"));
+        assert!(!css.split("@media (max-width: 760px)").nth(1).unwrap().contains("min-width: 960px"));
+
+        // Cells asking for it are aligned on the right: the rule comes after the one aligning every cell on the
+        // left (same weight, the later wins), and the cards of a phone put them back on the left
+        let left = css.find("table.list th, table.list td {").unwrap();
+        let right = css.find("table.list td.right { text-align: right; }").unwrap();
+        let phone = css.find("@media (max-width: 760px)").unwrap();
+        assert!(left < right && right < phone);
+        // The form a decision opens follows its buttons
+        assert!(css.contains("table.list td.right form.row { justify-content: flex-end; }"));
+        assert!(css[phone..].contains("table.list td, table.list td.nowrap, table.list td.right {") && css[phone..].contains("text-align: left;"));
+    }
+
+    #[test]
+    fn the_lists_of_cves_and_of_changes_fit_the_window() {
+        let cve = CveSummary {
+            cve_id: "CVE-2024-6387".into(),
+            description: Some("A race condition. ".repeat(30)),
+            cvss: Some(8.1),
+            epss: Some(0.42),
+            kev: true,
+            published_at: Some("2024-07-01T08:15:00Z".into()),
+            modified_at: None,
+        };
+        let list = cve_table(&[cve], None).into_string();
+        assert!(list.starts_with("<table class=\"list fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"flag\"><col><col class=\"day\"></colgroup>"), "{list}");
+        // The identifier is kept whole by the stylesheet (td.cve a), its tag may go under it
+        assert!(list.contains("<td class=\"cve\"><a href=\"/cve/CVE%2D2024%2D6387\">CVE-2024-6387</a>"), "{list}");
+        assert_eq!(list.matches("<col").count() - 1, list.matches("<th").count() - 1);
+
+        let change = ProjectChange {
+            cve_id: "CVE-2024-6387".into(),
+            cvss: Some(8.1),
+            org: "acme".into(),
+            project: "customer-facing-payment-platform".into(),
+            created_at: "2026-11-22T15:13:41Z".into(),
+            events: vec![Event::Kev],
+        };
+        let all = project_changes(std::slice::from_ref(&change), true).into_string();
+        assert!(all.starts_with("<table class=\"list fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col><col class=\"project\"><col class=\"when\"></colgroup>"), "{all}");
+        // A long project name no longer widens the table: it wraps, or is cut with its title where the window is narrow
+        assert!(all.contains("<td class=\"project\"><a href=\"/orgs/acme/projects/customer%2Dfacing%2Dpayment%2Dplatform\" title=\"customer-facing-payment-platform\">"), "{all}");
+        let one = project_changes(&[change], false).into_string();
+        assert!(one.contains("<col class=\"cvss\"><col><col class=\"when\">") && !one.contains("class=\"project\""));
     }
 
     #[test]

@@ -3644,6 +3644,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn every_list_fits_the_window() {
+        let app = app(with_inventory());
+        let root = app.register("root").await;
+        app.post("/orgs", Some(&root), "name=acme").await;
+        app.post("/projects", Some(&root), "org=acme&name=infra").await;
+        let id = Database::connect(&app.db_path).unwrap().get_credentials("root").unwrap().unwrap().0.id;
+        let user = format!("/admin/users/{id}");
+        // The widths the stylesheet knows; a column without a name takes what is left
+        let sized = ["check", "cve", "cvss", "when", "day", "num", "flag", "kind", "decision", "name", "app", "who", "project", "wide", "version", "act", "actions", "desc"];
+        let table = regex::Regex::new(r#"(?s)<table class="([^"]*)">(.*?)</table>"#).unwrap();
+        let column = regex::Regex::new(r#"<col(?: class="([a-z]+)")?>"#).unwrap();
+        let pages = [
+            "/product", "/product?view=vulnerabilities", "/product?view=vulnerabilities&show=handled", "/product?view=applications",
+            "/product?view=subscriptions", "/product?view=history", "/product?view=audit",
+            "/product/acme/infra", "/product/acme/infra?view=vulnerabilities", "/product/acme/infra?view=applications",
+            "/product/acme/infra?view=subscriptions", "/product/acme/infra?view=history", "/product/acme/infra?view=audit",
+            "/product/acme/infra?view=settings", "/projects", "/orgs", "/orgs/acme", "/cve", "/cve/CVE-2024-4242", "/vendors", "/weaknesses",
+            "/settings", "/settings/mfa", "/admin", "/admin/users", user.as_str(), "/admin/sources", "/admin/notifications",
+            "/admin/notifications?tab=destinations", "/admin/security", "/admin/mcp", "/admin/sso", "/admin/sso?tab=scim",
+        ];
+        let (mut lists, mut dense) = (0, 0);
+        for path in pages {
+            let page = app.get(path, Some(&root)).await;
+            assert_eq!(page.status, StatusCode::OK, "{path}");
+            for found in table.captures_iter(&page.body) {
+                let (classes, inside) = (&found[1], &found[2]);
+                lists += 1;
+                // Sized by the stylesheet, not by its content: no name or text can make it wider than the page
+                assert!(classes.starts_with("list ") && classes.split(' ').any(|c| c == "fit"), "{path}: {classes}");
+                let head = inside.split("</thead>").next().unwrap();
+                let columns: Vec<&str> = column.captures_iter(head).map(|c| c.get(1).map_or("", |m| m.as_str())).collect();
+                assert!(inside.starts_with("<colgroup>") && !columns.is_empty(), "{path}: no column group");
+                // One column named per header cell, each name known to the stylesheet, and room left for a text
+                assert_eq!(columns.len(), head.matches("<th").count() - 1, "{path}: {columns:?}");
+                assert!(columns.iter().all(|c| c.is_empty() || sized.contains(c)), "{path}: {columns:?}");
+                assert!(columns.iter().any(|c| c.is_empty() || ["desc", "app"].contains(c)), "{path}: {columns:?}");
+                // A cell kept on one line must be one whose column is wide enough: an identifier, a score, a date
+                assert!(!inside.contains("class=\"right nowrap\""), "{path}");
+                // The widest lists scroll inside their own box, which is all that surrounds them
+                if classes.split(' ').any(|c| c == "dense") {
+                    dense += 1;
+                    let before = &page.body[..found.get(0).unwrap().start()];
+                    assert!(before.ends_with("<div class=\"scroll\">"), "{path}");
+                }
+            }
+        }
+        assert!(lists >= 34 && dense >= 6, "{lists} lists, {dense} dense");
+        // No list of the interface is left to the width of its content
+        for source in [
+            include_str!("admin.rs"), include_str!("inventory.rs"), include_str!("mfa.rs"), include_str!("notifications.rs"),
+            include_str!("pages.rs"), include_str!("product.rs"), include_str!("projects.rs"), include_str!("views.rs"),
+        ] {
+            let plain = regex::Regex::new(r"(?m)^\s*table\.list \{").unwrap();
+            assert_eq!(plain.find_iter(source).count(), 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_vulnerabilities_view_keeps_its_old_address() {
         let app = app(open_registration());
         let alice = app.register("alice").await;
