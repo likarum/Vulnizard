@@ -1922,6 +1922,63 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_browser_test_offers_to_enable_notifications() {
+        let app = app(open_registration());
+        let admin = app.register("root").await;
+        for form in ["owner=instance&kind=browser&name=Browsers", "owner=instance&kind=ntfy&name=ops&url=https%3A%2F%2F8.8.8.8%2Fops"] {
+            assert_eq!(app.post("/admin/notifications/destinations", Some(&admin), form).await.status, StatusCode::SEE_OTHER);
+        }
+        let db = Database::connect(&app.db_path).unwrap();
+        let id_of = |kind: &str| db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == kind).unwrap().id;
+        let (browsers, ops) = (id_of("browser"), id_of("ntfy"));
+        let list = "/admin/notifications?tab=destinations";
+
+        // No browser registered: the test is not reported as failed, the administrator is sent to the offer
+        let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
+        assert_eq!(tested.status, StatusCode::SEE_OTHER);
+        assert_eq!(tested.location, Some(format!("{list}&enable={browsers}")));
+        assert!(!tested.cookie.unwrap_or_default().contains("failed"));
+
+        // The offer: a button for the script (hidden until it runs), the form that sends the test,
+        // and the way through the Settings page for a browser without JavaScript
+        let page = app.get(&format!("{list}&enable={browsers}"), Some(&admin)).await.body;
+        let offer = page.split("id=\"push-test\"").nth(1).expect("the offer is shown").split("</form>").next().unwrap().to_string();
+        assert!(offer.contains("Test through “Browsers”: none of your browsers is registered."), "{offer}");
+        assert!(offer.contains("<p data-fallback>Enable notifications for this browser first, in <a href=\"/settings\">Settings → Browser notifications</a>"), "{offer}");
+        assert!(offer.contains("<p data-status hidden></p>"), "{offer}");
+        assert!(offer.contains(&format!("<form method=\"post\" action=\"/admin/notifications/destinations/{browsers}\"><input type=\"hidden\" name=\"action\" value=\"test\">")), "{offer}");
+        assert!(offer.contains("<button type=\"button\" data-enable hidden>Enable notifications on this browser and send the test</button>"), "{offer}");
+        // Same-origin script only, as the content security policy demands
+        assert!(page.contains("<script src=\"/static/push.js\" defer></script>"));
+        assert!(!page.contains("<script>") && !page.contains("onclick"));
+
+        // The script registers the browser the way the Settings page does, then sends the form
+        let script = app.get("/static/push.js", None).await.body;
+        for needle in ["push-test", "push-box", "requestPermission", "/push/key", "/push/subscribe", "form.submit()"] {
+            assert!(script.contains(needle), "{needle}");
+        }
+        assert_eq!(script.matches("\"/push/subscribe\"").count(), 1);
+
+        // Nothing is offered without the request, for another type of destination or for an unknown one
+        for path in [list.to_string(), format!("{list}&enable={ops}"), format!("{list}&enable=9999")] {
+            let body = app.get(&path, Some(&admin)).await.body;
+            assert!(!body.contains("push-test") && !body.contains("push.js"), "{path}");
+        }
+
+        // Once a browser is registered there is nothing left to offer
+        let subscription = serde_json::json!({ "endpoint": "https://8.8.8.8/push/abc", "label": "laptop" });
+        let request = HttpRequest::post("/push/subscribe")
+            .header(header::HOST, "localhost")
+            .header(header::ORIGIN, "http://localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::COOKIE, admin.clone())
+            .body(Body::from(subscription.to_string()))
+            .unwrap();
+        assert_eq!(app.send(request).await.status, StatusCode::OK);
+        assert!(!app.get(&format!("{list}&enable={browsers}"), Some(&admin)).await.body.contains("push-test"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn browser_notifications_are_per_user() {
         let app = app(open_registration());
         let alice = app.register("alice").await;
@@ -1966,15 +2023,14 @@ mod tests {
         assert_eq!(db.list_push_subscriptions(alice_id).unwrap().len(), 1);
         assert!(app.get("/settings", Some(&alice)).await.body.contains("laptop"));
 
-        // A test through a browser destination says so when nobody is there to receive it
+        // A test through a browser destination with nobody to receive it is not sent: the page offers to enable this browser
         let admin = app.register("zadmin").await; // not the first account: grant it below
         db.set_admin(db.get_credentials("zadmin").unwrap().unwrap().0.id, true).unwrap();
         let admin = app.post("/login", None, "username=zadmin&password=a-long-password").await.cookie.unwrap_or(admin);
         app.post("/admin/notifications/destinations", Some(&admin), "owner=instance&kind=browser&name=Browsers").await;
         let browsers = db.list_all_destinations().unwrap().into_iter().find(|d| d.kind == "browser").unwrap().id;
         let tested = app.post(&format!("/admin/notifications/destinations/{browsers}"), Some(&admin), "action=test").await;
-        let flash = tested.cookie.unwrap();
-        assert!(flash.contains("failed") && flash.contains("none%20of%20your%20browsers"), "{flash}");
+        assert_eq!(tested.location, Some(format!("/admin/notifications?tab=destinations&enable={browsers}")));
         // The list tells that a destination nobody picked sends nothing
         let listed = app.get("/admin/notifications?tab=destinations", Some(&admin)).await.body;
         assert!(listed.contains("<td>all projects</td>") && listed.contains("It sends nothing until a project picks it"));

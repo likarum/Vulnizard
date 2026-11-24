@@ -438,6 +438,9 @@ pub struct AdminQuery {
     tab: Option<String>,
     /// Type of the destination being added
     new: Option<String>,
+    /// Browser destination whose test found no browser to send to: the page
+    /// offers to enable notifications on this one
+    enable: Option<i64>,
 }
 
 /// Choices of the "belongs to" selector of an instance or organization destination
@@ -479,7 +482,7 @@ pub async fn admin(
         let config = st.effective_config(&db)?;
         let tab = q.tab.as_deref().unwrap_or("projects");
         let body = match tab {
-            "destinations" => admin_destinations(&db, &config, q.new.as_deref())?,
+            "destinations" => admin_destinations(&db, &config, &user, q.new.as_deref(), q.enable)?,
             "delivery" => html! {
                 form.stack.card method="post" action="/admin/notifications/delivery" {
                     label.check {
@@ -582,9 +585,20 @@ fn project_links(projects: &[ProjectRef], with_org: bool, max: usize) -> Markup 
 }
 
 /// Tab: every destination, whatever it belongs to
-fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) -> Result<Markup, AppError> {
+fn admin_destinations(
+    db: &Database,
+    config: &Config,
+    user: &crate::db::Account,
+    new_kind: Option<&str>,
+    enable: Option<i64>,
+) -> Result<Markup, AppError> {
     let mut all = db.list_all_destinations()?;
     let total = all.len();
+    // Only while it is still true: once a browser is registered the test is simply sent
+    let enable = match enable.and_then(|id| all.iter().find(|d| d.id == id && d.kind == "browser")) {
+        Some(destination) if db.list_push_subscriptions(user.id)?.is_empty() => Some(push_test_offer(destination)),
+        _ => None,
+    };
     let listing = views::Listing::from_page("owner", false);
     listing.apply(
         &mut all,
@@ -610,6 +624,7 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
             "Being offered is not being used: a destination sends for a project once that project picks it in its notification settings. "
             "“Browser notifications” reach the people who enabled them for their browser in their own Settings; a test goes to your browsers."
         }
+        @if let Some(offer) = enable { (offer) }
         (listing.filter_box("Filter: name, type, target, owner…", all.len(), total))
         table.list {
             thead {
@@ -700,6 +715,33 @@ fn admin_destinations(db: &Database, config: &Config, new_kind: Option<&str>) ->
     })
 }
 
+/// Shown when a test through a browser destination found none of the
+/// administrator's browsers registered: a button enables notifications on
+/// this browser (push.js: permission, registration) and then sends the test.
+/// Without JavaScript, or where the browser cannot receive notifications, the
+/// button stays hidden and the text points to the Settings page.
+fn push_test_offer(destination: &Destination) -> Markup {
+    html! {
+        div.card.notice id="push-test" {
+            p {
+                strong { "Test through “" (destination.name) "”: none of your browsers is registered." }
+                " Browser notifications reach each person on the browsers they enabled, and a test goes to yours."
+            }
+            p data-fallback {
+                "Enable notifications for this browser first, in "
+                a href="/settings" { "Settings → Browser notifications" }
+                ", then send the test again."
+            }
+            p data-status hidden {}
+            form method="post" action={ "/admin/notifications/destinations/" (destination.id) } {
+                input type="hidden" name="action" value="test";
+                button type="button" data-enable hidden { "Enable notifications on this browser and send the test" }
+            }
+        }
+        script src="/static/push.js" defer {}
+    }
+}
+
 pub async fn admin_destination_create(State(st): St, User(user): User, Form(fields): Form<Fields>) -> ActionResult {
     require_admin(&user)?;
     blocking(|| {
@@ -742,19 +784,17 @@ pub async fn admin_destination_action(
                     // Browsers are addressed per person: the test goes to those of whoever asks
                     let registered = db.list_push_subscriptions(user.id)?.len();
                     if registered == 0 {
-                        Err(anyhow::anyhow!(
-                            "none of your browsers is registered. Enable notifications for this browser first, in Settings → Browser notifications"
-                        ))
-                    } else {
-                        crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
-                            |reached| match reached {
-                                0 => Err(anyhow::anyhow!(
-                                    "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
-                                )),
-                                n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
-                            },
-                        )
+                        // Nowhere to send it yet: not a failure, the page offers to enable this browser
+                        return Ok(redirect(format!("{back}&enable={id}")));
                     }
+                    crate::push::deliver(&db, &config, user.id, "Vulnizard test", "Browser notifications work.", "/settings").and_then(
+                        |reached| match reached {
+                            0 => Err(anyhow::anyhow!(
+                                "the push service refused or did not answer for your {registered} registered browser(s) (see the server log)"
+                            )),
+                            n => Ok(format!("sent to {n} of your {registered} registered browser(s)")),
+                        },
+                    )
                 } else {
                     notify::send_system(&config, &destination, "Test", "Test message sent from the Vulnizard administration.")
                         .map(|()| "sent".to_string())
