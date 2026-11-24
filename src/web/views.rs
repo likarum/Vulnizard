@@ -755,6 +755,8 @@ pub fn triage_key(item: &TriageItem, column: &str) -> Option<SortKey> {
         "app" => Some(SortKey::text(&item.app_name)),
         "project" => Some(SortKey::text(&item.project)),
         "status" => Some(SortKey::text(&item.status)),
+        // The nearest deadline first, the most overdue before all
+        "due" => Some(SortKey::opt(item.deadline.and_then(|d| d.days_left()).map(|days| days as f64))),
         _ => None,
     }
 }
@@ -781,6 +783,21 @@ pub fn columns(names: &str, show_project: bool) -> Markup {
     }
 }
 
+/// Where an entry to review stands against its remediation deadline: "in 12
+/// days", "today", or a red mark once overdue. The title gives the dates.
+pub fn due_cell(item: &TriageItem) -> Markup {
+    html! {
+        @if let Some(deadline) = item.deadline.filter(|d| d.days_left().is_some()) {
+            @let title = format!("Due {}: {} days after its detection on {}", deadline.due, deadline.delay_days, deadline.detected);
+            @if deadline.is_overdue() {
+                td.due.late { span.tag.late title=(title) { (deadline.label()) } }
+            } @else {
+                td.due title=(title) { (deadline.label()) }
+            }
+        } @else { td.due {} }
+    }
+}
+
 /// Vulnerabilities to review, with the buttons deciding on each
 pub fn triage_table(
     items: &[TriageItem],
@@ -790,12 +807,12 @@ pub fn triage_table(
 ) -> Markup {
     html! {
         table.list.triage.fit {
-            (triage_columns(show_project, "desc"))
+            (triage_columns(show_project, "due desc"))
             thead {
                 tr {
                     (th(listing, "cve", "CVE")) (th(listing, "cvss", "CVSS")) (th(listing, "app", "Application"))
                     @if show_project { (th(listing, "project", "Project")) }
-                    th { "Description" } th {}
+                    (th(listing, "due", "Due")) th { "Description" } th {}
                 }
             }
             tbody {
@@ -814,13 +831,14 @@ pub fn triage_table(
                                 a href={ "/orgs/" (enc(&item.org)) "/projects/" (enc(&item.project)) } title=(item.project) { (item.project) }
                             }
                         }
+                        (due_cell(item))
                         // The title gives the text back where a narrow window cuts it after a few lines
                         td.desc { @if !description.is_empty() { div.clamp title=(truncate(description, 160)) { (truncate(description, 160)) } } }
                         td.right.actions { (actions(item)) }
                     }
                 }
                 @if items.is_empty() {
-                    tr { td colspan=(if show_project { "6" } else { "5" }) .muted { "Nothing to review." } }
+                    tr { td colspan=(if show_project { "7" } else { "6" }) .muted { "Nothing to review." } }
                 }
             }
         }
@@ -868,10 +886,26 @@ mod tests {
             description: Some("A race condition. ".repeat(30)),
             group: "web".into(),
             version_unknown: true,
+            detected_at: "2026-01-01 00:00:00".into(),
+            decided_at: None,
+            deadline: None,
         };
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 2, 5).unwrap();
+        let delays = crate::deadlines::Delays::default();
+        // High and known exploited: 14 days from January 1st, so 21 days late on February 5th
+        let item = TriageItem { deadline: Some(delays.assess(today - chrono::Duration::days(35), None, item.cvss, item.kev, today)), ..item };
         let all = triage_table(std::slice::from_ref(&item), true, None, |_| html! { button { "Close" } }).into_string();
         // The columns are named for the stylesheet, which gives each its width
-        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        assert!(all.contains("<table class=\"list triage fit\"><colgroup><col class=\"cve\"><col class=\"cvss\"><col class=\"app\"><col class=\"project\"><col class=\"due\"><col class=\"desc\"><col class=\"actions\"></colgroup>"), "{all}");
+        // Overdue entries carry a mark; the dates are in its title
+        assert!(all.contains("<td class=\"due late\"><span class=\"tag late\" title=\"Due 2026-01-15: 14 days after its detection on 2026-01-01\">overdue by 21 days</span></td>"), "{all}");
+        let later = TriageItem { deadline: Some(delays.assess(today - chrono::Duration::days(2), None, item.cvss, false, today)), ..item.clone() };
+        let in_time = triage_table(&[later.clone()], true, None, |_| html! {}).into_string();
+        assert!(in_time.contains("<td class=\"due\" title=\"Due 2026-03-05: 30 days after its detection on 2026-02-03\">in 28 days</td>"), "{in_time}");
+        // The nearest deadline sorts first; a decided entry has none
+        let decided = TriageItem { deadline: Some(delays.assess(today, Some(today), None, false, today)), ..item.clone() };
+        assert_eq!(triage_key(&item, "due").unwrap().compare(&triage_key(&later, "due").unwrap()), std::cmp::Ordering::Less);
+        assert!(triage_table(&[decided], true, None, |_| html! {}).into_string().contains("<td class=\"due\"></td>"));
         // Only the score is kept on one line: names, tags and buttons wrap inside their column
         assert_eq!(all.matches("nowrap").count(), 1, "{all}");
         assert!(all.contains("title=\"customer-facing-payment-platform\">customer-facing-payment-platform</a>"));
@@ -884,16 +918,16 @@ mod tests {
 
         // One project: no project column, in the column group as in the rows
         let one = triage_table(&[item], false, None, |_| html! {}).into_string();
-        assert!(one.contains("<col class=\"app\"><col class=\"desc\">") && !one.contains("class=\"project\""));
+        assert!(one.contains("<col class=\"app\"><col class=\"due\"><col class=\"desc\">") && !one.contains("class=\"project\""));
         let empty = triage_table(&[], false, None, |_| html! {}).into_string();
-        assert!(empty.contains("colspan=\"5\"") && empty.contains("Nothing to review."));
+        assert!(empty.contains("colspan=\"6\"") && empty.contains("Nothing to review."));
         assert!(triage_columns(true, "decision").into_string().contains("<col class=\"project\"><col class=\"decision\"><col class=\"actions\">"));
 
         // The stylesheet fixes the layout, sizes every named column and lets long words break
         let comments = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
         let css = comments.replace_all(STYLESHEET, "").into_owned();
         assert!(css.contains("table.list.fit { table-layout: fixed; }") && css.contains("table.fit td { overflow-wrap: anywhere; }"));
-        for column in ["cve", "cvss", "app", "project", "desc", "decision", "actions"] {
+        for column in ["cve", "cvss", "app", "project", "due", "desc", "decision", "actions"] {
             // The description is the one column left without a width: it takes what remains
             assert_eq!(css.contains(&format!("table.fit col.{column} {{ width:")), column != "desc", "{column}");
         }

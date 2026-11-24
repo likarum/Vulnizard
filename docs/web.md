@@ -22,8 +22,17 @@ database was last synchronized (administrators can start a sync from there):
   - *Overview*: counters and charts. With all projects, each project has its own color and each
     severity level its own bar; for a single project, severity levels are told apart by color
   - *Vulnerabilities*: CVEs affecting the deployed versions. Those still to review are listed
-    first (the default filter); the other filter lists those already decided. **Close** once
-    fixed, **accept the risk** with a justification, or mark **not applicable**
+    first (the default filter); the other filters list those overdue and those already decided.
+    **Close** once fixed, **accept the risk** with a justification, or mark **not applicable**.
+    The *Due* column says how long is left to decide — "in 12 days", "today", or a red
+    "overdue by 5 days" — and sorts; the dates are in its tooltip. An entry is due a number of
+    days after its **detection**, according to the severity its CVE has today (7 days for
+    critical, 30 for high, 90 for medium, 180 for low by default; a CVE without a score follows
+    the medium delay), or after the delay of exploited CVEs (CISA KEV, 14 days) when that is
+    shorter. Any decision stops the clock: a decided entry is never overdue. An entry reopened is
+    due at its first deadline again, and changing the version of the application moves nothing.
+    The delays are set for the instance and may be replaced by an organization (see
+    *Administration*); with all projects shown, each entry follows those of its organization
   - *Applications*: what you run and in which version (rescanned after every sync; changing the
     version closes the CVEs it fixes, and an entry still to review that no longer matches after a
     source corrected its data is set aside as not applicable). The name is the product name of
@@ -66,6 +75,11 @@ database was last synchronized (administrators can start a sync from there):
 - **Read-only REST API** under `/api` (`Authorization: Bearer <token>` created in *Settings*, or HTTP Basic):
   `/api/cve`, `/api/cve/{id}`, `/api/vendors`, `/api/vendors/{vendor}/products`, `/api/weaknesses`,
   `/api/organizations`, `/api/organizations/{org}/projects[/{project}[/reports[/{day}]]]`,
+  `/api/organizations/{org}/projects/{project}/watchlist` (the tracked CVEs of a project,
+  200 per page: `?status=untreated|accepted|treated|not_applicable`, `?overdue=1` for the entries
+  to review past their deadline, most overdue first, `?page=`; an entry to review carries `due_at`
+  (a day, UTC), `days_left` (negative once overdue) and `overdue_days`, a decided one
+  `resolved_in_days`, from its detection to the decision),
   `/api/organizations/{org}/audit` and `/api/security-log` (signed log exports, see *Administration*)
 
 Charts are SVG rendered by the server. The JavaScript shipped is a handful of small same-origin

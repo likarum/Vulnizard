@@ -24,6 +24,7 @@ pub(super) fn admin_tabs(active: &str) -> maud::Markup {
         ("/admin", "Status", active == "status"),
         ("/admin/sources", "Vulnerability sources", active == "sources"),
         ("/admin/notifications", "Notifications", active == "notifications"),
+        ("/admin/deadlines", "Deadlines", active == "deadlines"),
         ("/admin/mcp", "MCP", active == "mcp"),
         ("/admin/users", "Users", active == "users"),
         ("/admin/sso", "Single sign-on", active == "sso"),

@@ -368,6 +368,7 @@ table.fit col.num { width: 116px; }
 table.fit col.flag { width: 96px; }
 table.fit col.kind { width: 132px; }
 table.fit col.decision { width: 150px; }
+table.fit col.due { width: 124px; }
 table.fit col.name { width: 20%; }
 table.fit col.app { width: 16%; }
 table.fit col.who { width: 13%; }
@@ -413,6 +414,12 @@ table.dense col.project { width: 10%; }
   font-size: 13px; font-weight: 400; line-height: 1.4; white-space: normal; text-align: left; overflow-wrap: break-word;
 }
 .info:hover .bubble, .info:focus .bubble, .info:focus-within .bubble { display: block; }
+/* Between a phone and a small laptop, a list of all projects has no room left
+   for a text beside the project and the deadline: the page of the CVE has it */
+@media (min-width: 761px) and (max-width: 899px) {
+  table.triage:has(col.project) col.desc { visibility: collapse; }
+}
+
 /* Between the phone layout and a wide window: tighter cells, a date over its
    time, the buttons one under the other, a project name kept on one line and
    a description cut after four lines (their title attribute holds the whole
@@ -429,6 +436,7 @@ table.dense col.project { width: 10%; }
   table.fit col.flag { width: 84px; }
   table.fit col.kind { width: 120px; }
   table.fit col.decision { width: 138px; }
+  table.fit col.due { width: 88px; }
   table.fit col.name { width: 19%; }
   table.fit col.app { width: 15%; }
   table.fit col.who { width: 12%; }
@@ -467,6 +475,7 @@ dl.meta dd { margin: 0; overflow-wrap: anywhere; }
 .tag { background: var(--tag-bg); color: var(--text); }
 .tag.kev { background: var(--badge-critical); color: var(--badge-critical-ink); }
 .tag.warn { background: var(--badge-medium); color: var(--badge-medium-ink); }
+.tag.late { background: var(--badge-critical); color: var(--badge-critical-ink); }
 
 form.filters, form.row {
   display: flex;
@@ -800,6 +809,7 @@ footer.bottom a:hover { color: var(--accent); }
   table.triage td { grid-column: 1 / -1; }
   table.triage td.cve { grid-column: 1; }
   table.triage td.cvss { grid-column: 2; text-align: right; }
+  table.triage td.due:not(.late):not(:empty)::before { content: "Due "; color: var(--muted); }
   table.triage td.desc { color: var(--muted); font-size: 14px; }
   table.triage td.actions { margin-top: 4px; }
   table.list.triage td[data-label]::before { content: none; }

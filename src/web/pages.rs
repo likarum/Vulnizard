@@ -1259,6 +1259,8 @@ pub async fn org_detail(State(st): St, User(user): User, Path(org): Path<String>
                     }
                 }
 
+                (super::deadlines::org_section(&db, &org)?)
+
                 h2 { "Members" }
                 table.list.fit {
                     (views::columns("- - act", true))

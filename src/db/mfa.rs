@@ -97,6 +97,7 @@ pub const SECURITY_EVENTS: &[(&str, &str)] = &[
     ("invitation_accepted", "Invitation accepted"),
     ("invitation_declined", "Invitation declined"),
     ("invitation_cancelled", "Invitation cancelled"),
+    ("remediation_delays", "Remediation deadlines changed"),
 ];
 
 #[derive(Debug, Clone)]

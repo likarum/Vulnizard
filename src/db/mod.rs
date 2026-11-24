@@ -6,6 +6,7 @@ use std::path::Path;
 
 mod access;
 mod admin_ops;
+mod deadlines;
 mod destinations;
 mod distro;
 mod inventory;
@@ -657,6 +658,12 @@ impl Database {
             self.migrate_remove_browser_notifications()?;
         }
 
+        // Migration v28 -> v29: remediation delays an organization replaces
+        if schema_version < 29 {
+            tracing::info!("Upgrading database schema to v29 (remediation deadlines)");
+            self.migrate_deadlines()?;
+        }
+
         // Migration -> v30: a member is invited, and accepts
         if schema_version < 30 {
             tracing::info!("Upgrading database schema to v30 (invitations)");
@@ -812,6 +819,7 @@ impl Database {
         self.migrate_sync_unchanged()?;
         self.migrate_destination_settings()?;
         self.migrate_remove_browser_notifications()?;
+        self.migrate_deadlines()?;
         self.migrate_invitations()?;
 
         tracing::info!("Database initialized successfully");

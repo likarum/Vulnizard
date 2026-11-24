@@ -96,6 +96,39 @@ pub async fn project(
     })
 }
 
+#[derive(Deserialize, Default)]
+pub struct WatchlistQuery {
+    /// untreated | accepted | treated | not_applicable; all of them when absent
+    status: Option<String>,
+    /// "1" or "true": only the entries to review that are past their deadline
+    overdue: Option<String>,
+    page: Option<i64>,
+}
+
+/// Watchlist entries of a project, 200 per page, each with where it stands
+/// against its remediation deadline
+pub async fn watchlist(
+    State(st): St,
+    ApiUser(user): ApiUser,
+    Path((org, project)): Path<(String, String)>,
+    Query(q): Query<WatchlistQuery>,
+) -> ApiResult {
+    blocking(|| {
+        let db = st.db()?;
+        let (_, project) = load_project(&db, &user, &org, &project)?;
+        let status = match q.status.as_deref().filter(|s| !s.is_empty()) {
+            Some(s) => Some(crate::models::CveStatus::from_str(s).ok_or_else(|| AppError::Bad(format!("invalid status '{s}'")))?),
+            None => None,
+        };
+        let overdue = matches!(q.overdue.as_deref(), Some("1" | "true"));
+        let entries = db.list_watchlist_entries(None, Some(project.id), None, status)?;
+        let entries = crate::deadlines::entries_json(entries, &db.deadline_policies()?, overdue, None);
+        let total = entries.len();
+        let page: Vec<&Value> = entries.iter().skip(offset(q.page, 200) as usize).take(200).collect();
+        Ok(Json(json!({ "total": total, "entries": page })))
+    })
+}
+
 pub async fn reports(
     State(st): St,
     ApiUser(user): ApiUser,

@@ -29,7 +29,12 @@ Read tools: `search_cves`, `get_cve`, `list_vendors`, `list_products`, `list_wea
 (`events` for the audit log), 50 entries or 100 events by default and 500 at most; pass `offset` for
 the next page. In the list, a CVE description is cut after 200 characters (`get_cve` gives it whole).
 A `limit` outside 1 to 500 is refused. The `application` filter of `list_watchlist` matches the name
-whatever its case.
+whatever its case. An entry to review carries its remediation deadline: `due_at` (a day, UTC),
+`days_left` (negative once overdue) and `overdue_days`; a decided one carries `resolved_in_days`
+(from its detection to the decision). `overdue: true` keeps the entries to review that are past
+their deadline, most overdue first. `get_state_at` gives `due_at` and `overdue_days` (as of that
+day) for the entries that were to review then. The delays are those of the organization of each
+project (see *Administration*).
 `get_audit_log` lists every decision by default (`decision: accepted` keeps the accepted risks only); `event: detected`, `removed` or `all` adds the entries a
 scan brought in and those that left with their application. `database_status` gives the version of
 the software and of the database schema. In `list_applications`, `source` is `manual` for an
