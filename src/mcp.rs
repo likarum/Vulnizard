@@ -515,9 +515,11 @@ fn read_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "get_state_at",
-            "State of the tracked CVEs as it was at the end of a given day: each CVE with its status then, since when, decided by whom and why; one still to review then has its remediation deadline (`due_at`) and how many days past it that day was (`overdue_days`).",
+            "State of the tracked CVEs as it was at the end of a given day: each CVE with its status then, since when, decided by whom and why, one page (`entries`) with the `total` (ask for the next with `offset`); one still to review then has its remediation deadline (`due_at`) and how many days past it that day was (`overdue_days`).",
             json!({ "org": org, "project": { "type": "string", "description": "Project name; omit for every accessible project" },
-                    "date": { "type": "string", "description": "YYYY-MM-DD" } }),
+                    "date": { "type": "string", "description": "YYYY-MM-DD" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Entries returned (default 100); refused outside 1 to 500" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Entries skipped (default 0)" } }),
             &["date"],
         ),
         tool(
@@ -740,9 +742,13 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                     // Deadline of each entry, with the delays of its organization
                     let tracks: std::collections::HashMap<i64, crate::deadlines::EntryTrack> =
                         crate::deadlines::tracks(&events, &db.deadline_policies()?).into_iter().map(|t| (t.entry_id, t)).collect();
-                    let items: Vec<Value> = crate::db::state_at(&events, date)
+                    let (limit, offset) = page_of(args, 100)?;
+                    let state = crate::db::state_at(&events, date);
+                    let total = state.len();
+                    let items: Vec<Value> = state
                         .into_iter()
-                        .take(500)
+                        .skip(offset)
+                        .take(limit)
                         .map(|i| {
                             let mut item = json!({
                                 "cve_id": i.event.cve_id, "application": i.event.app_name, "version": i.event.app_version,
@@ -757,7 +763,7 @@ fn call_tool(&self, name: &str, args: &Value) -> Result<Value> {
                             item
                         })
                         .collect();
-                    json!({ "date": date.to_string(), "entries": items })
+                    json!({ "date": date.to_string(), "total": total, "offset": offset, "limit": limit, "entries": items })
                 }
                 _ => {
                     let wanted = opt_str(args, "decision").unwrap_or("all");
@@ -1398,6 +1404,13 @@ mod tests {
         let today = chrono::Utc::now().date_naive().to_string();
         let state = run(&as_user(bob, "bob"), "get_state_at", with(json!({ "date": today }))).unwrap();
         assert_eq!(state["entries"][0]["status"], "accepted");
+        // One page at a time, and the answer says how many there are in all
+        let all = run(&alice_mcp, "get_state_at", with(json!({ "date": today }))).unwrap();
+        let total = all["total"].as_u64().unwrap();
+        assert!(total >= 1 && all["entries"].as_array().unwrap().len() as u64 == total && all["limit"] == 100 && all["offset"] == 0);
+        let beyond = run(&alice_mcp, "get_state_at", with(json!({ "date": today, "offset": total, "limit": 1 }))).unwrap();
+        assert!(beyond["total"] == total && beyond["entries"].as_array().unwrap().is_empty());
+        assert!(run(&alice_mcp, "get_state_at", with(json!({ "date": today, "limit": 501 }))).is_err());
         let evolution = run(&alice_mcp, "get_evolution", with(json!({ "days": 2 }))).unwrap();
         assert_eq!((evolution.as_array().map(Vec::len), evolution[1]["accepted_total"].as_i64()), (Some(2), Some(1)));
         assert!(run(&alice_mcp, "get_state_at", with(json!({ "date": "yesterday" }))).is_err());

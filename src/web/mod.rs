@@ -1985,8 +1985,10 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(db.get_destination(ops_id).unwrap().unwrap().events, crate::db::all_events());
-        // The project's own destination shows its target to those who manage the project
-        assert!(app.get("/product/acme/infra?view=settings", Some(&admin)).await.body.contains("127.0.0.1:9/vulns"));
+        // The project's own destination shows which service it sends to, to those who manage the
+        // project; the rest of its address is a secret and stays out of the page
+        let settings = app.get("/product/acme/infra?view=settings", Some(&admin)).await.body;
+        assert!(settings.contains("http://127.0.0.1/…") && !settings.contains("127.0.0.1:9/vulns"), "{settings}");
 
         // A test send reports the failure (nothing listens on that port) instead of crashing
         let action = format!("/admin/notifications/{phone}");
@@ -2047,6 +2049,13 @@ mod tests {
         assert!(row_everyone.contains("<td>all projects</td><td>every event<div class=\"muted\">and instance events (sync finished)</div></td>"), "{row_everyone}");
         assert!(row(&page, "Team").contains("<td>projects of organization acme</td><td>every event</td>"));
         assert!(row(&page, "Solo").contains("<td>project acme / infra</td><td>every event</td>"));
+        // The address of a topic or of a webhook is a secret: the pages name the service, not the rest
+        assert!(page.contains("<td>https://8.8.8.8/…</td>"), "{}", row_everyone);
+        for secret in ["8.8.8.8/everyone", "8.8.8.8/team", "8.8.8.8/solo"] {
+            assert!(!page.contains(secret), "{secret}");
+            assert!(!app.get(&format!("/admin/notifications/destinations/{everyone}"), Some(&admin)).await.body.contains(secret));
+            assert!(!app.get("/product/acme/infra?view=settings", Some(&admin)).await.body.contains(secret));
+        }
         // What the former model said is no longer true, and no longer said
         for gone in ["no project yet", "until a project picks it", "Offered to", "Used by", "It sends nothing"] {
             assert!(!page.contains(gone), "{gone}");

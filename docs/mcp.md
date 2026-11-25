@@ -51,7 +51,7 @@ A `limit` outside 1 to 500 is refused. The `application` filter of `list_watchli
 whatever its case. An entry to review carries its remediation deadline: `due_at` (a day, UTC),
 `days_left` (negative once overdue) and `overdue_days`; a decided one carries `resolved_in_days`
 (from its detection to the decision). `overdue: true` keeps the entries to review that are past
-their deadline, most overdue first. `get_state_at` gives `due_at` and `overdue_days` (as of that
+their deadline, most overdue first. `get_state_at` answers one page with the `total`, like `list_watchlist`, and gives `due_at` and `overdue_days` (as of that
 day) for the entries that were to review then. The delays are those of the organization of each
 project (see *Administration*).
 `get_audit_log` lists every decision by default (`decision: accepted` keeps the accepted risks only); `event: detected`, `removed` or `all` adds the entries a
