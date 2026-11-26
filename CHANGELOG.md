@@ -3,6 +3,13 @@
 All notable changes to Vulnizard. Versions follow [semantic versioning](https://semver.org);
 before 1.0, a minor version may change behaviour.
 
+## Unreleased
+
+### Fixed
+
+- An OSV advisory was dropped whole when one of its entries named no package and only gave
+  commit ranges, as the OSV format allows (#107). Its other packages are read again.
+
 ## 0.3.1
 
 ### Fixed

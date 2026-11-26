@@ -224,9 +224,10 @@ fn statements_of(advisory: &OsvVulnerability, ecosystem: &str) -> Vec<OsvStateme
     let cves: Vec<&String> = advisory.aliases.iter().filter(|a| a.starts_with("CVE-")).collect();
     let mut statements: Vec<OsvStatement> = Vec::new();
     for affected in &advisory.affected {
+        let Some(package) = &affected.package else { continue };
         // An advisory may also name packages of other ecosystems: they are
         // read with their own ecosystem, where the advisory is listed too
-        let other = &affected.package.ecosystem;
+        let other = &package.ecosystem;
         if !(other.is_empty() || other == ecosystem || other.strip_prefix(ecosystem).is_some_and(|rest| rest.starts_with(':'))) {
             continue;
         }
@@ -234,7 +235,7 @@ fn statements_of(advisory: &OsvVulnerability, ecosystem: &str) -> Vec<OsvStateme
         let fixed = affected.ranges.iter().filter(|r| !r.kind.eq_ignore_ascii_case("GIT")).flat_map(|r| &r.events).find_map(|e| e.fixed.clone());
         for cve in &cves {
             // Several entries of one advisory may name the same package: their ranges add up
-            match statements.iter_mut().find(|s| &s.cve_id == *cve && s.name == affected.package.name) {
+            match statements.iter_mut().find(|s| &s.cve_id == *cve && s.name == package.name) {
                 Some(known) => {
                     known.vulnerable_range = add_ranges(known.vulnerable_range.take(), range.clone());
                     if known.fixed_version.is_none() {
@@ -243,7 +244,7 @@ fn statements_of(advisory: &OsvVulnerability, ecosystem: &str) -> Vec<OsvStateme
                 }
                 None => statements.push(OsvStatement {
                     cve_id: (*cve).clone(),
-                    name: affected.package.name.clone(),
+                    name: package.name.clone(),
                     vulnerable_range: range.clone(),
                     fixed_version: fixed.clone(),
                 }),
@@ -311,7 +312,9 @@ struct OsvVulnerability {
 
 #[derive(Debug, Deserialize)]
 struct OsvAffected {
-    package: OsvPackage,
+    /// Absent from an entry that only gives commit ranges of a repository
+    #[serde(default)]
+    package: Option<OsvPackage>,
     #[serde(default)]
     ranges: Vec<OsvRange>,
 }
@@ -614,6 +617,19 @@ mod tests {
         // An advisory that is not about a CVE says nothing
         let malware: OsvVulnerability = serde_json::from_str(r#"{"id": "MAL-1", "affected": [{"package": {"name": "evil", "ecosystem": "npm"}}]}"#).unwrap();
         assert!(statements_of(&malware, "npm").is_empty());
+
+        // An entry without a package (commit ranges only) does not sink the others
+        let mixed: OsvVulnerability = serde_json::from_str(
+            r#"{"id": "EEF-x", "aliases": ["CVE-2024-2"],
+                "affected": [
+                  {"package": {"name": "phoenix", "ecosystem": "npm"}, "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.7"}]}]},
+                  {"package": null, "ranges": [{"type": "GIT", "repo": "https://example.org/phoenix", "events": [{"introduced": "0"}, {"fixed": "abc"}]}]},
+                  {"ranges": [{"type": "GIT", "events": [{"introduced": "0"}]}]}
+                ]}"#,
+        )
+        .unwrap();
+        let npm = statements_of(&mixed, "npm");
+        assert_eq!((npm.len(), npm[0].fixed_version.as_deref()), (1, Some("1.7")));
     }
 
     #[test]
