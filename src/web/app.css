@@ -750,8 +750,30 @@ footer.bottom a:hover { color: var(--accent); }
   h1 { font-size: 21px; margin: 4px 0 12px; }
   h2 { font-size: 17px; margin: 22px 0 8px; }
 
-  header.top .bar { padding: 8px 12px; gap: 6px 12px; }
-  header.top .user { margin-left: 0; width: 100%; justify-content: flex-end; }
+  /* The bar holds on two short lines rather than four: the brand and the
+     account controls on the first, the state of the database under them.
+     Nothing moves behind a menu: every control stays visible without a script. */
+  header.top .bar { padding: 6px 10px; gap: 4px 8px; }
+  header.top .brand { font-size: 15px; gap: 6px; }
+  header.top .brand img { width: 19px; height: 19px; }
+  header.top .user { margin-left: auto; width: auto; gap: 2px; justify-content: flex-end; }
+  header.top .user a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 3px 6px;
+    font-size: 13px;
+  }
+  header.top .user a.invited { font-size: 12px; padding: 2px 6px; }
+  header.top .user form.inline button.link { font-size: 13px; padding: 3px 4px; min-height: 30px; }
+  .theme { gap: 4px; }
+  .theme select, .theme button { font-size: 12px; padding: 2px 5px; min-height: 30px; }
+  /* The name of the theme is cut rather than pushing the rest to a second line */
+  .theme select { max-width: 86px; }
+  /* Under the brand and the account, on a line of its own */
+  .sync { order: 3; width: 100%; font-size: 12px; gap: 6px; }
+  .sync button.small { min-height: 26px; padding: 1px 7px; font-size: 12px; }
+
   header.top .zones { flex-direction: column; flex-wrap: nowrap; }
   .zone, .zone.product {
     flex: none;
@@ -759,12 +781,31 @@ footer.bottom a:hover { color: var(--accent); }
     min-width: 0;
     max-width: 100%;
     overflow-x: auto;
-    padding: 6px 12px 8px;
+    padding: 4px 12px 7px;
     scrollbar-width: none;
   }
   .zone::-webkit-scrollbar { display: none; }
   .zone.info { border-left: none; border-top: 1px solid var(--border); }
   .zone-label { flex: none; }
+  /* A row of tabs wider than the screen scrolls sideways, which nothing used
+     to say: a shadow appears on the side where entries are hidden, and only
+     there (the two covering layers scroll with the content, the two shadows
+     stay on the box). Bigger targets too: a tab is tapped, not pointed at. */
+  .zone a { padding: 7px 9px; }
+  .zone.product { --zone-bg: var(--surface); }
+  .zone.info { --zone-bg: var(--info-bg); }
+  .zone.product, .zone.info {
+    background-image:
+      linear-gradient(to right, var(--zone-bg), transparent),
+      linear-gradient(to left, var(--zone-bg), transparent),
+      linear-gradient(to right, var(--border), transparent),
+      linear-gradient(to left, var(--border), transparent);
+    background-color: var(--zone-bg);
+    background-repeat: no-repeat;
+    background-size: 20px 100%;
+    background-position: left center, right center, left center, right center;
+    background-attachment: local, local, scroll, scroll;
+  }
   details.menu { flex: none; }
   /* Two menus side by side: a long name is cut so that the second one stays in sight */
   details.menu summary { min-width: 0; max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -836,6 +877,19 @@ footer.bottom a:hover { color: var(--accent); }
 
   form.filters, form.row { flex-direction: column; align-items: stretch; gap: 8px; }
   form.filters > *, form.row > * { width: 100%; }
+  /* A search form of six fields, each on its own line, filled the screen
+     before the first result: two to a line, with the keyword and the button
+     across both. The page starts showing answers, not boxes. */
+  form.filters {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: center;
+    gap: 8px;
+  }
+  form.filters > * { width: auto; min-width: 0; }
+  form.filters > input[type="search"],
+  form.filters > textarea,
+  form.filters > button[type="submit"] { grid-column: 1 / -1; }
   .toolbar { flex-direction: column; align-items: stretch; }
   .toolbar > * { width: 100%; }
   form.filters label, form.row label { display: flex; align-items: center; gap: 8px; }
